@@ -12,7 +12,7 @@ import threading
 import zipfile
 import zlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
@@ -549,6 +549,22 @@ def _load_runs(tool: str) -> list[dict]:
     return []
 
 
+_stamp_lock = threading.Lock()
+_last_stamp: datetime | None = None
+
+
+def _new_stamp() -> str:
+    """A run's id: the time, but never equal to or before the previous run's. Windows' clock can tick as slowly as ~16 ms,
+    so two quick runs could share a stamp, and the second would then overwrite the first in the undo history."""
+    global _last_stamp
+    with _stamp_lock:
+        now = datetime.now()
+        if _last_stamp is not None and now <= _last_stamp:
+            now = _last_stamp + timedelta(microseconds=1)
+        _last_stamp = now
+    return now.isoformat(timespec="microseconds")
+
+
 def undo_depth(tool: str) -> int:
     """How many runs of this tool can still be undone."""
     return len(_load_runs(tool))
@@ -643,7 +659,7 @@ def apply_findings(tool: str, findings: list[Finding], log: Callable[[str], None
     items: list[dict] = []
     applied: list[Finding] = []
     failures: list[tuple[str, str]] = []
-    made = datetime.now().isoformat(timespec="microseconds")
+    made = _new_stamp()
     ok = 0
     for n, finding in enumerate(findings, 1):
         if stop.is_set():

@@ -165,6 +165,16 @@ class HistoryAndReportTests(Base):
         self.assertIsNone(undo_last("tidy"))
         self.assertFalse(organize.undo_file("tidy").exists())
 
+    def test_two_runs_in_the_same_clock_tick_are_both_kept(self):
+        """Windows' clock can return the same time twice; a repeated run id used to overwrite the earlier run."""
+        from datetime import datetime
+        frozen = datetime(2026, 1, 1, 12, 0, 0, 123456)
+        with mock.patch.object(organize, "datetime") as fake:
+            fake.now.return_value = frozen
+            stamps = [organize._new_stamp() for _ in range(3)]
+        self.assertEqual(len(set(stamps)), 3)
+        self.assertEqual(stamps, sorted(stamps))
+
     def test_the_old_single_run_undo_file_still_works(self):
         src = self.make("new.iso")
         organize.undo_file("tidy").write_text(
