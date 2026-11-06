@@ -969,6 +969,9 @@ class EmulatorInstaller(rc.Installer):
 
     def check_asset(self, em, asset: dict) -> None:
         self._guard(em)  # before anything is downloaded
+        cur = self.store.installed(em.id)
+        if cur and Path(cur.folder).is_dir() and not rc.writable(Path(cur.folder)):
+            raise rc.RecompError(rc.not_writable_message(em.name, cur.folder))  # e.g. ScummVM in Program Files: say so before a download
         if em.parent and not (em.author_known or em.risk_accepted):
             raise rc.RecompError(f"{em.name} is by an author Distill doesn't know and you haven't confirmed. Nothing was downloaded.")
         u = urllib.parse.urlparse(asset.get("url", ""))

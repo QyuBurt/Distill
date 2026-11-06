@@ -85,9 +85,9 @@ class UpdatePromptMixin:
                 else:
                     fail(str(result))
                 return
-            screen.set_installing()  # the logo is full colour while the helper waits for Distill to exit
+            screen.set_installing()  # the logo stays where the download left it; the install window carries on from there
             try:
-                updater.apply(result, update.tag)
+                ready = updater.apply(result, update.tag, screen.handoff_spec())
             except Exception as exc:
                 fail(str(exc))
                 return
@@ -98,7 +98,20 @@ class UpdatePromptMixin:
                 QApplication.quit()
                 QTimer.singleShot(1500, lambda: _hard_exit(0))  # a normal exit can hang in libtorrent's shutdown, and the swap waits for it
 
-            QTimer.singleShot(900, leave)  # long enough to see the logo fill up before the window goes
+            def wait_for_window(waited: int = 0) -> None:
+                # Quit once the install window is on screen (so the two overlap and there is no gap), but never wait long for it.
+                if ready is None:
+                    if waited == 0:
+                        screen.set_install_progress(1.0)  # no install window: fill the rest here, then go
+                    done = waited >= 900
+                else:
+                    done = (ready.exists() and waited >= 300) or waited >= 6000
+                if done:
+                    leave()
+                else:
+                    QTimer.singleShot(100, lambda: wait_for_window(waited + 100))
+
+            wait_for_window()
 
         self._upd.progress.connect(screen.set_progress)
         self._upd.downloaded.connect(on_done)
@@ -106,7 +119,7 @@ class UpdatePromptMixin:
         screen.show()
 
     def _update_preview(self) -> None:
-        """The update screen with a made-up download, for looking at it (and trying Cancel) without a real release."""
+        """The update screen with a made-up download and install, for looking at it (and trying Cancel) without a release."""
         screen = UpdateScreen(self, f"{APP_NAME} v9.9")
         total, steps = 48 << 20, 150
         state = {"n": 0}
@@ -114,11 +127,15 @@ class UpdatePromptMixin:
 
         def tick() -> None:
             state["n"] += 1
-            screen.set_progress(total * state["n"] // steps, total)
-            if state["n"] >= steps:
-                ticker.stop()
-                screen.set_installing()
-                QTimer.singleShot(1800, screen.dismiss)
+            if state["n"] <= steps:
+                screen.set_progress(total * state["n"] // steps, total)
+                if state["n"] == steps:
+                    screen.set_installing()
+            else:  # the install, as the second part of the fill (the real one is a separate window; see update_splash.py)
+                screen.set_install_progress((state["n"] - steps) / 40)
+                if state["n"] >= steps + 40:
+                    ticker.stop()
+                    QTimer.singleShot(1200, screen.dismiss)
 
         screen.cancelled.connect(ticker.stop)
         ticker.timeout.connect(tick)

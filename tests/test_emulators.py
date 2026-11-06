@@ -437,6 +437,49 @@ class InstallTests(Isolated):
         self.assertEqual((exe.parent / "memcards" / "Mcd001.ps2").read_bytes(), b"save")
         self.assertEqual((inst.version, inst.linked), ("v2", "folder"))  # still linked: Distill still won't delete it
 
+    def test_a_protected_folder_is_explained_before_downloading(self):
+        exe = self.touch("ScummVM/scummvm.exe", b"old")
+        self.store.set_installed(rc.Installed("pcsx2", "v1", str(exe.parent), "scummvm.exe", 0.0, "folder"))
+        with mock.patch.object(rc, "writable", return_value=False), \
+             mock.patch.object(rc.urllib.request, "urlopen", side_effect=AssertionError("must not download")):
+            with self.assertRaises(rc.RecompError) as cm:
+                em.EmulatorInstaller(self.store).install(emu(), rel("v2", asset("a.zip")), asset("a.zip"))
+        self.assertIn("administrator", str(cm.exception))
+        self.assertIn(str(exe.parent), str(cm.exception))
+        self.assertEqual(exe.read_bytes(), b"old")
+
+    def test_a_refused_file_is_reported_plainly_and_the_old_one_survives(self):
+        src, dest = self.tmp / "stage", self.tmp / "live"
+        (src).mkdir()
+        (dest).mkdir()
+        (src / "AUTHORS.txt").write_bytes(b"new")
+        (dest / "AUTHORS.txt").write_bytes(b"old")
+        with mock.patch.object(rc.os, "replace", side_effect=PermissionError(13, "Access is denied")):
+            with self.assertRaises(rc.RecompError) as cm:
+                rc._merge_tree(src, dest)
+        self.assertIn("AUTHORS.txt", str(cm.exception))
+        self.assertIn("Program Files", str(cm.exception))
+        self.assertEqual((dest / "AUTHORS.txt").read_bytes(), b"old")  # never deleted first
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["AUTHORS.txt"])  # and no half-copied leftovers
+
+    def test_merging_replaces_files_and_leaves_no_temporary_copies(self):
+        src, dest = self.tmp / "stage", self.tmp / "live"
+        (src / "data").mkdir(parents=True)
+        (dest / "data").mkdir(parents=True)
+        (src / "a.txt").write_bytes(b"new")
+        (src / "data" / "b.txt").write_bytes(b"new")
+        (dest / "a.txt").write_bytes(b"old")
+        (dest / "save.dat").write_bytes(b"mine")
+        rc._merge_tree(src, dest)
+        self.assertEqual((dest / "a.txt").read_bytes(), b"new")
+        self.assertEqual((dest / "data" / "b.txt").read_bytes(), b"new")
+        self.assertEqual((dest / "save.dat").read_bytes(), b"mine")
+        self.assertEqual([p.name for p in dest.rglob("*") if p.name.endswith(".distill-new")], [])
+
+    def test_writable_is_true_for_a_normal_folder_and_false_for_a_missing_one(self):
+        self.assertTrue(rc.writable(self.tmp))
+        self.assertFalse(rc.writable(self.tmp / "nope"))
+
     def test_a_shared_folder_is_refused_before_downloading(self):
         exe = self.touch("xemu.exe")
         self.store.set_installed(rc.Installed("pcsx2", "", str(exe.parent), "xemu.exe", 0.0, "file"))

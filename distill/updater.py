@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import update_splash
 from .constants import APP_DIR, APP_NAME, APP_VERSION
 from .github_auth import github_headers
 
@@ -112,11 +114,12 @@ def download(update: Update, progress=None) -> Path:
     return dest
 
 
-def _script(kind: str, payload: Path, tag: str = "") -> str:
-    """The helper batch file, run in a small console window so the person can see something is happening. It waits until the
-    running exe can be written to (so it works for the single-file build, whose launcher outlives the program by a moment),
-    swaps the files, then starts Distill again. `timeout` is avoided: it fails when there is no input, which turned every wait
-    into no wait at all."""
+def _script(kind: str, payload: Path, tag: str = "", splash: Path | None = None) -> str:
+    """The helper batch file. With `splash` (the staged spec file, see _stage_splash) it first runs the install window in
+    update_splash.py, which does the whole swap itself and exits 0; if that fails in any way the plain path below takes over,
+    so the install never depends on PowerShell behaving. The plain path waits until the running exe can be written to (so it
+    works for the single-file build, whose launcher outlives the program by a moment), swaps the files, then starts Distill
+    again. `timeout` is avoided: it fails when there is no input, which turned every wait into no wait at all."""
     exe = Path(sys.executable).resolve()
     if kind == "portable":  # tar ships with Windows 10+ and is far faster than Expand-Archive; PowerShell stays as the fallback
         swap = (f"tar -xf \"{payload}\" -C \"{APP_DIR}\" >>\"%LOG%\" 2>&1 || powershell -NoProfile -Command "
@@ -124,11 +127,17 @@ def _script(kind: str, payload: Path, tag: str = "") -> str:
     else:
         swap = f"move /y \"{payload}\" \"{exe}\" >>\"%LOG%\" 2>&1\n"
     name = f"Distill {tag}" if tag else "Distill"
+    window = ""
+    if splash is not None:
+        window = (f"powershell -NoProfile -ExecutionPolicy Bypass -File \"{splash.with_suffix('.ps1')}\" -Spec \"{splash}\" >>\"%LOG%\" 2>&1\n"
+                  "if not errorlevel 1 goto restart\n"
+                  "echo %date% %time% install window failed, installing without it >> \"%LOG%\"\n")
     return (
         "@echo off\nsetlocal\ntitle Updating Distill\n"
         "set \"LOG=%TEMP%\\distill-update.log\"\n"
         "echo %date% %time% waiting for Distill to exit > \"%LOG%\"\n"
         f"echo Updating to {name}. Please wait: Distill reopens by itself when this is done.\n"
+        + window +
         "set n=0\n"
         ":wait\n"
         f"(>>\"{exe}\" (call;)) 2>nul && goto swap\n"
@@ -148,14 +157,47 @@ def _script(kind: str, payload: Path, tag: str = "") -> str:
     ).replace("\n", "\r\n")
 
 
-def apply(payload: Path, tag: str = "") -> None:
-    """Start the helper that swaps the files once Distill has exited. The caller must quit the app right after."""
+def _stage_splash(spec: dict, payload: Path, kind: str) -> tuple[Path, Path] | None:
+    """Put everything the install window needs next to the download (the bundled folder disappears with a single-file build
+    once it quits): the logo and fonts, the script and its spec. Returns (spec file, 'window is up' marker file), or None
+    if anything is missing, in which case the update just installs without the window."""
+    try:
+        dest = payload.parent
+        out = dict(spec)
+        for key, name in (("logo", "update-logo.png"), ("display_font", "update-display.ttf"), ("text_font", "update-text.ttf")):
+            src = Path(str(spec.get(key) or ""))
+            if src.is_file():
+                shutil.copyfile(src, dest / name)
+                out[key] = str(dest / name)
+            else:
+                out[key] = ""
+        if not out["logo"]:
+            return None
+        ready = dest / "splash-ready.txt"
+        ready.unlink(missing_ok=True)
+        out.update(kind=kind, payload=str(payload), app_dir=str(APP_DIR), exe=str(Path(sys.executable).resolve()), ready=str(ready))
+        (dest / "apply_update.ps1").write_text(update_splash.SCRIPT, encoding="ascii")
+        spec_path = dest / "apply_update.json"
+        spec_path.write_text(json.dumps(out), encoding="utf-8")
+        return spec_path, ready
+    except Exception:
+        return None
+
+
+def apply(payload: Path, tag: str = "", splash: dict | None = None) -> Path | None:
+    """Start the helper that swaps the files once Distill has exited. The caller must quit the app right after.
+    `splash` describes where and how the app's own update screen was drawn (see UpdateScreen.handoff_spec) so the install
+    window can carry on from it. Returns the marker file that appears once that window is on screen (the app waits for it
+    before quitting, so there is no gap), or None when there is no install window."""
     kind = install_kind()
     if kind == "source":
         raise RuntimeError("Self-update works in the packaged Windows builds only.")
+    staged = _stage_splash(splash, payload, kind) if splash else None
+    spec_path, ready = staged if staged else (None, None)
     script = payload.parent / "apply_update.bat"
-    script.write_text(_script(kind, payload, tag), encoding="utf-8")
+    script.write_text(_script(kind, payload, tag, spec_path), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"  # the new single-file exe must unpack itself, not reuse this one's temp folder
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0), close_fds=True,
-                     cwd=str(payload.parent), env=env)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if spec_path else getattr(subprocess, "CREATE_NEW_CONSOLE", 0)  # the window replaces the console
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True, cwd=str(payload.parent), env=env)
+    return ready

@@ -1032,18 +1032,56 @@ def _looks_executable(p: Path) -> bool:
     return magic == b"\x7fELF" or magic[:2] == b"#!"
 
 
+def writable(folder: Path) -> bool:
+    """Can this program add files to the folder? (Windows keeps folders like Program Files closed to normal programs, and
+    asking the permission bits is not reliable there, so this simply tries.)"""
+    try:
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".distill-write-test-"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def not_writable_message(name: str, folder: Path | str) -> str:
+    return (f"Distill isn't allowed to change files in {folder}, so it can't update {name} there. Windows protects folders such as "
+            f"Program Files. Either close Distill, start it again with right-click > Run as administrator and update again, or "
+            f"reinstall {name} into a folder of your own and link it again.")
+
+
+def _replace_file(item: Path, target: Path) -> None:
+    """Move `item` to `target`, replacing what is there. The new file is put beside the old one first and swapped in with one
+    rename, so a failure part-way can never leave the player without the file, and a refusal from the system (a protected
+    folder, a file in use) is reported in plain words instead of as a raw error."""
+    side = target.with_name(target.name + ".distill-new")
+    try:
+        shutil.move(str(item), str(side))
+        os.replace(side, target)
+    except OSError as exc:
+        try:
+            side.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if isinstance(exc, PermissionError):
+            hint = " It may be in use (close it and try again), or in a protected folder such as Program Files (run Distill as administrator)."
+        else:
+            hint = ""
+        raise RecompError(f"Couldn't replace {target}: {exc.strerror or exc}.{hint}") from exc
+
+
 def _merge_tree(src: Path, dest: Path) -> None:
     """Copy src over dest: new files replace old ones of the same name; anything else already there (saves, settings,
     the player's own mods) is left alone. Updating therefore never costs the player their data."""
-    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RecompError(f"Couldn't create {dest}: {exc.strerror or exc}.") from exc
     for item in src.iterdir():
         target = dest / item.name
         if item.is_dir() and not item.is_symlink():
             _merge_tree(item, target)
         else:
-            if target.exists() or target.is_symlink():
-                target.unlink()
-            shutil.move(str(item), str(target))
+            _replace_file(item, target)
 
 
 class Installer:

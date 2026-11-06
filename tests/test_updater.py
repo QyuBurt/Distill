@@ -69,6 +69,46 @@ class ScriptTests(unittest.TestCase):
             self.assertLess(text.index(":wait"), text.index(":swap"))
             self.assertLess(text.index(":swap"), text.index(":restart"))
             self.assertIn("start \"\"", text)
+            self.assertNotIn("ExecutionPolicy", text)  # no install window unless one was staged
+
+    def test_install_window_runs_first_and_the_plain_swap_is_still_the_fallback(self):
+        from pathlib import Path
+        for kind, marker in (("portable", "tar -xf"), ("onefile", "move /y")):
+            text = updater._script(kind, Path("C:/tmp/payload"), "v9.9", Path("C:/tmp/apply_update.json"))
+            window = text.index("powershell -NoProfile -ExecutionPolicy Bypass -File")
+            self.assertIn("apply_update.ps1", text)
+            self.assertIn("-Spec", text)
+            self.assertLess(window, text.index(":wait"))  # the window goes first ...
+            self.assertLess(text.index("if not errorlevel 1 goto restart"), text.index(":wait"))  # ... and success skips the plain swap
+            self.assertLess(text.index(":wait"), text.index(":swap"))  # ... which stays as the fallback
+            self.assertIn(marker, text)
+            self.assertLess(text.index(":swap"), text.index(":restart"))
+
+    def test_staging_copies_what_the_window_needs_and_writes_its_spec(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "icon.png").write_bytes(b"png")
+            (tmp / "payload.zip").write_bytes(b"zip")
+            spec = {"logo": str(tmp / "icon.png"), "display_font": str(tmp / "missing.ttf"), "text_font": "", "start": 0.7}
+            spec_path, ready = updater._stage_splash(spec, tmp / "payload.zip", "portable")
+            data = json.loads(spec_path.read_text(encoding="utf-8"))
+            self.assertEqual((data["kind"], data["start"], data["ready"]), ("portable", 0.7, str(ready)))
+            self.assertTrue(Path(data["logo"]).is_file())
+            self.assertEqual((data["display_font"], data["text_font"]), ("", ""))  # absent fonts fall back to Segoe UI in the script
+            self.assertTrue(spec_path.with_suffix(".ps1").is_file())
+            self.assertFalse(ready.exists())  # the script creates it once its window is up
+            self.assertIsNone(updater._stage_splash({"logo": str(tmp / "nope.png")}, tmp / "payload.zip", "portable"))
+
+    def test_install_window_script_is_ascii_and_falls_back_with_exit_1(self):
+        from distill import update_splash
+        self.assertTrue(update_splash.SCRIPT.isascii())  # PowerShell 5.1 reads a script without a BOM as ANSI
+        self.assertIn("exit 1", update_splash.SCRIPT)
+        self.assertIn("exit 0", update_splash.SCRIPT)
+        self.assertEqual(update_splash.SCRIPT.count("{"), update_splash.SCRIPT.count("}"))
+        self.assertEqual(update_splash.SCRIPT.count("("), update_splash.SCRIPT.count(")"))
 
 
 class FillMathTests(unittest.TestCase):

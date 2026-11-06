@@ -1481,12 +1481,15 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.addCleanup(screen.deleteLater)
         asked = []
         screen.cancelled.connect(lambda: asked.append(1))
-        screen.set_progress(12 << 20, 48 << 20)
-        self.assertEqual(screen.percent.text(), "25%")
+        screen.set_progress(12 << 20, 48 << 20)  # a quarter of the download is 70% of that: 17% of the logo
+        self.assertEqual(screen.percent.text(), "17%")
         self.assertIn("12.0 of 48.0 MB", screen.status.text())
-        screen.set_installing()
-        self.assertEqual((screen.percent.text(), screen.logo.fraction(), screen.cancel.isEnabled()), ("100%", 1.0, False))
+        screen.set_progress(48 << 20, 48 << 20)
+        screen.set_installing()  # the download is its share of the fill; the install window does the rest
+        self.assertEqual((screen.percent.text(), screen.cancel.isHidden()), ("70%", True))
         screen.set_progress(1, 48 << 20)  # a late chunk must not drag the screen back
+        self.assertEqual(screen.percent.text(), "70%")
+        screen.set_install_progress(1.0)
         self.assertEqual(screen.percent.text(), "100%")
         screen.reject()
         self.assertEqual(asked, [])  # too late to cancel
@@ -1538,6 +1541,29 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         below = img.pixelColor(int(40 * scale), int(190 * scale))  # and well below it
         self.assertEqual((above.red(), above.green()), (above.green(), above.blue()))  # grey
         self.assertNotEqual((below.red(), below.green()), (below.green(), below.blue()))  # colour
+
+
+    def test_update_screen_describes_itself_for_the_install_window(self):
+        from pathlib import Path
+
+        from distill.ui.update_screen import UpdateScreen
+
+        screen = UpdateScreen(None, "Distill v9.9")
+        self.addCleanup(screen.deleteLater)
+        screen.show()
+        screen.set_progress(48 << 20, 48 << 20)
+        screen.set_installing()
+        spec = screen.handoff_spec()
+        self.assertAlmostEqual(spec["start"], 0.7)
+        self.assertGreater(spec["w"], 300)
+        self.assertGreater(spec["h"], 300)
+        for key in ("logo_rect", "pct_rect", "status_rect"):
+            self.assertTrue(all(spec[key][k] >= 0 for k in "xywh"), key)
+        self.assertGreater(spec["logo_rect"]["w"], 200)
+        self.assertGreater(spec["pct_px"], spec["status_px"])
+        self.assertTrue(Path(spec["logo"]).is_file())
+        self.assertTrue(spec["bg"].startswith("#"))
+        self.assertIn("Installing", spec["status_text"])
 
 
 if __name__ == "__main__":
