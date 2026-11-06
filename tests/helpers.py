@@ -42,6 +42,10 @@ class IsolatedSoundtrackFiles(unittest.TestCase):
             patcher = mock.patch.object(persist, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        from distill import updater  # no network check at window start-up
+        patcher = mock.patch.object(updater, "CHECK_ENABLED", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class TempDirTest(unittest.TestCase):

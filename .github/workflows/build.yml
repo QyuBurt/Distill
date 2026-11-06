@@ -125,6 +125,26 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements*.txt
+      - name: Stamp the version from the release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, re
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not re.fullmatch(r"v\d+(\.\d+)*", tag):
+              raise SystemExit(f"Tag {tag} must look like v1.2 or v1.2.3")
+          for path, pattern, new in (
+              ("distill/constants.py", r'APP_VERSION = "[^"]*"', f'APP_VERSION = "{tag}"'),
+              ("pyproject.toml", r'(?m)^version = "[^"]*"', f'version = "{tag[1:]}"'),
+          ):
+              text = open(path, encoding="utf-8", newline="").read()
+              text, n = re.subn(pattern, new, text, count=1)
+              if n != 1:
+                  raise SystemExit(f"Could not stamp {path}")
+              open(path, "w", encoding="utf-8", newline="").write(text)
+          print("Version set to", tag)
+          PY
       - run: python -m pip install -r requirements-dev.txt
       - name: Everything the program bundles is installed
         run: python -c "import PySide6, py7zr, libtorrent, mutagen; print('PySide6', PySide6.__version__, '| libtorrent', libtorrent.__version__)"
@@ -170,15 +190,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: The tag matches the version in the code
-        run: |
-          python3 - <<'PY'
-          import os, re
-          version = re.search(r'APP_VERSION = "([^"]+)"', open("distill/constants.py").read()).group(1)
-          tag = os.environ["GITHUB_REF_NAME"]
-          if tag != version and not tag.startswith(version + "."):
-              raise SystemExit(f"Tag {tag} does not match APP_VERSION {version} in distill/constants.py")
-          PY
       - uses: actions/download-artifact@v7
         with:
           pattern: Distill-*

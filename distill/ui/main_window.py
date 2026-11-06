@@ -25,6 +25,7 @@ from ..downloads import DownloadRunner, load_logins, LOGINS
 from ..netrules import load_rules
 from ..ytdlp import load_settings as load_ytdlp_settings
 from ..orgpages import ORG_PAGES
+from .update_prompt import UpdatePromptMixin
 from ..torbox import torbox_key
 from .. import debrid
 from ..system import resolve_tool_path
@@ -80,7 +81,7 @@ BUSY_LABELS = {
 }
 
 
-class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, RecompMixin, EmulatorMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin,
+class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, RecompMixin, EmulatorMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin, UpdatePromptMixin,
                      QMainWindow):
     MODES = ("chd", "rvz", "cso", "pkg", "pkg5", "zar", "ps3", "xbox")  # pkg5: the PS5 page, which runs the "pkg" engine mode
     SIDEBAR_WIDTH = 268
@@ -178,6 +179,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._first_run = not persist.SETTINGS_FILE.exists() and not any(APP_DIR.glob("distill_*.json"))
         self._settings_restore()
         QTimer.singleShot(600, self._maybe_whats_new)
+        QTimer.singleShot(2500, self._update_check_start)  # asks GitHub in the background; prompts only if a newer release exists
         self.start_btn.setEnabled(False)  # enabled once the tool checks have finished
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._poll_events)
