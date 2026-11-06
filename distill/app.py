@@ -23,6 +23,7 @@ from .ui.main_window import DistillWindow
 from .ui.theme import T
 
 SELF_TEST_FLAG = "--self-test"
+_keep_alive: list = []  # the self-test's app and window: freeing them on return is what crashes (0xC0000005) after a pass
 
 
 def _tell_about_crash(saved, error: BaseException) -> None:
@@ -72,6 +73,7 @@ def self_test(report_path: Path | None) -> int:
             window = DistillWindow()
         finally:
             threading.Thread.start = real_start
+        _keep_alive.extend((app, window))
         report.note(window.stack.count() > 5, f"window built with {window.stack.count()} pages")
     except BaseException:  # a crash is a failed test; keep the details
         report.note(False, "unexpected error:\n" + traceback.format_exc())
@@ -79,7 +81,7 @@ def self_test(report_path: Path | None) -> int:
         with contextlib.suppress(OSError):
             report_path.write_text(report.text(), encoding="utf-8")
     elif sys.stdout is not None:  # a windowed .exe has none
-        print(report.text())
+        print(report.text(), flush=True)
     return report.exit_code()
 
 
@@ -88,7 +90,7 @@ def main() -> int:
         after = sys.argv[sys.argv.index(SELF_TEST_FLAG) + 1:]
         code = self_test(Path(after[0]) if after else None)
         if getattr(sys, "frozen", False):
-            os._exit(code)  # no event loop to unwind; don't let Qt's teardown turn a pass into a crash
+            os._exit(code)  # (window and app are kept alive in _keep_alive, so nothing is torn down before this) no event loop to unwind; don't let Qt's teardown turn a pass into a crash
         return code
     crashlog.install(_tell_about_crash)
     if sys.platform == "win32":
