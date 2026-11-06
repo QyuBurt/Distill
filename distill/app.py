@@ -85,12 +85,26 @@ def self_test(report_path: Path | None) -> int:
     return report.exit_code()
 
 
+def _hard_exit(code: int) -> None:
+    """End the process at once. os._exit still runs ExitProcess, which lets Qt's and libtorrent's DLLs run their shutdown
+    code (the 0xC0000005 seen after a pass); TerminateProcess skips all of it."""
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    if sys.platform == "win32":
+        with contextlib.suppress(Exception):
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.TerminateProcess(ctypes.c_void_p(kernel32.GetCurrentProcess()), code)
+    os._exit(code)
+
+
 def main() -> int:
     if SELF_TEST_FLAG in sys.argv[1:]:  # before the crash handler below: its dialog would hang a headless run
         after = sys.argv[sys.argv.index(SELF_TEST_FLAG) + 1:]
         code = self_test(Path(after[0]) if after else None)
         if getattr(sys, "frozen", False):
-            os._exit(code)  # (window and app are kept alive in _keep_alive, so nothing is torn down before this) no event loop to unwind; don't let Qt's teardown turn a pass into a crash
+            _hard_exit(code)  # no event loop to unwind; skip every DLL's shutdown code, which is what crashes
         return code
     crashlog.install(_tell_about_crash)
     if sys.platform == "win32":
