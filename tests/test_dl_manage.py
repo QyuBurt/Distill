@@ -293,11 +293,24 @@ class FileHelperTests(unittest.TestCase):
         self.assertEqual(dlfiles.files_on_disk(rf, self.dest, True), [final, part])
         self.assertEqual(dlfiles.files_on_disk(rf, self.dest, False), [])  # per-item setting changes the place
 
-    def test_locating_a_file_survives_a_transient_access_denied(self):
+    def test_locating_a_file_never_depends_on_what_resolve_says(self):
+        """Windows spelled the same folder two ways (RUNNER~1 vs runneradmin) depending on whether it existed yet, and a
+        good file was refused as unsafe. The check compares spellings, so resolve() must not matter at all."""
         rf = RemoteFile("disc/game.iso", "http://x/game.iso", 10)
-        with mock.patch.object(Path, "resolve", side_effect=PermissionError(5, "Access is denied")), \
-                mock.patch("distill.downloads.time.sleep"):
+        with mock.patch.object(Path, "resolve", autospec=True, side_effect=lambda p, *a, **k: Path("/somewhere/else") / p.name):
             self.assertEqual(DownloadRunner.locate(rf, self.dest, False), self.dest / "disc" / "game.iso")
+        with mock.patch.object(Path, "resolve", side_effect=PermissionError(5, "Access is denied")):
+            self.assertEqual(DownloadRunner.locate(rf, self.dest, False), self.dest / "disc" / "game.iso")
+
+    def test_odd_names_stay_inside_the_folder_or_are_refused(self):
+        for name in ("a/b.iso", "C:\\evil.iso", "/abs/evil", "\\\\server\\share\\x", "sub/./x", "a:b/c*d?.iso", "con.txt"):
+            path = DownloadRunner.locate(RemoteFile(name, "http://x/y", 1), self.dest, False)
+            self.assertTrue(DownloadRunner._inside(path, self.dest), name)
+        for name in ("../evil", "a/../../evil", "..", "a/..\\..\\x"):
+            with self.assertRaises(ValueError, msg=name):
+                DownloadRunner.locate(RemoteFile(name, "http://x/y", 1), self.dest, False)
+        self.assertFalse(DownloadRunner._inside(self.dest.parent / "other", self.dest))
+        self.assertFalse(DownloadRunner._inside(Path(str(self.dest) + "evil") / "f", self.dest))
 
     def test_an_unsafe_name_never_resolves(self):
         rf = RemoteFile("../../evil", "http://x/e", 1)
