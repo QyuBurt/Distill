@@ -754,6 +754,13 @@ class DownloadRunner:
             self._cancelled.discard(idx)
             self._result[idx] = result
 
+    def _row(self, idx: int, text: str) -> None:
+        """Show a status on this row, unless the file has been told to stop: its "Stopping..." must not be overwritten by
+        a progress line from the chunk that was still in flight. Checked and emitted under the lock cancel() uses."""
+        with self._lock:
+            if idx not in self._cancelled:
+                self._emit(("dl_row", idx, text))
+
     def _finish_cancel(self, idx: int, rf: RemoteFile) -> None:
         """A running file has let go after being stopped: take it out of the totals."""
         self._forget(idx, rf)
@@ -874,7 +881,7 @@ class DownloadRunner:
             have = 0
         digest = hashlib.md5() if (self.verify and rf.md5) else None
         if digest and have:  # resuming: the checksum has to cover the bytes we already have
-            self._emit(("dl_row", idx, "Checking partial download..."))
+            self._row(idx, "Checking partial download...")
             with open(part, "rb") as fh:
                 while chunk := fh.read(1 << 20):
                     if not self._checkpoint(idx):
@@ -926,7 +933,7 @@ class DownloadRunner:
                                 speed = inst if speed == 0 else speed * 0.6 + inst * 0.4
                                 mark_t, mark_got = now, got
                                 self._emit(("dl_speed", idx, f"{fmt_size(int(speed))}/s"))
-                            self._emit(("dl_row", idx, self._pct(got, rf.size)))
+                            self._row(idx, self._pct(got, rf.size))
 
         on_disk = part.stat().st_size
         if rf.size is not None and on_disk != rf.size:
@@ -996,7 +1003,7 @@ class DownloadRunner:
                         break
                     if (prog := ytdlp.parse_progress(text)) is not None:
                         got, total, speed = prog
-                        self._emit(("dl_row", idx, f"{fmt_size(got)} / {fmt_size(total)}" if total else fmt_size(got)))
+                        self._row(idx, f"{fmt_size(got)} / {fmt_size(total)}" if total else fmt_size(got))
                         if speed:
                             self._emit(("dl_speed", idx, f"{fmt_size(int(speed))}/s"))
                     elif (path := ytdlp.final_path(text)) is not None:
@@ -1134,7 +1141,7 @@ class DownloadRunner:
                 speed = inst if speed == 0 else speed * 0.6 + inst * 0.4
                 mark_t, mark_got = now, got
                 self._emit(("dl_speed", idx, f"{fmt_size(int(max(speed, 0)))}/s"))
-                self._emit(("dl_row", idx, self._pct(got, size)))
+                self._row(idx, self._pct(got, size))
             if now - last_save >= 2.0:
                 last_save = now
                 with gate:
@@ -1149,7 +1156,7 @@ class DownloadRunner:
         if len(done) != blocks or part.stat().st_size != size:
             raise _Short("Connection dropped before the file finished")
         if self.verify and rf.md5:
-            self._emit(("dl_row", idx, "Checking download..."))
+            self._row(idx, "Checking download...")
             digest = hashlib.md5()
             with open(part, "rb") as fh:
                 while chunk := fh.read(1 << 20):
@@ -1209,7 +1216,7 @@ class DownloadRunner:
                     self._fail(idx, rf, reason)
                     return True
                 self._emit(("dl_speed", idx, ""))
-                self._emit(("dl_row", idx, f"Retrying ({attempt}/{limit - 1}): {reason}"))
+                self._row(idx, f"Retrying ({attempt}/{limit - 1}): {reason}")
                 if self._nap(idx, (2, 5, 15)[min(attempt, 3) - 1]):
                     return False
         with self._lock:

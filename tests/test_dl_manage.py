@@ -38,6 +38,8 @@ class Site(http.server.ThreadingHTTPServer):
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True  # Windows holds small writes back ~200 ms (Nagle + delayed ACK), which skews the timing below
+
     def log_message(self, *args) -> None:
         pass
 
@@ -150,7 +152,7 @@ class WebRunnerTests(RunnerCase):
         part = self.tmp / "out" / "big.part"
         until(lambda: part.exists() and part.stat().st_size > 0, what="partial file")
         self.assertEqual(r.cancel([0]), [0])
-        self.assertEqual(self.status(0), "Stopping...")
+        self.assertIn(self.status(0), ("Stopping...", "Stopped"))  # never a progress line again
         until(lambda: self.status(0) == "Stopped", what="stop to land")
         self.finish()
         self.assertTrue(part.exists(), "partial download must be kept so it can resume")
@@ -168,6 +170,16 @@ class WebRunnerTests(RunnerCase):
         time.sleep(0.4)
         r.cancel([0])  # ...and the file is stopped without having to Resume first
         until(lambda: self.status(0) == "Stopped", what="stop while paused")
+        self.finish()
+
+    def test_a_late_progress_line_never_overwrites_stopping(self):
+        big = payload("big", 2_000_000)
+        site = self.site({"/big": big}, slow={"/big": 0.05})
+        r = self.start([(0, RemoteFile("big", site.url("/big"), len(big)))], threads=1)
+        until(lambda: r.is_busy(0), what="file running")
+        r.cancel([0])
+        r._row(0, "5%  100 KB / 2 MB")  # the chunk that was still in flight reports in after the stop
+        self.assertIn(self.status(0), ("Stopping...", "Stopped"))
         self.finish()
 
     def test_add_a_file_while_running(self):
@@ -224,8 +236,8 @@ class WebRunnerTests(RunnerCase):
         self.assertEqual(r.bytes_total, 800_000)  # the failed file doesn't hold the bar back
 
     def test_a_finished_file_ignores_a_late_stop(self):
-        site = self.site({"/a": payload("a", 1000), "/slow": payload("s", 500_000)}, slow={"/slow": 0.05})
-        r = self.start([(0, RemoteFile("a", site.url("/a"), 1000)), (1, RemoteFile("s", site.url("/slow"), 500_000))])
+        site = self.site({"/a": payload("a", 1000), "/slow": payload("s", 3_000_000)}, slow={"/slow": 0.05})
+        r = self.start([(0, RemoteFile("a", site.url("/a"), 1000)), (1, RemoteFile("s", site.url("/slow"), 3_000_000))])
         until(lambda: self.status(0) == "Done", what="first file")
         self.assertEqual(r.cancel([0]), [])
         r.cancel([1])

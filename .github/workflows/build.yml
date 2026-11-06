@@ -52,7 +52,14 @@ jobs:
           python -m pip install -r req-core.txt
           python -m pip install "$(grep -i '^libtorrent' requirements.txt)" || echo "::warning::no libtorrent wheel for Python ${{ matrix.python }}; torrent code is not exercised in this cell"
       - name: Tests
-        run: python -m unittest discover -s tests -t . -v
+        shell: bash
+        run: |
+          rc=0
+          python -m unittest discover -s tests -t . -v 2>&1 | tee test.log || rc=$?
+          # Put just the failures (test name + the assertion message) on the run's summary page.
+          awk '/^(FAIL|ERROR):/{p=1} /^={20,}/{p=0} /^Ran /{p=0} p' test.log > failures.txt
+          if [ -s failures.txt ]; then { echo '### Test failures'; echo '```'; cat failures.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; fi
+          exit $rc
 
   # ---------------------------------------------------------------------------------------------------------------
   # Window tests. Windows uses Qt's normal platform plugin (the tests themselves say the offscreen one has no fonts and

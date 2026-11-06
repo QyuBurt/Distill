@@ -205,6 +205,8 @@ print("done")
 
 # ---- a tiny HTTP server with Range support -----------------------------------------------------------------
 class _Handler(http.server.BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True  # Windows delays small writes ~200 ms otherwise, which makes timing-based tests flaky
+
     files: dict[str, bytes] = {}
     pages: dict[str, str] = {}
     hits: list[tuple[str, str]] = []
