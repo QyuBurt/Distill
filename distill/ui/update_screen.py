@@ -117,11 +117,17 @@ class FillLogo(QWidget):
             layer = QPixmap(self._colour.size())  # the colour, cut to the filled part with an anti-aliased edge
             layer.setDevicePixelRatio(SCALE)
             layer.fill(Qt.GlobalColor.transparent)
+            mask = QPixmap(self._colour.size())  # a full-size mask: DestinationIn only touches what the source covers, so a bare
+            mask.setDevicePixelRatio(SCALE)  # path would leave everything outside it fully coloured
+            mask.fill(Qt.GlobalColor.transparent)
+            mp = QPainter(mask)
+            mp.setRenderHint(QPainter.RenderHint.Antialiasing)
+            mp.fillPath(self._edge(frac), QColor(0, 0, 0))
+            mp.end()
             lp = QPainter(layer)
-            lp.setRenderHint(QPainter.RenderHint.Antialiasing)
             lp.drawPixmap(0, 0, self._colour)
             lp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-            lp.fillPath(self._edge(frac), QColor(0, 0, 0))
+            lp.drawPixmap(0, 0, mask)
             lp.end()
             p.drawPixmap(0, 0, layer)
         p.end()

@@ -1522,5 +1522,23 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(asked, [1])
 
 
+    def test_update_logo_is_grey_above_the_fill_and_coloured_below_it(self):
+        from distill.ui import motion
+        from distill.ui.update_screen import FillLogo
+
+        was = motion.Motion.reduce
+        motion.Motion.reduce = True  # no easing, no ripple: the picture is exactly the fraction
+        self.addCleanup(setattr, motion.Motion, "reduce", was)
+        logo = FillLogo(240)
+        self.addCleanup(logo.deleteLater)
+        logo.set_fraction(0.5)
+        img = logo.grab().toImage()
+        scale = img.width() / 240
+        above = img.pixelColor(int(40 * scale), int(60 * scale))  # inside the rounded square, well above the halfway edge
+        below = img.pixelColor(int(40 * scale), int(190 * scale))  # and well below it
+        self.assertEqual((above.red(), above.green()), (above.green(), above.blue()))  # grey
+        self.assertNotEqual((below.red(), below.green()), (below.green(), below.blue()))  # colour
+
+
 if __name__ == "__main__":
     unittest.main()
