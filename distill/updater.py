@@ -111,46 +111,50 @@ def download(update: Update, progress=None) -> Path:
     return dest
 
 
-def _script(kind: str, payload: Path) -> str:
-    """The helper batch file. It waits until the running exe can be written to (so it works for the single-file build, whose
-    launcher outlives the program by a moment), swaps the files, then starts Distill again. `timeout` is avoided: it fails with
-    no console, which turned every wait into no wait at all."""
+def _script(kind: str, payload: Path, tag: str = "") -> str:
+    """The helper batch file, run in a small console window so the person can see something is happening. It waits until the
+    running exe can be written to (so it works for the single-file build, whose launcher outlives the program by a moment),
+    swaps the files, then starts Distill again. `timeout` is avoided: it fails when there is no input, which turned every wait
+    into no wait at all."""
     exe = Path(sys.executable).resolve()
-    if kind == "portable":
-        swap = (f"powershell -NoProfile -Command \"Expand-Archive -Force -LiteralPath '{payload}' -DestinationPath '{APP_DIR}'\""
-                " >>\"%LOG%\" 2>&1\r\n")
+    if kind == "portable":  # tar ships with Windows 10+ and is far faster than Expand-Archive; PowerShell stays as the fallback
+        swap = (f"tar -xf \"{payload}\" -C \"{APP_DIR}\" >>\"%LOG%\" 2>&1 || powershell -NoProfile -Command "
+                f"\"Expand-Archive -Force -LiteralPath '{payload}' -DestinationPath '{APP_DIR}'\" >>\"%LOG%\" 2>&1\n")
     else:
-        swap = f"move /y \"{payload}\" \"{exe}\" >>\"%LOG%\" 2>&1\r\n"
+        swap = f"move /y \"{payload}\" \"{exe}\" >>\"%LOG%\" 2>&1\n"
+    name = f"Distill {tag}" if tag else "Distill"
     return (
-        "@echo off\r\nsetlocal\r\n"
-        "set \"LOG=%TEMP%\\distill-update.log\"\r\n"
-        "echo %date% %time% waiting for Distill to exit > \"%LOG%\"\r\n"
-        "set n=0\r\n"
-        ":wait\r\n"
-        f"(>>\"{exe}\" (call;)) 2>nul && goto swap\r\n"
-        "set /a n+=1\r\n"
-        "if %n% gtr 120 (echo gave up waiting >> \"%LOG%\" & goto restart)\r\n"
-        "ping -n 2 127.0.0.1 >nul\r\n"
-        "goto wait\r\n"
-        ":swap\r\n"
-        "echo %date% %time% installing >> \"%LOG%\"\r\n"
+        "@echo off\nsetlocal\ntitle Updating Distill\n"
+        "set \"LOG=%TEMP%\\distill-update.log\"\n"
+        "echo %date% %time% waiting for Distill to exit > \"%LOG%\"\n"
+        f"echo Updating to {name}. Please wait: Distill reopens by itself when this is done.\n"
+        "set n=0\n"
+        ":wait\n"
+        f"(>>\"{exe}\" (call;)) 2>nul && goto swap\n"
+        "set /a n+=1\n"
+        "if %n% gtr 120 (echo gave up waiting >> \"%LOG%\" & goto restart)\n"
+        "ping -n 2 127.0.0.1 >nul\n"
+        "goto wait\n"
+        ":swap\n"
+        "echo Installing...\n"
+        "echo %date% %time% installing >> \"%LOG%\"\n"
         + swap +
-        ":restart\r\n"
-        f"cd /d \"{APP_DIR}\"\r\n"
-        f"start \"\" \"{exe}\"\r\n"
-        "echo %date% %time% restarted >> \"%LOG%\"\r\n"
-        "del \"%~f0\"\r\n"
-    )
+        ":restart\n"
+        f"cd /d \"{APP_DIR}\"\n"
+        f"start \"\" \"{exe}\"\n"
+        "echo %date% %time% restarted >> \"%LOG%\"\n"
+        "del \"%~f0\"\n"
+    ).replace("\n", "\r\n")
 
 
-def apply(payload: Path) -> None:
+def apply(payload: Path, tag: str = "") -> None:
     """Start the helper that swaps the files once Distill has exited. The caller must quit the app right after."""
     kind = install_kind()
     if kind == "source":
         raise RuntimeError("Self-update works in the packaged Windows builds only.")
     script = payload.parent / "apply_update.bat"
-    script.write_text(_script(kind, payload), encoding="utf-8")
+    script.write_text(_script(kind, payload, tag), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"  # the new single-file exe must unpack itself, not reuse this one's temp folder
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True, cwd=str(payload.parent), env=env)
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0), close_fds=True,
+                     cwd=str(payload.parent), env=env)

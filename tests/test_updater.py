@@ -59,9 +59,10 @@ class CheckTests(unittest.TestCase):
 class ScriptTests(unittest.TestCase):
     def test_helper_script_waits_swaps_and_restarts(self):
         from pathlib import Path
-        for kind, marker in (("portable", "Expand-Archive"), ("onefile", "move /y")):
-            text = updater._script(kind, Path("C:/tmp/payload"))
+        for kind, marker in (("portable", "tar -xf"), ("onefile", "move /y")):
+            text = updater._script(kind, Path("C:/tmp/payload"), "v9.9")
             self.assertIn(marker, text)
+            self.assertIn("Please wait", text)
             self.assertNotIn("timeout", text)  # fails without a console
             self.assertIn("ping -n 2", text)
             self.assertIn("distill-update.log", text)

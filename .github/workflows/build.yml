@@ -160,6 +160,8 @@ jobs:
           if (-not $p.WaitForExit(240000)) { $p.Kill(); Get-Content $report -ErrorAction SilentlyContinue; throw 'The built program did not finish its self-test in 4 minutes.' }
           if (Test-Path $report) { Get-Content $report } else { Write-Host 'The program wrote no report.' }
           if ($p.ExitCode -ne 0) { throw "Self-test failed (exit code $($p.ExitCode))." }
+          # A tagged build must report the tag as its version, or the in-app updater would offer the same update forever.
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and -not (Select-String -Path $report -SimpleMatch "Distill $($env:GITHUB_REF_NAME):" -Quiet)) { throw "The built program does not report version $($env:GITHUB_REF_NAME)." }
       - name: Zip the folder build
         if: matrix.variant == 'portable'
         shell: pwsh

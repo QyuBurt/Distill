@@ -85,7 +85,7 @@ class UpdatePromptMixin:
                     QMessageBox.warning(self, "Update failed", f"{result}\n\nYou can download it by hand:\n{update.page}")
                 return
             try:
-                updater.apply(result)
+                updater.apply(result, update.tag)
             except Exception as exc:
                 QMessageBox.warning(self, "Update failed", f"{exc}\n\nYou can download it by hand:\n{update.page}")
                 return
