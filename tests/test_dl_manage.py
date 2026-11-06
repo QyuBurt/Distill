@@ -110,6 +110,21 @@ class RunnerCase(unittest.TestCase):
     def summary(self):
         return self.events[-1][1]
 
+    def why(self) -> str:
+        """What the runner said while it ran: shown with a failed assertion so a CI failure explains itself."""
+        said = [str(e[1]).strip() for e in self.events if e and e[0] in ("log", "notice") and len(e) > 1]
+        rows: dict = {}
+        for e in self.events:
+            if e and e[0] == "dl_row":
+                rows[e[1]] = e[2]
+        return "runner log:\n  " + "\n  ".join(said) + f"\nlast text on each row: {rows}"
+
+    def wait_for(self, cond, what: str, timeout: float = 15.0) -> None:
+        try:
+            until(cond, timeout, what)
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}\n{self.why()}") from None
+
 
 class WebRunnerTests(RunnerCase):
     def test_plain_run_is_unchanged(self):
@@ -117,8 +132,9 @@ class WebRunnerTests(RunnerCase):
         site = self.site(data)
         r = self.start([(i, RemoteFile(f"f{i}", site.url(f"/f{i}"), len(data[f"/f{i}"]))) for i in range(3)])
         self.finish()
+        self.assertEqual(len(self.summary().failures), 0, self.why())
         for i in range(3):
-            self.assertEqual((self.tmp / "out" / f"f{i}").read_bytes(), data[f"/f{i}"])
+            self.assertEqual((self.tmp / "out" / f"f{i}").read_bytes(), data[f"/f{i}"], self.why())
         sm = self.summary()
         self.assertEqual((sm.done, sm.skipped, len(sm.failures), sm.stopped), (3, 0, 0, 0))
         self.assertEqual((r.files_finished, r.files_total, r.bytes_done, r.bytes_total),
@@ -211,9 +227,9 @@ class WebRunnerTests(RunnerCase):
         r = self.start([(0, RemoteFile("big", site.url("/big"), len(big))),
                         (1, RemoteFile("keep", site.url("/keep"), len(keepalive)))], threads=2)
         part = self.tmp / "out" / "big.part"
-        until(lambda: part.exists() and part.stat().st_size > 100_000, what="partial")
+        self.wait_for(lambda: part.exists() and part.stat().st_size > 100_000, what="partial")
         r.cancel([0])
-        until(lambda: self.status(0) == "Stopped", what="stop")
+        self.wait_for(lambda: self.status(0) == "Stopped", what="stop")
         kept = part.stat().st_size
         self.assertEqual(r.add([(0, RemoteFile("big", site.url("/big"), len(big)))]), [0])
         self.assertEqual(r.files_total, 2)
