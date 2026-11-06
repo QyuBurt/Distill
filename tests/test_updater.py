@@ -56,5 +56,19 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(updater.check("v1.0").asset_url, "")
 
 
+class ScriptTests(unittest.TestCase):
+    def test_helper_script_waits_swaps_and_restarts(self):
+        from pathlib import Path
+        for kind, marker in (("portable", "Expand-Archive"), ("onefile", "move /y")):
+            text = updater._script(kind, Path("C:/tmp/payload"))
+            self.assertIn(marker, text)
+            self.assertNotIn("timeout", text)  # fails without a console
+            self.assertIn("ping -n 2", text)
+            self.assertIn("distill-update.log", text)
+            self.assertLess(text.index(":wait"), text.index(":swap"))
+            self.assertLess(text.index(":swap"), text.index(":restart"))
+            self.assertIn("start \"\"", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
@@ -90,7 +90,9 @@ class UpdatePromptMixin:
                 QMessageBox.warning(self, "Update failed", f"{exc}\n\nYou can download it by hand:\n{update.page}")
                 return
             self._settings_save()
+            from ..app import _hard_exit  # imported here: app.py imports this window
             QApplication.quit()
+            QTimer.singleShot(1500, lambda: _hard_exit(0))  # a normal exit can hang in libtorrent's shutdown, and the swap waits for it
 
         self._upd.progress.connect(on_prog)
         self._upd.downloaded.connect(on_done)

@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import APP_DIR, APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
+from .constants import APP_DIR, APP_NAME, APP_VERSION
 from .github_auth import github_headers
 
 REPO = "QyuBurt/Distill"
@@ -112,17 +112,35 @@ def download(update: Update, progress=None) -> Path:
 
 
 def _script(kind: str, payload: Path) -> str:
+    """The helper batch file. It waits until the running exe can be written to (so it works for the single-file build, whose
+    launcher outlives the program by a moment), swaps the files, then starts Distill again. `timeout` is avoided: it fails with
+    no console, which turned every wait into no wait at all."""
     exe = Path(sys.executable).resolve()
-    pid = os.getpid()
-    head = (f"@echo off\r\nsetlocal\r\n:wait\r\ntasklist /fi \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n"
-            "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n")
     if kind == "portable":
-        body = (f"powershell -NoProfile -Command \"Expand-Archive -Force -LiteralPath '{payload}' -DestinationPath '{APP_DIR}'\"\r\n"
-                "if errorlevel 1 exit /b 1\r\n")
+        swap = (f"powershell -NoProfile -Command \"Expand-Archive -Force -LiteralPath '{payload}' -DestinationPath '{APP_DIR}'\""
+                " >>\"%LOG%\" 2>&1\r\n")
     else:
-        body = (f"set n=0\r\n:swap\r\nmove /y \"{payload}\" \"{exe}\" >nul 2>nul\r\n"
-                "if errorlevel 1 (set /a n+=1 & if %n% lss 20 (timeout /t 1 /nobreak >nul & goto swap) else exit /b 1)\r\n")
-    return head + body + f"start \"\" \"{exe}\"\r\ndel \"%~f0\"\r\n"
+        swap = f"move /y \"{payload}\" \"{exe}\" >>\"%LOG%\" 2>&1\r\n"
+    return (
+        "@echo off\r\nsetlocal\r\n"
+        "set \"LOG=%TEMP%\\distill-update.log\"\r\n"
+        "echo %date% %time% waiting for Distill to exit > \"%LOG%\"\r\n"
+        "set n=0\r\n"
+        ":wait\r\n"
+        f"(>>\"{exe}\" (call;)) 2>nul && goto swap\r\n"
+        "set /a n+=1\r\n"
+        "if %n% gtr 120 (echo gave up waiting >> \"%LOG%\" & goto restart)\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto wait\r\n"
+        ":swap\r\n"
+        "echo %date% %time% installing >> \"%LOG%\"\r\n"
+        + swap +
+        ":restart\r\n"
+        f"cd /d \"{APP_DIR}\"\r\n"
+        f"start \"\" \"{exe}\"\r\n"
+        "echo %date% %time% restarted >> \"%LOG%\"\r\n"
+        "del \"%~f0\"\r\n"
+    )
 
 
 def apply(payload: Path) -> None:
@@ -132,5 +150,7 @@ def apply(payload: Path) -> None:
         raise RuntimeError("Self-update works in the packaged Windows builds only.")
     script = payload.parent / "apply_update.bat"
     script.write_text(_script(kind, payload), encoding="utf-8")
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=SUBPROCESS_FLAGS | getattr(subprocess, "DETACHED_PROCESS", 0),
-                     close_fds=True, cwd=str(payload.parent))
+    env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"  # the new single-file exe must unpack itself, not reuse this one's temp folder
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True, cwd=str(payload.parent), env=env)
