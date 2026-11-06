@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv*/
+venv/
+
+# Build output
+build/
+dist/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Your own keys: never commit these (see distill/local_keys.example.py)
+distill/local_keys.py
+*.keys
+keys/
+
+# Everything the app writes next to itself when run from a source checkout
+/tools/
+/recomps/
+/icon_cache/
+/pkg_logs/
+/distill_*
+/ps3_names.json
+*.part

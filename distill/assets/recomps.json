@@ -1,0 +1,69 @@
+{
+  "_help": "One entry per project. rom.names: word lists that must all appear in a file name. rom.sha1 / rom.crc32: checksums of dumps the project accepts (python -m distill.recomps hash <file> prints them); with them, a match is 'verified'. asset / exe: optional regexes when the automatic pick of the release file or executable is wrong. Put your own additions in distill_recomps_catalog.json beside the app (same format; the same id replaces an entry).",
+  "recomps": [
+    {
+      "id": "ship-of-harkinian", "name": "Ship of Harkinian", "game": "The Legend of Zelda: Ocarina of Time",
+      "system": "Nintendo 64", "repo": "HarbourMasters/Shipwright",
+      "description": "A native PC port of Ocarina of Time built from the decompiled game, with widescreen, higher resolutions, controller remapping and a mod and randomizer scene.",
+      "tags": ["Adventure", "Decomp"], "website": "https://www.shipofharkinian.com/",
+      "rom": {"names": [["ocarina", "time"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Ocarina of Time ROM and builds its asset file from it."
+    },
+    {
+      "id": "2ship2harkinian", "name": "2 Ship 2 Harkinian", "game": "The Legend of Zelda: Majora's Mask",
+      "system": "Nintendo 64", "repo": "HarbourMasters/2ship2harkinian",
+      "description": "The Ship of Harkinian team's native PC port of Majora's Mask, with the same enhancements and a mod loader.",
+      "tags": ["Adventure", "Decomp"],
+      "rom": {"names": [["majora"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Majora's Mask ROM and builds its asset file from it."
+    },
+    {
+      "id": "zelda64recomp", "name": "Zelda 64: Recompiled", "game": "The Legend of Zelda: Majora's Mask",
+      "system": "Nintendo 64", "repo": "Zelda64Recomp/Zelda64Recomp",
+      "description": "Majora's Mask statically recompiled to run natively on PC, with ray-traced-era graphics options, gyro aiming and mod support.",
+      "tags": ["Adventure", "Recomp"], "website": "https://github.com/Zelda64Recomp/Zelda64Recomp",
+      "rom": {"names": [["majora"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Majora's Mask ROM (the US version)."
+    },
+    {
+      "id": "starship", "name": "Starship", "game": "Star Fox 64",
+      "system": "Nintendo 64", "repo": "HarbourMasters/Starship",
+      "description": "A native PC port of Star Fox 64 from the decompiled game, with widescreen and modern controls.",
+      "tags": ["Shooter", "Decomp"],
+      "rom": {"names": [["star", "fox", "64"], ["lylat", "wars"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Star Fox 64 ROM and builds its asset file from it."
+    },
+    {
+      "id": "spaghettikart", "name": "SpaghettiKart", "game": "Mario Kart 64",
+      "system": "Nintendo 64", "repo": "HarbourMasters/SpaghettiKart",
+      "description": "A native PC port of Mario Kart 64 from the decompiled game, with widescreen and custom track support.",
+      "tags": ["Racing", "Decomp"],
+      "rom": {"names": [["mario", "kart", "64"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Mario Kart 64 ROM and builds its asset file from it."
+    },
+    {
+      "id": "banjo-recompiled", "name": "Banjo: Recompiled", "game": "Banjo-Kazooie",
+      "system": "Nintendo 64", "repo": "BanjoRecomp/BanjoRecomp",
+      "description": "Banjo-Kazooie statically recompiled to run natively on PC, with modern graphics and input options.",
+      "tags": ["Platformer", "Recomp"],
+      "rom": {"names": [["banjo", "kazooie"]], "exts": [".z64", ".v64", ".n64"]},
+      "setup": "On first launch it asks for your own Banjo-Kazooie ROM."
+    },
+    {
+      "id": "dusklight", "name": "Dusklight", "game": "The Legend of Zelda: Twilight Princess",
+      "system": "GameCube", "repo": "TwilitRealm/dusklight",
+      "description": "A reverse-engineered reimplementation of Twilight Princess that runs natively on PC, as accurate as possible to the original while adding options, enhancements and tools.",
+      "tags": ["Adventure", "Recomp"], "website": "https://twilitrealm.dev/",
+      "rom": {"names": [["twilight", "princess"]], "exts": [".iso", ".gcm"]},
+      "setup": "Needs your own copy of Twilight Princess; follow the project's first-run prompts to point it at your dump."
+    },
+    {
+      "id": "unleashed-recompiled", "name": "Unleashed Recompiled", "game": "Sonic Unleashed",
+      "system": "Xbox 360", "repo": "hedge-dev/UnleashedRecomp",
+      "description": "Sonic Unleashed for Xbox 360 statically recompiled to run natively on PC.",
+      "tags": ["Platformer", "Recomp"],
+      "rom": {"names": [["sonic", "unleashed"]], "exts": [".iso", ".xiso"]},
+      "setup": "Its installer asks for your own game files; follow its prompts."
+    }
+  ]
+}

@@ -1,0 +1,634 @@
+{
+ "version": "1.2",
+ "last_updated": "2026-11-05",
+ "emulators": [
+  {
+   "id": "retroarch",
+   "name": "RetroArch",
+   "system": "Multi-system",
+   "group": "Frontend",
+   "source": "custom",
+   "adapter": "libretro_buildbot",
+   "website": "https://www.retroarch.com/",
+   "notes": "A frontend for emulators, game engines, and media players that uses the libretro API as its modular backbone.",
+   "systems": [],
+   "aliases": [
+    "retroarch"
+   ],
+   "exe": "(^|/)retroarch\\.exe$|\\.AppImage$"
+  },
+  {
+   "id": "duckstation",
+   "name": "DuckStation",
+   "system": "PlayStation",
+   "group": "Sony",
+   "repo": "stenzek/duckstation",
+   "version_from": "published_at",
+   "website": "https://www.duckstation.org/",
+   "portable": "portable.txt",
+   "notes": "A source-available PlayStation emulator developed primarily by stenzek, featuring PGXP, upscaling, texture filtering, and run-ahead support.",
+   "systems": [
+    "PlayStation"
+   ],
+   "aliases": [
+    "duckstation-qt"
+   ],
+   "exe": "duckstation-qt|\\.AppImage$"
+  },
+  {
+   "id": "pcsx2",
+   "name": "PCSX2",
+   "system": "PlayStation 2",
+   "group": "Sony",
+   "repo": "PCSX2/pcsx2",
+   "website": "https://pcsx2.net/",
+   "portable": "portable.ini",
+   "channels": [
+    "stable",
+    "nightly"
+   ],
+   "systems": [
+    "PlayStation 2"
+   ],
+   "aliases": [
+    "pcsx2-qt"
+   ],
+   "exe": "(^|/)pcsx2-qt(\\.exe)?$|\\.AppImage$",
+   "notes": "A free and open-source PlayStation 2 emulator for Windows, Linux, and macOS supporting a high level of compatibility."
+  },
+  {
+   "id": "rpcs3",
+   "name": "RPCS3",
+   "system": "PlayStation 3",
+   "group": "Sony",
+   "website": "https://rpcs3.net/",
+   "portable": "portable",
+   "repo_by_platform": {
+    "windows": "RPCS3/rpcs3-binaries-win",
+    "linux": "RPCS3/rpcs3-binaries-linux",
+    "macos": "RPCS3/rpcs3-binaries-mac"
+   },
+   "notes": "An open-source PlayStation 3 emulator and debugger written in C++ for Windows, Linux, macOS, and FreeBSD.",
+   "systems": [
+    "PlayStation 3"
+   ],
+   "exe": "(^|/)rpcs3(\\.exe)?$|\\.AppImage$",
+   "version_from": "asset",
+   "portable_auto": false
+  },
+  {
+   "id": "shadps4",
+   "name": "shadPS4",
+   "system": "PlayStation 4",
+   "group": "Sony",
+   "repo": "shadps4-emu/shadPS4",
+   "website": "https://shadps4.net/",
+   "channels": [
+    "stable",
+    "nightly"
+   ],
+   "systems": [
+    "PlayStation 4"
+   ],
+   "aliases": [
+    "shadps4"
+   ],
+   "notes": "A free and open-source PlayStation 4 emulator written in C++ supporting Windows, Linux, and macOS."
+  },
+  {
+   "id": "kytyps5",
+   "name": "KytyPS5",
+   "system": "PlayStation 5",
+   "group": "Sony",
+   "repo": "KytyPS5/KytyPS5",
+   "trusted_owner": "KytyPS5",
+   "website": "https://kytyps5.github.io/",
+   "verify": true,
+   "notes": "An experimental emulator for running PlayStation 4 and PlayStation 5 software and homebrew.",
+   "systems": [
+    "PlayStation 5"
+   ]
+  },
+  {
+   "id": "anyps5",
+   "name": "AnyPS5",
+   "system": "PlayStation 5",
+   "group": "Sony",
+   "repo": "boykopovar/AnyPS5",
+   "trusted_owner": "boykopovar",
+   "active": false,
+   "verify": true,
+   "notes": "A conceptual repository targeting native-port layering for PlayStation 5 architecture.",
+   "systems": [
+    "PlayStation 5"
+   ]
+  },
+  {
+   "id": "ppsspp",
+   "name": "PPSSPP",
+   "system": "PSP",
+   "group": "Sony",
+   "repo": "hrydgard/ppsspp",
+   "website": "https://www.ppsspp.org/",
+   "verify": true,
+   "notes": "An open-source PSP emulator that allows users to play PlayStation Portable games in high definition on multiple platforms.",
+   "systems": [
+    "PSP"
+   ],
+   "portable": "memstick/"
+  },
+  {
+   "id": "vita3k",
+   "name": "Vita3K",
+   "system": "PlayStation Vita",
+   "group": "Sony",
+   "repo": "Vita3K/Vita3K",
+   "version_from": "published_at",
+   "website": "https://vita3k.org/",
+   "notes": "The first functional experimental PlayStation Vita emulator and debugger for Windows, Linux, and macOS.",
+   "systems": [
+    "PlayStation Vita"
+   ],
+   "aliases": [
+    "vita3k"
+   ]
+  },
+  {
+   "id": "dolphin",
+   "name": "Dolphin",
+   "system": "GameCube / Wii",
+   "group": "Nintendo",
+   "source": "custom",
+   "adapter": "dolphin_update",
+   "api_endpoint": "https://dolphin-emu.org/update/latest/beta",
+   "website": "https://dolphin-emu.org/",
+   "portable": "portable.txt",
+   "platforms": [
+    "windows",
+    "macos"
+   ],
+   "notes": "An open-source emulator for GameCube and Wii games that supports high-definition rendering, network play, and modding tools.",
+   "systems": [
+    "GameCube",
+    "Wii"
+   ],
+   "aliases": [
+    "dolphin-emu",
+    "dolphin emulator"
+   ],
+   "exe": "(^|/)Dolphin(\\.exe)?$|\\.app$"
+  },
+  {
+   "id": "cemu",
+   "name": "Cemu",
+   "system": "Wii U",
+   "group": "Nintendo",
+   "repo": "cemu-project/Cemu",
+   "website": "https://cemu.info/",
+   "portable": "portable/",
+   "systems": [
+    "Wii U"
+   ],
+   "exe": "(^|/)Cemu(\\.exe)?$|\\.AppImage$",
+   "notes": "An open-source Wii U video game console emulator compatible with Windows and Linux operating systems."
+  },
+  {
+   "id": "ryujinx",
+   "name": "Ryujinx (Ryubing)",
+   "system": "Switch",
+   "group": "Nintendo",
+   "source": "forgejo",
+   "repo": "projects/Ryubing",
+   "host": "git.ryujinx.app",
+   "website": "https://ryujinx.app/",
+   "verify": true,
+   "notes": "Ryubing, the maintained Ryujinx. Its site moved from GitLab to Forgejo. An open-source Nintendo Switch emulator focused on accuracy, performance, and a user-friendly interface.",
+   "systems": [
+    "Switch"
+   ],
+   "aliases": [
+    "ryujinx",
+    "ryubing"
+   ],
+   "exe": "(^|/)Ryujinx(\\.exe)?$|\\.app$",
+   "channels": [
+    "stable",
+    "nightly"
+   ],
+   "portable": "portable/"
+  },
+  {
+   "id": "eden",
+   "name": "Eden",
+   "system": "Switch",
+   "group": "Nintendo",
+   "repo": "eden-emulator/Releases",
+   "website": "https://eden-emu.dev/",
+   "verify": true,
+   "notes": "A community-focused Nintendo Switch emulator branch derived from the broader ecosystem.",
+   "systems": [
+    "Switch"
+   ],
+   "aliases": [
+    "eden"
+   ],
+   "portable": "user/",
+   "trusted_owner": "eden-emulator"
+  },
+  {
+   "id": "sudachi",
+   "name": "Sudachi",
+   "system": "Switch",
+   "group": "Nintendo",
+   "repo": "emuplace/sudachi.emuplace.app",
+   "website": "https://sudachi.emuplace.app/",
+   "verify": true,
+   "notes": "An experimental Nintendo Switch emulator fork based on the Yuzu architecture.",
+   "systems": [
+    "Switch"
+   ],
+   "aliases": [
+    "sudachi"
+   ],
+   "portable": "user/",
+   "trusted_owner": "emuplace"
+  },
+  {
+   "id": "eglantine",
+   "name": "Eglantine",
+   "system": "Switch 2",
+   "group": "Nintendo",
+   "repo": "Djihads80/Eglantine",
+   "website": "https://github.com/Djihads80/Eglantine",
+   "verify": true,
+   "notes": "An experimental emulator project combining codebases from Eden, Yuzu, and Sudachi architectures.",
+   "systems": [
+    "Switch 2"
+   ],
+   "aliases": [
+    "eglantine"
+   ]
+  },
+  {
+   "id": "lichii",
+   "name": "Lichii",
+   "system": "Switch 2",
+   "group": "Nintendo",
+   "repo": "zortos293/Lichii",
+   "trusted_owner": "zortos293",
+   "website": "https://github.com/zortos293/Lichii",
+   "verify": true,
+   "logo": "https://github.com/zortos293/Lichii/raw/nx2/dist/branding/lichii_icon_with_logo.png",
+   "notes": "A very experimental Nintendo Switch 2 emulator (it also runs Switch titles), forked from Eglantine, Eden, yuzu and Sudachi. Early builds are Windows-only pre-releases, so expect crashes and rendering errors.",
+   "systems": [
+    "Switch 2"
+   ],
+   "aliases": [
+    "lichii",
+    "eglantine-nx2"
+   ],
+   "exe": "(^|/)(lichii|eglantine)(\\.exe)?$"
+  },
+  {
+   "id": "azahar",
+   "name": "Azahar",
+   "system": "Nintendo 3DS",
+   "group": "Nintendo",
+   "repo": "azahar-emu/azahar",
+   "website": "https://azahar-emu.org/",
+   "verify": true,
+   "notes": "A Nintendo 3DS emulator that acts as a direct continuation and successor to Lime3DS and Citra architectures.",
+   "systems": [
+    "Nintendo 3DS"
+   ],
+   "aliases": [
+    "azahar"
+   ],
+   "portable": "user/"
+  },
+  {
+   "id": "melonds",
+   "name": "melonDS",
+   "system": "Nintendo DS",
+   "group": "Nintendo",
+   "repo": "melonDS-emu/melonDS",
+   "website": "https://melonds.kuribo64.net/",
+   "systems": [
+    "Nintendo DS"
+   ],
+   "aliases": [
+    "melonds"
+   ],
+   "notes": "A fast and accurate Nintendo DS and DSi emulator supporting local Wi-Fi multiplayer and OpenGL rendering."
+  },
+  {
+   "id": "mgba",
+   "name": "mGBA",
+   "system": "Game Boy Advance",
+   "group": "Nintendo",
+   "repo": "mgba-emu/mgba",
+   "website": "https://mgba.io/",
+   "systems": [
+    "Game Boy Advance",
+    "Game Boy",
+    "Game Boy Color"
+   ],
+   "notes": "An emulator for running Game Boy Advance games with a focus on speed, accuracy, and low hardware requirements.",
+   "portable": "portable.ini"
+  },
+  {
+   "id": "rmg",
+   "name": "Rosalie's Mupen GUI",
+   "system": "Nintendo 64",
+   "group": "Nintendo",
+   "repo": "Rosalie241/RMG",
+   "website": "https://github.com/Rosalie241/RMG",
+   "systems": [
+    "Nintendo 64"
+   ],
+   "aliases": [
+    "rmg"
+   ],
+   "notes": "A graphical user interface for Mupen64Plus written in C++ using Qt, focused on a modern desktop experience."
+  },
+  {
+   "id": "mesen2",
+   "name": "Mesen2",
+   "system": "NES / SNES / GB / PC Engine",
+   "group": "Nintendo",
+   "repo": "SourMesen/Mesen2",
+   "website": "https://www.mesen.ca/",
+   "verify": true,
+   "systems": [
+    "NES",
+    "SNES",
+    "Game Boy",
+    "Game Boy Color",
+    "PC Engine"
+   ],
+   "notes": "A multi-system emulator built for high accuracy, deep debugging features, and broad retro platform compatibility."
+  },
+  {
+   "id": "xenia-canary",
+   "name": "Xenia Canary",
+   "system": "Xbox 360",
+   "group": "Microsoft",
+   "repo": "xenia-canary/xenia-canary-releases",
+   "website": "https://xenia.jp/",
+   "platforms": [
+    "windows"
+   ],
+   "version_from": "published_at",
+   "verify": true,
+   "notes": "An experimental build branch of the Xenia Xbox 360 emulator incorporating early fixes and features.",
+   "systems": [
+    "Xbox 360"
+   ],
+   "aliases": [
+    "xenia",
+    "xenia_canary"
+   ],
+   "portable": "portable.txt"
+  },
+  {
+   "id": "xemu",
+   "name": "xemu",
+   "system": "Xbox",
+   "group": "Microsoft",
+   "repo": "xemu-project/xemu",
+   "website": "https://xemu.app/",
+   "systems": [
+    "Xbox"
+   ],
+   "notes": "An open-source original Xbox emulator enabling users to run commercial dashboard and game software on modern hardware."
+  },
+  {
+   "id": "flycast",
+   "name": "Flycast",
+   "system": "Dreamcast / Naomi / Atomiswave",
+   "group": "Sega",
+   "repo": "flyinghead/flycast",
+   "website": "https://flycast.colorgames.de/",
+   "systems": [
+    "Dreamcast"
+   ],
+   "notes": "A multi-platform Sega Dreamcast, Naomi, and Atomiswave emulator derived from Reicast."
+  },
+  {
+   "id": "ymir",
+   "name": "Ymir",
+   "system": "Sega Saturn",
+   "group": "Sega",
+   "repo": "StrikerX3/ymir",
+   "website": "https://github.com/StrikerX3/ymir",
+   "verify": true,
+   "systems": [
+    "Sega Saturn"
+   ],
+   "notes": "An emulator designed to target and run Sega Saturn software titles."
+  },
+  {
+   "id": "bigpemu",
+   "name": "BigPEmu",
+   "system": "Atari Jaguar / Jaguar CD",
+   "group": "Atari",
+   "website": "https://www.richwhitehouse.com/jaguar/",
+   "verify": true,
+   "notes": "A high-performance emulator and development tool for the Atari Jaguar and Atari Jaguar CD systems.",
+   "systems": [
+    "Atari Jaguar",
+    "Atari Jaguar CD"
+   ],
+   "aliases": [
+    "bigpemu"
+   ],
+   "source": "custom",
+   "adapter": "bigpemu_site",
+   "endpoint": "https://www.richwhitehouse.com/jaguar/index.php?content=download",
+   "platforms": [
+    "windows",
+    "linux"
+   ]
+  },
+  {
+   "id": "mame",
+   "name": "MAME",
+   "system": "Arcade",
+   "group": "Multi",
+   "repo": "mamedev/mame",
+   "website": "https://www.mamedev.org/",
+   "platforms": [
+    "windows"
+   ],
+   "asset": {
+    "windows": "64bit\\.exe$"
+   },
+   "notes": "An extensive multi-purpose hardware preservation project designed to reproduce arcade machines and vintage computers.",
+   "systems": [],
+   "exe": "(^|/)mame[\\w.]*\\.exe$"
+  },
+  {
+   "id": "ares",
+   "name": "ares",
+   "system": "Multi-system",
+   "group": "Multi",
+   "repo": "ares-emulator/ares",
+   "website": "https://ares-emu.net/",
+   "systems": [
+    "NES",
+    "SNES",
+    "Nintendo 64",
+    "Game Boy",
+    "Game Boy Color",
+    "Game Boy Advance",
+    "Mega Drive",
+    "Master System",
+    "Sega CD",
+    "Sega Saturn",
+    "PC Engine",
+    "PlayStation",
+    "WonderSwan",
+    "Neo Geo Pocket"
+   ],
+   "notes": "An open-source multi-system emulator focused on cycle accuracy and source code clarity."
+  },
+  {
+   "id": "snes9x",
+   "name": "Snes9x",
+   "system": "SNES",
+   "group": "Nintendo",
+   "repo": "snes9xgit/snes9x",
+   "website": "https://github.com/snes9xgit/snes9x",
+   "notes": "A portable Super Nintendo Entertainment System (TM) emulator.",
+   "systems": [
+    "SNES"
+   ],
+   "aliases": [
+    "snes9x"
+   ]
+  },
+  {
+   "id": "project64",
+   "name": "Project64",
+   "system": "Nintendo 64",
+   "group": "Nintendo",
+   "repo": "project64/project64",
+   "website": "https://www.pj64-emu.com/",
+   "notes": "A free and open-source emulator for the Nintendo 64 and Nintendo 64 Disk Drive.",
+   "systems": [
+    "Nintendo 64"
+   ],
+   "aliases": [
+    "pj64"
+   ],
+   "platforms": [
+    "windows"
+   ]
+  },
+  {
+   "id": "lime3ds",
+   "name": "Lime3DS",
+   "system": "Nintendo 3DS",
+   "group": "Nintendo",
+   "repo": "Lime3DS/Lime3DS",
+   "website": "https://lime3ds.github.io/",
+   "notes": "A Nintendo 3DS emulator based on Citra.",
+   "systems": [
+    "Nintendo 3DS"
+   ],
+   "aliases": [
+    "lime3ds"
+   ]
+  },
+  {
+   "id": "fbneo",
+   "name": "FinalBurn Neo",
+   "system": "Arcade",
+   "group": "Multi",
+   "repo": "finalburnneo/FBNeo",
+   "website": "https://neo-source.com/",
+   "notes": "A multi-system arcade emulator designed for retro gaming enthusiasts.",
+   "systems": [
+    "Arcade",
+    "Neo Geo",
+    "CPS-1",
+    "CPS-2",
+    "CPS-3"
+   ],
+   "aliases": [
+    "fbneo",
+    "finalburn neo"
+   ]
+  },
+  {
+   "id": "dosbox-staging",
+   "name": "DOSBox Staging",
+   "system": "DOS",
+   "group": "PC",
+   "repo": "dosbox-staging/dosbox-staging",
+   "website": "https://dosbox-staging.github.io/",
+   "notes": "A modern continuation of DOSBox with advanced features and current development practices.",
+   "systems": [
+    "DOS"
+   ],
+   "aliases": [
+    "dosbox",
+    "dosbox-staging"
+   ]
+  },
+  {
+   "id": "scummvm",
+   "name": "ScummVM",
+   "system": "PC",
+   "group": "PC",
+   "repo": "scummvm/scummvm",
+   "website": "https://www.scummvm.org/",
+   "notes": "Allows you to play classic graphic point-and-click adventure games.",
+   "systems": [
+    "Adventure",
+    "PC"
+   ],
+   "aliases": [
+    "scummvm"
+   ]
+  },
+  {
+   "id": "blastem",
+   "name": "BlastEm",
+   "system": "Mega Drive",
+   "group": "Sega",
+   "website": "https://www.retrodev.com/blastem/",
+   "notes": "An open source, highly accurate emulator for the Genesis/Megadrive that runs on modest hardware.",
+   "systems": [
+    "Mega Drive",
+    "Master System"
+   ],
+   "aliases": [
+    "blastem"
+   ],
+   "source": "custom",
+   "adapter": "blastem_site",
+   "endpoint": "https://www.retrodev.com/blastem/downloads.html"
+  },
+  {
+   "id": "bluestacks",
+   "name": "BlueStacks",
+   "system": "Android",
+   "group": "Mobile",
+   "website": "https://www.bluestacks.com/",
+   "notes": "A popular Android emulator for running mobile games and apps on desktop. Windows only, and it comes only as an installer: Distill downloads it, checks it against its published SHA-256, and you run it to install.",
+   "systems": [
+    "Android"
+   ],
+   "aliases": [
+    "bluestacks"
+   ],
+   "source": "custom",
+   "adapter": "bluestacks_winget",
+   "platforms": [
+    "windows"
+   ],
+   "exe": "(^|/)BlueStacks[^/]*\\.exe$"
+  }
+ ]
+}

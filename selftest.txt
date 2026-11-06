@@ -1,0 +1,11 @@
+ok    Distill v1.0: packaged build, Python 3.13.17
+ok    assets folder C:\Users\ProfQ\Downloads\Distill\dist\Distill\_internal\distill\assets
+ok    emulators.json: 3 entries
+ok    recomps.json: 2 entries
+ok    import py7zr 1.1.4
+ok    import libtorrent 2.1.1.0
+ok    import mutagen
+WARN  7z back-end 'pyzstd' is missing (some .7z archives won't unpack)
+ok    fonts registered: Inter 18pt / Outfit / JetBrains Mono
+ok    window built with 18 pages
+RESULT: passed

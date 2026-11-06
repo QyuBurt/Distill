@@ -1,0 +1,8 @@
+# Keeps the workflow's actions current. GitHub retired Node 20 for actions in 2026, so an action left on an old
+# major version eventually stops working; this opens a pull request when a new one is out.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

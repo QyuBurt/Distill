@@ -1,0 +1,12 @@
+# Normalise text to LF in the repository; check out as the platform expects.
+* text=auto
+
+# cmd.exe can misread LF-only batch files (labels, multi-line if blocks), so these are always CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch binaries.
+*.png binary
+*.ico binary
+*.ttf binary
+*.zip binary

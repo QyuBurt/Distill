@@ -1,0 +1,4 @@
+PySide6>=6.7
+py7zr>=0.21
+libtorrent>=2.0,<3
+mutagen>=1.47
