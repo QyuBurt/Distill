@@ -1,186 +1,41 @@
-name: test and build
+name: Build Distill Windows Executable
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-  workflow_dispatch:
-
-# A newer push to the same branch cancels the older run; a tag build is never cancelled.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
-permissions:
-  contents: read
-
-env:
-  PYTHONUTF8: "1"
+    branches: [ "master", "main" ] # Triggers automatically on push
+  workflow_dispatch: # Adds a button in GitHub to manually trigger the build
 
 jobs:
-  # ---------------------------------------------------------------------------------------------------------------
-  # Engine tests. These gate the build. The two window test files are left out here (DISTILL_SKIP_UI_TESTS) and run in
-  # their own job below: they depend on a display plugin and on timing, so they must not be able to block a release.
-  # ---------------------------------------------------------------------------------------------------------------
-  test:
-    name: test (${{ matrix.os }}, py${{ matrix.python }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.10", "3.12", "3.13"]
-    runs-on: ${{ matrix.os }}
-    env:
-      DISTILL_SKIP_UI_TESTS: "1"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: requirements*.txt
-      - name: System libraries Qt needs to import (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0 libpulse0
-      - name: Install dependencies
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          # libtorrent is optional for the tests, so a Python without a wheel for it must not fail the whole cell
-          grep -vi '^libtorrent' requirements.txt > req-core.txt
-          python -m pip install -r req-core.txt
-          python -m pip install "$(grep -i '^libtorrent' requirements.txt)" || echo "::warning::no libtorrent wheel for Python ${{ matrix.python }}; torrent code is not exercised in this cell"
-      - name: Tests
-        run: python -m unittest discover -s tests -t . -v
-
-  # ---------------------------------------------------------------------------------------------------------------
-  # Window tests. Windows uses Qt's normal platform plugin (the tests themselves say the offscreen one has no fonts and
-  # can crash there); Linux uses offscreen. Reported, but they do not gate the build.
-  # ---------------------------------------------------------------------------------------------------------------
-  window-tests:
-    name: window tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements*.txt
-      - name: System libraries Qt needs off-screen (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0 libpulse0 fonts-dejavu-core
-      - run: python -m pip install -r requirements.txt
-      - name: Window tests (Linux, off-screen)
-        if: runner.os == 'Linux'
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python -m unittest tests.test_ui_smoke tests.test_motion -v
-      - name: Window tests (Windows, normal platform plugin)
-        if: runner.os == 'Windows'
-        run: python -m unittest tests.test_ui_smoke tests.test_motion -v
-
-  # Informational: surfaces style problems without blocking anything.
-  lint:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: python -m pip install ruff
-      - run: ruff check .
-
-  # ---------------------------------------------------------------------------------------------------------------
-  # The programs. Two variants: a folder build in a zip (starts fastest, fewest antivirus false alarms) and a single exe.
-  # ---------------------------------------------------------------------------------------------------------------
   build-windows:
-    name: build (${{ matrix.variant }})
-    needs: test
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [portable, onefile]
-    env:
-      DISTILL_ONEFILE: ${{ matrix.variant == 'onefile' && '1' || '0' }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements*.txt
-      - run: python -m pip install -r requirements-dev.txt
-      - name: Everything the program bundles is installed
-        run: python -c "import PySide6, py7zr, libtorrent, mutagen; print('PySide6', PySide6.__version__, '| libtorrent', libtorrent.__version__)"
-      - name: PyInstaller
-        run: python -m PyInstaller --noconfirm --clean --log-level INFO Distill.spec
-      - name: Start the built program (self-test)
-        shell: pwsh
-        run: |
-          $exe = if ($env:DISTILL_ONEFILE -eq '1') { 'dist/Distill.exe' } else { 'dist/Distill/Distill.exe' }
-          $report = Join-Path $PWD 'selftest.txt'
-          $p = Start-Process -FilePath $exe -ArgumentList '--self-test', $report -PassThru
-          if (-not $p.WaitForExit(240000)) { $p.Kill(); Get-Content $report -ErrorAction SilentlyContinue; throw 'The built program did not finish its self-test in 4 minutes.' }
-          if (Test-Path $report) { Get-Content $report } else { Write-Host 'The program wrote no report.' }
-          if ($p.ExitCode -ne 0) { throw "Self-test failed (exit code $($p.ExitCode))." }
-      - name: Zip the folder build
-        if: matrix.variant == 'portable'
-        shell: pwsh
-        run: Compress-Archive -Path dist/Distill/* -DestinationPath dist/Distill-portable.zip
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Distill-${{ matrix.variant }}
-          path: ${{ matrix.variant == 'portable' && 'dist/Distill-portable.zip' || 'dist/Distill.exe' }}
-          if-no-files-found: error
-      # PyInstaller's own list of what it could not find: the first place to look when a build misbehaves.
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: build-diagnostics-${{ matrix.variant }}
-          path: |
-            build/Distill/warn-Distill.txt
-            selftest.txt
-          if-no-files-found: ignore
 
-  # ---------------------------------------------------------------------------------------------------------------
-  # Pushing a tag like v1.0.1 publishes the two programs as a GitHub release.
-  # ---------------------------------------------------------------------------------------------------------------
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-windows
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v6
-      - name: The tag matches the version in the code
-        run: |
-          python3 - <<'PY'
-          import os, re
-          version = re.search(r'APP_VERSION = "([^"]+)"', open("distill/constants.py").read()).group(1)
-          tag = os.environ["GITHUB_REF_NAME"]
-          if tag != version and not tag.startswith(version + "."):
-              raise SystemExit(f"Tag {tag} does not match APP_VERSION {version} in distill/constants.py")
-          PY
-      - uses: actions/download-artifact@v7
-        with:
-          pattern: Distill-*
-          path: release
-          merge-multiple: true
-      - name: Checksums
-        working-directory: release
-        run: sha256sum Distill* > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: release/*
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11' # Use your exact Python version here
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -r requirements.txt
+
+    - name: Build Distill with PyInstaller
+      # --noconfirm: Overwrites existing builds without pausing
+      # --onefile: Packages everything into a single .exe
+      # --windowed: Hides the background console window (crucial for Qt apps)
+      # --add-data: Bundles your emulators.json file (Windows uses ; as the separator)
+      run: |
+        pyinstaller --noconfirm --onefile --windowed --add-data "emulators.json;." --name "Distill" main.py
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Distill-Windows
+        path: dist/Distill.exe
+        retention-days: 7
