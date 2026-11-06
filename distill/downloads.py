@@ -817,16 +817,28 @@ class DownloadRunner:
 
     @staticmethod
     def _inside(path: Path, folder: Path) -> bool:
-        """Does `path` stay inside `folder` once links are followed? On Windows resolve() can be refused ('access denied')
-        for a moment while another worker is creating that same new folder; that is retried, and if it keeps failing the
-        plain spelling is compared instead (the names were already cleaned of '..' and separators)."""
-        for attempt in range(4):
-            try:
-                return path.resolve().is_relative_to(folder.resolve())
-            except OSError:
-                time.sleep(0.05 * (attempt + 1))
-        here, root = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
-        return here == root or here.startswith(root.rstrip("\\/") + os.sep)
+        """Is `path` inside `folder`, links included? The spelling is compared first, never resolve()d: resolve() answers
+        differently depending on whether a folder exists yet (it expands 8.3 short names like RUNNER~1 only when it does),
+        so two workers starting together in a new folder could disagree and a good file was refused as 'unsafe'. The
+        names are already cleaned of '..', separators and drive letters (see locate). What the spelling can't show is a
+        link already inside the folder that leads out of it, so each link on the way (which exists, so resolve() is
+        consistent for it and the folder) must still end up inside."""
+        def norm(p: Path) -> str:
+            return os.path.normcase(os.path.abspath(p))
+
+        root = norm(folder)
+        if not (norm(path) == root or norm(path).startswith(root.rstrip("\\/") + os.sep)):
+            return False
+        for step in (path, *path.parents):
+            if norm(step) == root:
+                break
+            if step.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(step)):
+                try:
+                    if not step.resolve().is_relative_to(folder.resolve()):
+                        return False
+                except OSError:
+                    return False
+        return True
 
     def _target(self, rf: RemoteFile) -> Path:
         return self.locate(rf, self.dest, self.per_item)
