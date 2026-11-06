@@ -18,6 +18,7 @@ from .github_auth import github_headers
 REPO = "QyuBurt/Distill"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 CHECK_ENABLED = os.environ.get("DISTILL_NO_UPDATE_CHECK") != "1"  # tests and CI switch this off
+PREVIEW = os.environ.get("DISTILL_UPDATE_PREVIEW") == "1"  # show the update screen with a made-up download (no release needed)
 USER_AGENT = f"{APP_NAME}-updater"
 
 

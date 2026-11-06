@@ -53,7 +53,7 @@ class Emulator:
     repo: str = ""  # "owner/name" (GitHub) or the path on `host`; already resolved for this OS
     source: str = "github"  # github | gitlab | forgejo | custom
     host: str = ""  # gitlab / forgejo host
-    adapter: str = ""  # custom: dolphin_update | libretro_buildbot | blastem_site | bigpemu_site | bluestacks_winget
+    adapter: str = ""  # custom: dolphin_update | libretro_buildbot | blastem_site | bigpemu_site | bluestacks_winget | scummvm_site
     endpoint: str = ""
     version_from: str = "tag"  # tag | published_at | asset: what tells one build from the next
     asset: dict = field(default_factory=dict)  # per OS, a regex for the right release file when the guess is wrong
@@ -440,6 +440,20 @@ def _bigpemu(em: Emulator) -> list[dict]:
                           lambda m: name_of(m), "BigPEmu", "https://www.richwhitehouse.com/jaguar/")
 
 
+def _scummvm(em: Emulator) -> list[dict]:
+    """ScummVM: its GitHub releases carry source only. The binaries are on its downloads page, hosted at downloads.scummvm.org
+    (Windows zip, macOS disk image; Linux is Flatpak/Snap/distro packages only, so there is nothing to unpack there)."""
+    page = em.endpoint or "https://www.scummvm.org/downloads/"
+    kinds = {"win32-x86_64.zip": "windows-x64.zip", "macosx.dmg": "macos-universal.dmg"}
+
+    def name_of(m):
+        kind = kinds.get(m.group(3))
+        return f"scummvm-{m.group(2)}-{kind}" if kind else ""
+
+    return _site_release(em, page, r'href="((?:https://downloads\.scummvm\.org)?/frs/scummvm/([^/"]+)/scummvm-[\d.]+[a-z]?-(win32-x86_64\.zip|macosx\.dmg))"',
+                         lambda m: name_of(m), "ScummVM", "https://www.scummvm.org/downloads/")
+
+
 WINGET_BLUESTACKS = "manifests/b/BlueStack/BlueStacks"
 
 
@@ -477,7 +491,7 @@ def _bluestacks(em: Emulator) -> list[dict]:
 
 
 ADAPTERS = {"dolphin_update": _dolphin, "libretro_buildbot": _libretro, "blastem_site": _blastem, "bigpemu_site": _bigpemu,
-            "bluestacks_winget": _bluestacks}
+            "bluestacks_winget": _bluestacks, "scummvm_site": _scummvm}
 
 
 def _site(em: Emulator) -> str:
@@ -617,7 +631,7 @@ def download_hosts(em: Emulator) -> frozenset[str]:
     if em.source in ("gitlab", "forgejo") and em.host:
         return frozenset({em.host.lower()})
     return frozenset({"dolphin_update": ("dl.dolphin-emu.org",), "libretro_buildbot": ("buildbot.libretro.com",), "blastem_site": ("www.retrodev.com",),
-                       "bigpemu_site": ("www.richwhitehouse.com",),
+                       "bigpemu_site": ("www.richwhitehouse.com",), "scummvm_site": ("downloads.scummvm.org",),
                        "bluestacks_winget": ("ak-build.bluestacks.com", "cdn3.bluestacks.com")}.get(em.adapter, ()))
 
 

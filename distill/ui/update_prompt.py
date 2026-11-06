@@ -5,10 +5,11 @@ import threading
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .. import updater
 from ..constants import APP_NAME, APP_VERSION
+from .update_screen import UpdateScreen
 
 
 class _Bridge(QObject):
@@ -21,6 +22,9 @@ class UpdatePromptMixin:
     """Mixed into DistillWindow. Call _update_check_start() once the window is up."""
 
     def _update_check_start(self) -> None:
+        if updater.PREVIEW:  # DISTILL_UPDATE_PREVIEW=1: see the update screen without a release to download
+            QTimer.singleShot(1200, self._update_preview)
+            return
         if not updater.CHECK_ENABLED:
             return
         self._upd = _Bridge(self)
@@ -53,13 +57,9 @@ class UpdatePromptMixin:
     def _update_install(self, update) -> None:
         if getattr(self, "is_processing", False):
             return
-        dlg = QProgressDialog(f"Downloading {APP_NAME} {update.tag}...", "Cancel", 0, 100, self)
-        dlg.setWindowTitle("Updating")
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
+        screen = UpdateScreen(self, f"{APP_NAME} {update.tag}")
         cancelled = threading.Event()
-        dlg.canceled.connect(cancelled.set)
+        screen.cancelled.connect(cancelled.set)
 
         def on_progress(done: int, total: int) -> None:
             if cancelled.is_set():
@@ -72,29 +72,55 @@ class UpdatePromptMixin:
             except Exception as exc:
                 self._upd.downloaded.emit(exc)
 
-        def on_prog(done: int, total: int) -> None:
-            dlg.setMaximum(total if total > 0 else 0)
-            dlg.setValue(done)
+        def fail(message: str) -> None:
+            screen.dismiss()
+            QMessageBox.warning(self, "Update failed", f"{message}\n\nYou can download it by hand:\n{update.page}")
 
         def on_done(result) -> None:
-            dlg.close()
-            self._upd.progress.disconnect(on_prog)
+            self._upd.progress.disconnect(screen.set_progress)
             self._upd.downloaded.disconnect(on_done)
             if isinstance(result, Exception):
-                if not cancelled.is_set():
-                    QMessageBox.warning(self, "Update failed", f"{result}\n\nYou can download it by hand:\n{update.page}")
+                if cancelled.is_set():
+                    screen.dismiss()
+                else:
+                    fail(str(result))
                 return
+            screen.set_installing()  # the logo is full colour while the helper waits for Distill to exit
             try:
                 updater.apply(result, update.tag)
             except Exception as exc:
-                QMessageBox.warning(self, "Update failed", f"{exc}\n\nYou can download it by hand:\n{update.page}")
+                fail(str(exc))
                 return
             self._settings_save()
             from ..app import _hard_exit  # imported here: app.py imports this window
-            QApplication.quit()
-            QTimer.singleShot(1500, lambda: _hard_exit(0))  # a normal exit can hang in libtorrent's shutdown, and the swap waits for it
 
-        self._upd.progress.connect(on_prog)
+            def leave() -> None:
+                QApplication.quit()
+                QTimer.singleShot(1500, lambda: _hard_exit(0))  # a normal exit can hang in libtorrent's shutdown, and the swap waits for it
+
+            QTimer.singleShot(900, leave)  # long enough to see the logo fill up before the window goes
+
+        self._upd.progress.connect(screen.set_progress)
         self._upd.downloaded.connect(on_done)
         threading.Thread(target=work, daemon=True).start()
-        dlg.show()
+        screen.show()
+
+    def _update_preview(self) -> None:
+        """The update screen with a made-up download, for looking at it (and trying Cancel) without a real release."""
+        screen = UpdateScreen(self, f"{APP_NAME} v9.9")
+        total, steps = 48 << 20, 150
+        state = {"n": 0}
+        ticker = QTimer(screen)
+
+        def tick() -> None:
+            state["n"] += 1
+            screen.set_progress(total * state["n"] // steps, total)
+            if state["n"] >= steps:
+                ticker.stop()
+                screen.set_installing()
+                QTimer.singleShot(1800, screen.dismiss)
+
+        screen.cancelled.connect(ticker.stop)
+        ticker.timeout.connect(tick)
+        ticker.start(40)
+        screen.show()

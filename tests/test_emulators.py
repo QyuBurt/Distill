@@ -264,6 +264,28 @@ ManifestType: installer
         with mock.patch.object(rc, "_get", return_value=b"nothing"), self.assertRaises(rc.RecompError):
             em.fetch_releases(e, self.store, force=True)
 
+    def test_scummvm_reads_its_downloads_page(self):
+        e = emu(id="scummvm", name="ScummVM", source="custom", adapter="scummvm_site", repo="")
+        base = "https://downloads.scummvm.org/frs/scummvm/2026.3.0/"
+        page = (f'<a href="{base}scummvm-2026.3.0-win32-x86_64.zip">zip64</a> <a href="{base}scummvm-2026.3.0-win32-x86_64.zip.sha256">sha</a> '
+                f'<a href="{base}scummvm-2026.3.0-win32-x86.zip">zip32</a> <a href="{base}scummvm-2026.3.0-win32.exe">exe</a> '
+                f'<a href="{base}scummvm-2026.3.0-macosx.dmg">dmg</a> <a href="{base}scummvm-2026.3.0-macosx-intel.dmg">old</a>').encode()
+        with mock.patch.object(rc, "_get", return_value=page):
+            rels = em.fetch_releases(e, self.store, force=True)
+        self.assertEqual(rels[0].tag, "2026.3.0")
+        self.assertEqual(len(rels[0].assets), 2)
+        win = rc.pick_asset(rels[0].assets, e, "windows", "x64")
+        self.assertTrue(win["url"].endswith("/2026.3.0/scummvm-2026.3.0-win32-x86_64.zip"))
+        self.assertTrue(rc.pick_asset(rels[0].assets, e, "macos", "arm64")["url"].endswith(".dmg"))
+        self.assertEqual(em.download_hosts(e), frozenset({"downloads.scummvm.org"}))
+        with mock.patch.object(rc, "_get", return_value=b"nothing"), self.assertRaises(rc.RecompError):
+            em.fetch_releases(e, self.store, force=True)
+
+    def test_scummvm_is_downloadable_from_the_catalog(self):
+        by = {x.id: x for x in em.load_catalog([em.bundled_manifest()], "windows")}
+        self.assertEqual(by["scummvm"].adapter, "scummvm_site")
+        self.assertTrue(em.downloadable(by["scummvm"], "windows"))
+
 
 class FindingInstallsTests(Isolated):
     def catalog(self):

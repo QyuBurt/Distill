@@ -581,7 +581,6 @@
    "name": "ScummVM",
    "system": "PC",
    "group": "PC",
-   "repo": "scummvm/scummvm",
    "website": "https://www.scummvm.org/",
    "notes": "Allows you to play classic graphic point-and-click adventure games.",
    "systems": [
@@ -590,6 +589,13 @@
    ],
    "aliases": [
     "scummvm"
+   ],
+   "source": "custom",
+   "adapter": "scummvm_site",
+   "endpoint": "https://www.scummvm.org/downloads/",
+   "platforms": [
+    "windows",
+    "macos"
    ]
   },
   {

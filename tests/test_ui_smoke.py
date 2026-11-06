@@ -1474,5 +1474,53 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(bright, app_icon_pixmap(128, dark=False).toImage())
 
 
+    def test_update_screen_fills_cancels_and_cannot_be_cancelled_once_installing(self):
+        from distill.ui.update_screen import UpdateScreen
+
+        screen = UpdateScreen(None, "Distill v9.9")
+        self.addCleanup(screen.deleteLater)
+        asked = []
+        screen.cancelled.connect(lambda: asked.append(1))
+        screen.set_progress(12 << 20, 48 << 20)
+        self.assertEqual(screen.percent.text(), "25%")
+        self.assertIn("12.0 of 48.0 MB", screen.status.text())
+        screen.set_installing()
+        self.assertEqual((screen.percent.text(), screen.logo.fraction(), screen.cancel.isEnabled()), ("100%", 1.0, False))
+        screen.set_progress(1, 48 << 20)  # a late chunk must not drag the screen back
+        self.assertEqual(screen.percent.text(), "100%")
+        screen.reject()
+        self.assertEqual(asked, [])  # too late to cancel
+        screen.dismiss()
+        self.assertEqual(asked, [])  # and a dismissal is not a cancel
+
+    def test_update_screen_logo_is_grey_then_fills_and_cancel_is_reported(self):
+        from PySide6.QtGui import QColor
+
+        from distill.ui import motion
+        from distill.ui.update_screen import FillLogo, UpdateScreen, greyscale
+        from distill.ui.icon import app_icon_pixmap
+
+        grey = greyscale(app_icon_pixmap(128)).toImage()
+        for x, y in ((20, 20), (64, 64), (100, 100)):  # every opaque pixel has no colour of its own
+            c = QColor(grey.pixel(x, y))
+            self.assertEqual((c.red(), c.green()), (c.green(), c.blue()))
+        self.assertEqual(grey.pixelColor(0, 0).alpha(), 0)  # the rounded corners stay transparent
+        was = motion.Motion.reduce
+        motion.Motion.reduce = True  # no easing: the fraction is set at once
+        self.addCleanup(setattr, motion.Motion, "reduce", was)
+        logo = FillLogo(120)
+        self.addCleanup(logo.deleteLater)
+        logo.set_fraction(0.4)
+        self.assertEqual(logo.fraction(), 0.4)
+        logo.set_fraction(3)
+        self.assertEqual(logo.fraction(), 1.0)
+        screen = UpdateScreen(None, "Distill v9.9")
+        self.addCleanup(screen.deleteLater)
+        asked = []
+        screen.cancelled.connect(lambda: asked.append(1))
+        screen.reject()
+        self.assertEqual(asked, [1])
+
+
 if __name__ == "__main__":
     unittest.main()
