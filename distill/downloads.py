@@ -811,9 +811,22 @@ class DownloadRunner:
             raise ValueError("Unsafe file name in the listing")
         base = dest / clean(rf.group) if (per_item and rf.group) else dest
         path = base.joinpath(*(clean(seg) for seg in parts))
-        if not path.resolve().is_relative_to(dest.resolve()):
+        if not cls._inside(path, dest):
             raise ValueError("Unsafe file path in the listing")
         return path
+
+    @staticmethod
+    def _inside(path: Path, folder: Path) -> bool:
+        """Does `path` stay inside `folder` once links are followed? On Windows resolve() can be refused ('access denied')
+        for a moment while another worker is creating that same new folder; that is retried, and if it keeps failing the
+        plain spelling is compared instead (the names were already cleaned of '..' and separators)."""
+        for attempt in range(4):
+            try:
+                return path.resolve().is_relative_to(folder.resolve())
+            except OSError:
+                time.sleep(0.05 * (attempt + 1))
+        here, root = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+        return here == root or here.startswith(root.rstrip("\\/") + os.sep)
 
     def _target(self, rf: RemoteFile) -> Path:
         return self.locate(rf, self.dest, self.per_item)

@@ -110,6 +110,15 @@ class RunnerCase(unittest.TestCase):
     def summary(self):
         return self.events[-1][1]
 
+    def run(self, result=None):
+        """Append what the runner said to any failure of these tests, so a CI log explains itself."""
+        res = super().run(result)
+        for bucket in (res.failures, res.errors):
+            for k, (test, text) in enumerate(bucket):
+                if test is self and "runner log:" not in text:
+                    bucket[k] = (test, f"{text}\n{self.why()}")
+        return res
+
     def why(self) -> str:
         """What the runner said while it ran: shown with a failed assertion so a CI failure explains itself."""
         said = [str(e[1]).strip() for e in self.events if e and e[0] in ("log", "notice") and len(e) > 1]
@@ -283,6 +292,12 @@ class FileHelperTests(unittest.TestCase):
         final = self.touch("item/disc/game.iso")
         self.assertEqual(dlfiles.files_on_disk(rf, self.dest, True), [final, part])
         self.assertEqual(dlfiles.files_on_disk(rf, self.dest, False), [])  # per-item setting changes the place
+
+    def test_locating_a_file_survives_a_transient_access_denied(self):
+        rf = RemoteFile("disc/game.iso", "http://x/game.iso", 10)
+        with mock.patch.object(Path, "resolve", side_effect=PermissionError(5, "Access is denied")), \
+                mock.patch("distill.downloads.time.sleep"):
+            self.assertEqual(DownloadRunner.locate(rf, self.dest, False), self.dest / "disc" / "game.iso")
 
     def test_an_unsafe_name_never_resolves(self):
         rf = RemoteFile("../../evil", "http://x/e", 1)
