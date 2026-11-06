@@ -818,6 +818,21 @@ class DownloadRunner:
         return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException,
                                 _Short, _BadHash))
 
+    @staticmethod
+    def _make_dir(folder: Path) -> None:
+        """mkdir(exist_ok=True) that survives Windows, where two threads creating the same new folder at the same moment
+        can make one of them fail with 'access denied' even though the folder now exists."""
+        for attempt in range(5):
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                return
+            except PermissionError:
+                if folder.is_dir():
+                    return
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+
     def _replace(self, part: Path, dest: Path) -> None:
         for attempt in range(5):
             try:
@@ -831,7 +846,7 @@ class DownloadRunner:
     def _fetch(self, idx: int, rf: RemoteFile, dest: Path) -> str:
         if rf.url.startswith(ytdlp.PREFIX):
             return self._fetch_ytdlp(idx, rf, dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        self._make_dir(dest.parent)
         part = dest.with_name(dest.name + ".part")
         if dest.exists() and (rf.size is None or dest.stat().st_size == rf.size):
             if rf.size is None:
@@ -936,7 +951,7 @@ class DownloadRunner:
         exe = ytdlp.find_exe()
         if not exe:
             raise LinkError("yt-dlp isn't installed: it is downloaded in Settings > Tools > Download Tools")
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        self._make_dir(dest.parent)
         existing = [p for p in dest.parent.glob(glob.escape(dest.name) + ".*")
                     if p.suffix.lower() not in (".part", ".ytdl", ".temp", ".tmp") and p.is_file()]
         if (picked := ytdlp.parse_choice(rf.fmt)) is not None:  # an MP3 is not "already there" because the MP4 is
