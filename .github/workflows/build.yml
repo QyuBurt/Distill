@@ -31,7 +31,7 @@ jobs:
       # --windowed: Hides the background console window (crucial for Qt apps)
       # --add-data: Bundles your emulators.json file (Windows uses ; as the separator)
       run: |
-        pyinstaller --noconfirm --onefile --windowed --add-data "emulators.json;." --name "Distill" main.py
+        pyinstaller --noconfirm --onefile --windowed --add-data "emulators.json;." --name "Distill" Distill.pyw
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
