@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import os
+import sys
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,44 @@ PKG = Path(constants.__file__).resolve().parent
 
 
 class IsolationTests(unittest.TestCase):
+    def test_network_guard_blocks_non_loopback_audit_events(self):
+        # Emit the real socket audit events without creating a socket or doing
+        # DNS; this also works in sandboxes that deny even loopback sockets.
+        for event, args in (("socket.connect", (None, ("198.51.100.23", 443))),
+                            ("socket.connect", (None, ("2001:db8::23", 443, 0, 0))),
+                            ("socket.getaddrinfo", ("guard-test.invalid", 443, 0, 0, 0))):
+            with self.subTest(event=event, args=args):
+                with self.assertRaisesRegex(AssertionError, "non-loopback"):
+                    sys.audit(event, *args)
+
+    def test_network_guard_allows_loopback_and_local_sockets(self):
+        for host in ("127.0.0.1", "127.0.0.2", "::1", "localhost", b"127.0.0.1", None):
+            with self.subTest(host=host):
+                sys.audit("socket.getaddrinfo", host, 80, 0, 0, 0)
+        sys.audit("socket.connect", None, ("127.0.0.1", 80))
+        sys.audit("socket.connect", None, ("::1", 80, 0, 0))
+        sys.audit("socket.connect", None, "/tmp/local-test-socket")
+
+    @unittest.skipIf(sys.platform == "win32", "Windows environment is preserved")
+    def test_home_and_xdg_paths_are_inside_the_run_sandbox(self):
+        self.assertIn(SANDBOX, Path.home().parents)
+        for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+            with self.subTest(name=name):
+                self.assertIn(SANDBOX, Path(os.environ[name]).parents)
+
+    def test_keyring_uses_only_the_in_memory_test_backend(self):
+        try:
+            import keyring
+        except ImportError:
+            self.skipTest("optional keyring is not installed")
+        backend = keyring.get_keyring()
+        self.assertEqual(type(backend).__module__, "tests")
+        self.assertEqual(type(backend).__name__, "MemoryKeyring")
+        backend.set_password("isolation-test", "user", "secret")
+        self.assertEqual(backend.get_password("isolation-test", "user"), "secret")
+        backend.delete_password("isolation-test", "user")
+        self.assertIsNone(backend.get_password("isolation-test", "user"))
+
     def test_no_module_keeps_a_path_in_the_real_app_folder(self):
         escaped = [f"{m.__name__}.{name} = {value}" for m in app_modules() if m is not constants
                    for name, value in vars(m).items() if is_app_data(value, constants.APP_DIR, PKG)]

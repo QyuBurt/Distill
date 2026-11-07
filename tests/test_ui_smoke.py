@@ -15,12 +15,19 @@ except ImportError:  # pragma: no cover
 if sys.platform != "win32":  # Windows' offscreen plugin has no fonts and can crash; the normal one works without showing windows
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from distill import soundtracks as st
-from tests.helpers import IsolatedSoundtrackFiles
+from tests.helpers import IsolatedSoundtrackFiles, WindowTestCase
 from tests import helpers  # noqa: E402,F401
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class WindowSmokeTests(IsolatedSoundtrackFiles):
+class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
+    def setUp(self):
+        # Slots invoked after construction can also start cover/network workers.
+        workers = mock.patch("threading.Thread.start", lambda self: None)
+        workers.start()
+        self.addCleanup(workers.stop)
+        super().setUp()
+
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -34,6 +41,40 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         with mock.patch.object(tools.ToolManager, "run", lambda self: None, create=True), \
                 mock.patch("threading.Thread.start", lambda self: None):  # no network, no background workers
             return DistillWindow()
+
+    def test_close_keeps_production_hard_exit_local_to_the_window_module(self):
+        from distill.ui import main_window
+        real_exit = os._exit
+        win = self.make_window()
+        with mock.patch.object(main_window, "os", wraps=os) as local_os:
+            local_os._exit = mock.Mock()
+            win.close()
+            local_os._exit.assert_called_once_with(0)
+            self.assertIs(os._exit, real_exit)
+
+    def test_window_fixture_intercepts_exit_without_patching_global_os(self):
+        from distill.ui import main_window
+        self.assertIsNot(main_window.os, os)
+        self.assertIs(main_window.os._exit, self.window_exit)
+        self.make_window().close()
+        self.window_exit.assert_called_once_with(0)
+
+    def test_window_theme_bindings_return_to_baseline(self):
+        from distill.ui.theme import T
+        import shiboken6
+
+        baseline = sum(shiboken6.isValid(ref()) for ref, _ in T._bound.values() if ref() is not None)
+        bound_baseline = len(T._bound)
+        for _ in range(3):
+            win = self.make_window()
+            with mock.patch("distill.ui.main_window.os", wraps=os) as local_os:
+                local_os._exit = mock.Mock()
+                win.close()
+            # Exercise the same teardown the fixture uses between tests.
+            self.cleanup_widgets()
+            live = sum(shiboken6.isValid(ref()) for ref, _ in T._bound.values() if ref() is not None)
+            self.assertEqual(live, baseline)
+            self.assertEqual(len(T._bound), bound_baseline)
 
     def test_window_builds_with_every_page(self):
         win = self.make_window()
@@ -417,7 +458,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         from PySide6.QtCore import Qt
 
         self.assertEqual(dlg.list.item(0).data(Qt.ItemDataRole.UserRole), "sound")
-        self.assertIn("Ctrl+1", win.nav_items["chd"].toolTip())
+        from PySide6.QtGui import QShortcut
+        # CHD is no longer the first sidebar page; verify its actual shortcut.
+        shortcuts = {s.key().toString(): s for s in win.findChildren(QShortcut)}
+        self.assertIn("Ctrl+5", shortcuts)
+        self.assertIn("Ctrl+5", win.nav_items["chd"].toolTip())
 
     def test_title_shows_progress_while_running_and_settings_search_filters(self):
         win = self.make_window()
@@ -463,8 +508,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_start_button_drifts_only_while_running_and_holds_when_paused(self):
         win = self.make_window()
         self.addCleanup(win.close)
+        win._show_page("chd")  # the landing page hides the run panel
         win.show()
         btn = win.start_btn
+        btn.setEnabled(True)  # tool-check workers are stubbed by this fixture
+        self.assertTrue(btn.isVisible())
         btn.set_state(True, False)
         self.assertTrue(btn._tick_timer.isActive())
         before = btn._phase
@@ -992,7 +1040,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win = self.make_window()
         self.addCleanup(win.close)
         win.show()
+        win.now_playing.show()  # playback normally reveals the sidebar player
         slider = win.now_playing._slider
+        self.assertTrue(slider.isVisible())
         slider.setRange(0, 1000)
         slider.setValue(400)
         slider.set_moving(True)
@@ -1076,8 +1126,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
             for _ in range(3):  # a scrollbar appearing changes the width once more
                 self.app.processEvents()
             scroll = win.settings_stack.widget(index)
-            self.assertLessEqual(scroll.widget().width(), scroll.viewport().width(), f"page {index} runs off the window")
-            widths.add(scroll.widget().width())
+            self.assertEqual(scroll.widget().width(), scroll.viewport().width(), f"page {index} runs off the window")
+            # A visible scrollbar consumes content space; compare the content
+            # width plus its actual scrollbar geometry, not the stack's width.
+            bar = scroll.verticalScrollBar()
+            widths.add(scroll.widget().width() + (bar.width() if bar.isVisible() else 0))
         self.assertEqual(len(widths), 1, f"settings pages differ in width: {sorted(widths)}")
 
     def test_romm_switch_changes_mode_and_keeps_the_description(self):
@@ -1161,26 +1214,26 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win._st_player.position.return_value = 0
         return win, album, files
 
-    def test_clicking_a_track_previews_it_and_clicking_again_stops(self):
+    def test_playing_a_track_previews_it_and_playing_again_stops(self):
         from distill.ui import soundtrack_page
 
         win, _album, _files = self._win_with_three_tracks()
         top, player = win.st_tree.topLevelItem(0), win._st_player
         self.assertEqual(top.child(0).data(0, soundtrack_page.URL_ROLE), "https://x/1")
-        win._st_item_clicked(top, 0)  # a game row is not a track: nothing plays
+        win._st_play_child(top)  # a game row is not a track: nothing plays
         player.play.assert_not_called()
-        win._st_item_clicked(top.child(1), 0)
+        win._st_play_child(top.child(1))
         self.assertEqual(player.setSource.call_args[0][0].toString(), "https://x/2")
         self.assertEqual((win._st_index, len(win._st_queue)), (1, 3))  # the whole album is the queue
         self.assertTrue(win.now_playing.isVisibleTo(win))
-        win._st_item_clicked(top.child(1), 0)  # the same track again stops
+        win._st_play_child(top.child(1))  # the same track again stops
         self.assertEqual(win._st_index, -1)
         self.assertFalse(win.now_playing.isVisibleTo(win))
 
     def test_sidebar_player_steps_through_the_album(self):
         win, _album, _files = self._win_with_three_tracks()
         top, player = win.st_tree.topLevelItem(0), win._st_player
-        win._st_item_clicked(top.child(0), 0)
+        win._st_play_child(top.child(0))
         win.now_playing.skipForward.emit()
         self.assertEqual(win._st_index, 1)
         self.assertEqual(player.setSource.call_args[0][0].toString(), "https://x/2")
@@ -1202,7 +1255,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         win, _album, _files = self._win_with_three_tracks()
         player = win._st_player
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(0), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(0))
         player.playbackState.return_value = QMediaPlayer.PlaybackState.PlayingState
         win.now_playing.togglePlay.emit()
         player.pause.assert_called_once()
@@ -1215,16 +1268,24 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(win._st_index, -1)
 
     def test_playback_carries_on_when_the_tracklist_is_rebuilt_or_searched_again(self):
-        from distill.ui import soundtrack_page
-
         win, album, files = self._win_with_three_tracks()
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(0), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(0))
         with mock.patch("threading.Thread.start", lambda self: None):
             win._st_search()  # clears the tree, but the queue is plain data
         self.assertEqual(win._st_index, 0)
         win._st_on_found(0, __import__("distill.soundtracks", fromlist=["x"]).GameResult(win._st_rows[0].result.request, [album]))
         win._st_on_tracks(0, album, files, "")
-        self.assertIs(win.st_tree.topLevelItem(0).child(0).icon(0).isNull(), False)
+        win._show_page("sound")
+        win.show()
+        top = win.st_tree.topLevelItem(0)
+        win.st_tree.expandItem(top)  # itemExpanded attaches and synchronises the lazy track rows
+        self.app.processEvents()
+        child = top.child(0)
+        row = win.st_tree.itemWidget(child, 0)
+        self.assertIsNotNone(row)
+        self.assertTrue(row._current)
+        row.play._anim.setCurrentTime(row.play._anim.duration())
+        self.assertTrue(row.play.playing)  # the embedded play button now carries this state
         self.assertEqual(win._st_url_playing(), "https://x/1")
 
     def test_cover_art_is_fetched_cached_and_shown_on_the_card(self):
@@ -1234,14 +1295,14 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         win, album, files = self._win_with_three_tracks()
         album.art = "https://archive.org/services/img/p5"
-        win._st_on_tracks(0, album, files, "")  # rebuild so the rows carry the cover address
-        top = win.st_tree.topLevelItem(0)
-        self.assertEqual(top.child(0).data(0, soundtrack_page.ART_ROLE), album.art)
         started = []
         with mock.patch("threading.Thread.start", lambda self: started.append(self._args)):
-            win._st_item_clicked(top.child(0), 0)
-            win._st_item_clicked(top.child(0), 0)  # stops
-            win._st_item_clicked(top.child(1), 0)  # same album again: still one fetch in flight
+            win._st_on_tracks(0, album, files, "")  # rebuilding also requests the album cover
+            top = win.st_tree.topLevelItem(0)
+            self.assertEqual(top.child(0).data(0, soundtrack_page.ART_ROLE), album.art)
+            win._st_play_child(top.child(0))
+            win._st_play_child(top.child(0))  # stops
+            win._st_play_child(top.child(1))  # same album again: still one fetch in flight
         self.assertEqual(started, [(album.art,)])
         self.assertTrue(win.now_playing._art.isVisibleTo(win.now_playing))  # the placeholder while it loads
         pix = QPixmap(40, 20)
@@ -1254,22 +1315,23 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertIn(album.art, win._st_art_cache)
         self.assertFalse(win.now_playing._art.pixmap().isNull())
         with mock.patch("threading.Thread.start", lambda self: started.append("again")):
-            win._st_item_clicked(top.child(2), 0)  # cached: shown at once, nothing fetched
+            win._st_play_child(top.child(2))  # cached: shown at once, nothing fetched
         self.assertEqual(len(started), 1)
         self.assertFalse(win.now_playing._art.pixmap().isNull())
 
     def test_failed_cover_fetch_hides_the_placeholder_and_tracks_without_art_show_none(self):
         win, album, files = self._win_with_three_tracks()
         album.art = "https://archive.org/services/img/gone"
-        win._st_on_tracks(0, album, files, "")
-        top = win.st_tree.topLevelItem(0)
         with mock.patch("threading.Thread.start", lambda self: None):
-            win._st_item_clicked(top.child(0), 0)
+            # Rebuilding the album requests its cover before playback begins.
+            win._st_on_tracks(0, album, files, "")
+            top = win.st_tree.topLevelItem(0)
+            win._st_play_child(top.child(0))
         win._st_on_art(album.art, b"")  # the fetch came back empty
         self.assertFalse(win.now_playing._art.isVisibleTo(win.now_playing))
         album.art = ""
         win._st_on_tracks(0, album, files, "")
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(1), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(1))
         self.assertFalse(win.now_playing._art.isVisibleTo(win.now_playing))
 
     def test_now_playing_widget_reports_clicks_and_shows_state(self):
@@ -1304,7 +1366,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.addCleanup(win.close)
         win._show_page("sound")
         self.assertEqual(win._current_mode(), "dl")
-        self.assertEqual(win.start_btn.text(), "Start Download")
+        self.assertEqual(win.start_btn.text(), "Save Selected Soundtracks")
 
     def test_fixed_height_text_boxes_do_not_make_their_cards_grow(self):
         """A fixed-height text box that still has an expanding size policy makes its card claim the page's spare
@@ -1381,9 +1443,12 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_run_buttons_start_in_the_right_state(self):
         win = self.make_window()
         self.addCleanup(win.close)
-        self.assertTrue(win.start_btn.isEnabled())
+        self.assertFalse(win.start_btn.isEnabled())  # waiting for the stubbed tool checks
         self.assertFalse(win.pause_btn.isEnabled())
         self.assertFalse(win.stop_btn.isEnabled())
+        for key in tuple(win._pending_tools):
+            win._tool_ready(key)
+        self.assertTrue(win.start_btn.isEnabled())
 
     def test_converter_pages_are_compact_and_list_pages_are_not(self):
         win = self.make_window()
@@ -1665,6 +1730,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         host = QWidget()
         host.resize(300, 200)
+        host.show()  # the real app's host is visible before UpdateScreen grabs it
+        self.app.processEvents()
         self.addCleanup(host.close)
         self.addCleanup(setattr, veil_mod.motion.Motion, "reduce", veil_mod.motion.Motion.reduce)
         veil_mod.motion.Motion.reduce = True  # no fades: the veil is there and gone at once
