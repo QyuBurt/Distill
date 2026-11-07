@@ -174,6 +174,18 @@ def _safe_zip_extract(archive: Path, target: Path, password: str = "") -> None:
                 raise
 
 
+def _refuse_unsafe_zip_paths(archive: Path, target: Path) -> None:
+    """7-Zip quietly tidies a '../' name into the target folder; Distill's rule is to refuse such an archive, so look before extracting."""
+    root = target.resolve()
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for info in z.infolist():
+                if not (target / info.filename).resolve().is_relative_to(root):
+                    raise ValueError(f"unsafe path in the archive: {info.filename}")
+    except zipfile.BadZipFile:
+        pass  # not readable here: 7-Zip or the Python reader will say so
+
+
 def _seven_extract(seven: str, archive: Path, target: Path, password: str) -> None:
     cmd = [seven, "x", "-y", f"-o{target}"]
     if password:
@@ -193,6 +205,7 @@ def _extract(archive: Path, target: Path, password: str = "") -> None:
     name = archive.name.lower()
     seven = find_7zip()
     if name.endswith(".zip") and not is_multipart(archive):
+        _refuse_unsafe_zip_paths(archive, target)
         if seven:  # 7-Zip first: faster, and it copes with names Python's zipfile mangles on Windows; Python is the fallback
             try:
                 _seven_extract(seven, archive, target, password)
