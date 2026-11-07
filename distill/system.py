@@ -298,6 +298,7 @@ STALL_RETRIES = 1  # a stalled tool is restarted this many times before the titl
 
 KILL_GRACE = 20.0  # seconds a killed tool gets to really exit before it is abandoned
 FINISH_GRACE = 30.0  # seconds a tool gets to exit after printing that it has finished; past that it is closed, whatever it is doing
+FLUSH_PATIENCE = 300.0  # seconds a tool that has finished is given to really exit once closed: a big file can take that long to reach a slow drive
 UNCONFIRMED_GRACE = 180.0  # ... and to say so, or exit, once its progress has reached 100% (some hang there without ever printing it)
 
 
@@ -309,11 +310,12 @@ IO_RETRY_DELAY = 3.0  # ... every few seconds, ~2 minutes in all
 
 class _Stalled(Exception):
     """A tool made no progress for `minutes` and was killed. `abandoned`: it would not die (stuck in a
-    disk request), so it may still hold its files."""
+    disk request), so it may still hold its files. `finished`: it had reported that its work was done (its output is whole);
+    it was the closing down afterwards that never ended."""
 
-    def __init__(self, minutes: float, stage: str, abandoned: bool = False):
+    def __init__(self, minutes: float, stage: str, abandoned: bool = False, finished: bool = False):
         super().__init__(f"no progress for {minutes:g} min")
-        self.minutes, self.stage, self.abandoned = minutes, stage, abandoned
+        self.minutes, self.stage, self.abandoned, self.finished = minutes, stage, abandoned, finished
 
 
 def _cpu_seconds(pid: int) -> float | None:

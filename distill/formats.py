@@ -57,6 +57,66 @@ def associated_files(sheet: Path) -> set[Path]:
     return files
 
 
+_WINDOWS_ILLEGAL = str.maketrans(':<>|"?*', "_______")  # what Python's zip extraction does to a name on Windows
+
+
+def _name_variants(ref: str) -> list[str]:
+    """Other names a track file called `ref` in a cue sheet may have ended up with once unzipped: Python's Windows renaming of characters
+    a file name can't hold, and a name whose bytes were read with the wrong character set (zips made without the UTF-8 flag are read as
+    cp437, so a name written in another code page comes out garbled)."""
+    out = [ref.translate(_WINDOWS_ILLEGAL)]
+    for enc in ("cp850", "cp1252", "latin-1", "utf-8"):
+        try:
+            out.append(ref.encode(enc).decode("cp437"))
+            out.append(ref.translate(_WINDOWS_ILLEGAL).encode(enc).decode("cp437"))
+        except (UnicodeError, ValueError):
+            continue
+    return [v for i, v in enumerate(out) if v != ref and v not in out[:i]]
+
+
+def repair_sheet_references(root: Path) -> list[str]:
+    """After a zip or archive has been unpacked under `root`: make every .cue point at the track files as they were really written.
+    Unpacking can rename a file (a ':' or '?' becomes '_' on Windows; a name in the wrong character set comes out garbled) while the
+    cue still holds the original name, and chdman then can't find the track. Only the unpacked copy is edited. Returns a sentence for
+    each reference that was corrected, and for each that could not be matched (those are left alone)."""
+    notes: list[str] = []
+    for sheet in sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() == ".cue"):
+        try:
+            text = sheet.read_bytes().decode("utf-8", errors="surrogateescape")
+            on_disk = {p.name.lower(): p.name for p in sheet.parent.iterdir() if p.is_file()}
+        except OSError:
+            continue
+        lines, changed = text.splitlines(keepends=True), False
+        wanted = [m[1] or m[2] for line in lines if (m := CUE_FILE_RE.match(line))]
+        for i, line in enumerate(lines):
+            if not (m := CUE_FILE_RE.match(line)):
+                continue
+            ref = m[1] or m[2]
+            if (sheet.parent / ref.replace("\\", "/")).is_file():
+                continue  # as written
+            leaf = ref.replace("\\", "/").rsplit("/", 1)[-1]
+            actual = on_disk.get(leaf.lower()) or next((on_disk[v.lower()] for v in _name_variants(leaf) if v.lower() in on_disk), None)
+            if actual is None:  # one track file left over, of the same kind as the one missing: it can only be that one
+                spare = [n for n in on_disk.values() if n.lower().endswith(Path(leaf).suffix.lower()) and n not in
+                         {x.rsplit("/", 1)[-1] for x in (w.replace("\\", "/") for w in wanted)}
+                         and not n.lower().endswith(".cue")]
+                actual = spare[0] if len(spare) == 1 and Path(leaf).suffix else None
+            if actual is None:
+                notes.append(f"{sheet.name} refers to '{ref}', which is not among the unpacked files")
+                continue
+            if actual == ref:
+                continue
+            lines[i] = line.replace(m.group(1) or m.group(2), actual, 1)
+            changed = True
+            notes.append(f"{sheet.name}: '{ref}' is stored as '{actual}'; the sheet was pointed at it")
+        if changed:
+            try:
+                sheet.write_bytes("".join(lines).encode("utf-8", errors="surrogateescape"))
+            except OSError:
+                notes.append(f"{sheet.name} could not be updated")
+    return notes
+
+
 def _iso_root_entries(f) -> dict[str, tuple[int, int, bool]]:
     """Name -> (first sector, size, is_dir) for the ISO 9660 root directory."""
     f.seek(16 * 2048)  # primary volume descriptor

@@ -4,7 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from distill.formats import (PS3_SECTOR, XDVDFS_MAGIC, XDVDFS_OFFSETS, PkgInfo, associated_files, check_pkg_folder,
+from distill.formats import (PS3_SECTOR, repair_sheet_references, XDVDFS_MAGIC, XDVDFS_OFFSETS, PkgInfo, associated_files, check_pkg_folder,
                               compare_trees, extract_iso, is_gamecube_wii_image, is_ps3_image, is_ps4_game_folder,
                               is_ps4_pkg, is_ps5_pkg, is_psp_image, is_xbox_image, iso_wants_dvd_mode,
                               locate_pkg_root, parse_sfo, pkg_target, read_pkg_info, read_ps3_sfo)
@@ -197,6 +197,72 @@ class CueTests(TempDirTest):
         self.write("d.gdi", '2\n1 0 4 2352 "track01.bin" 0\n2 450 0 2352 track02.raw 0\n')
         a, b = self.write("track01.bin"), self.write("track02.raw")
         self.assertEqual(associated_files(self.tmp / "d.gdi"), {self.tmp / "d.gdi", a, b})
+
+
+class SheetRepairTests(TempDirTest):
+    """Unpacking can rename a track file (Python swaps ':' '?' '*' and the like for '_' on Windows; a zip written without the UTF-8 flag
+    is read as cp437) while the cue sheet inside still names it the old way."""
+
+    def sheet(self, ref: str, disk: str | None, *, folder: str = "g") -> Path:
+        cue = self.write(f"{folder}/g.cue", f'FILE "{ref}" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n'.encode("utf-8"))
+        if disk:
+            self.write(f"{folder}/{disk}", b"bin")
+        return cue
+
+    def test_a_character_windows_replaced_is_followed(self):
+        cue = self.sheet("Burn: Cycle (USA).bin", "Burn_ Cycle (USA).bin")
+        notes = repair_sheet_references(self.tmp)
+        self.assertEqual(cue.read_text().splitlines()[0], 'FILE "Burn_ Cycle (USA).bin" BINARY')
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Burn: Cycle (USA).bin", notes[0])
+
+    def test_a_name_read_in_the_wrong_character_set_is_followed(self):
+        cue = self.sheet("Café (Europe).bin", "CafΘ (Europe).bin")  # cp1252 'é' read back as cp437 'Θ'
+        repair_sheet_references(self.tmp)
+        self.assertIn("CafΘ (Europe).bin", cue.read_text(encoding="utf-8"))
+
+    def test_a_different_case_is_made_to_match(self):
+        cue = self.sheet("GAME.BIN", "Game.bin")
+        repair_sheet_references(self.tmp)
+        self.assertIn('"Game.bin"', cue.read_text())
+
+    def test_a_sheet_that_already_matches_is_not_touched(self):
+        cue = self.sheet("Fine (Europe).bin", "Fine (Europe).bin")
+        before = cue.read_bytes()
+        self.assertEqual(repair_sheet_references(self.tmp), [])
+        self.assertEqual(cue.read_bytes(), before)  # byte for byte, line endings included
+
+    def test_line_endings_and_the_other_lines_survive_a_repair(self):
+        cue = self.sheet("A: B.bin", "A_ B.bin")
+        repair_sheet_references(self.tmp)
+        self.assertEqual(cue.read_bytes(), b'FILE "A_ B.bin" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n')
+
+    def test_a_track_in_a_subfolder_is_left_alone(self):
+        cue = self.sheet("tracks/Track 01.bin", None)
+        self.write("g/tracks/Track 01.bin", b"bin")
+        self.assertEqual(repair_sheet_references(self.tmp), [])
+        self.assertIn("tracks/Track 01.bin", cue.read_text())
+
+    def test_the_one_track_file_left_over_is_taken_for_the_one_that_is_missing(self):
+        cue = self.sheet("Weird name.bin", "Completely different.bin")
+        repair_sheet_references(self.tmp)
+        self.assertIn('"Completely different.bin"', cue.read_text())
+
+    def test_a_reference_with_no_candidate_is_reported_and_left_alone(self):
+        cue = self.sheet("Missing.bin", None)
+        before = cue.read_bytes()
+        notes = repair_sheet_references(self.tmp)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Missing.bin", notes[0])
+        self.assertEqual(cue.read_bytes(), before)
+
+    def test_two_missing_tracks_are_not_guessed_between(self):
+        cue = self.write("g/g.cue", b'FILE "One.bin" BINARY\n  TRACK 01 AUDIO\nFILE "Two.bin" BINARY\n  TRACK 02 AUDIO\n')
+        self.write("g/x.bin", b"1")
+        self.write("g/y.bin", b"2")
+        before = cue.read_bytes()
+        self.assertEqual(len(repair_sheet_references(self.tmp)), 2)
+        self.assertEqual(cue.read_bytes(), before)
 
 
 if __name__ == "__main__":

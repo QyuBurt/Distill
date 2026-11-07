@@ -29,7 +29,7 @@ from .formats import (
     find_anyps5_libs, is_ps4_game_folder, iso_wants_dvd_mode, locate_pkg_root,
     park_tool_log, pkg_target, ps3_game_name, ps3_known_name,
     ps3_remember_name, Ps3Keys, read_pkg_info, read_ps3_key,
-    read_ps3_sfo, verify_cso,
+    read_ps3_sfo, repair_sheet_references, verify_cso,
 )
 from .ps4merge import attach_updates, extracted_root, merged_sfo_for, overlay_move
 from .systems import (
@@ -43,7 +43,7 @@ from .models import (
 from .system import (
     _Aborted, _py7zr, _Stalled, _Watchdog,
     bind_to_app_lifetime, DiskGate, file_size, find_7zip, free_bytes,
-    FINISH_GRACE, IO_RETRY_ATTEMPTS, IO_RETRY_DELAY, KILL_GRACE, STALL_RETRIES, UNCONFIRMED_GRACE,
+    FINISH_GRACE, FLUSH_PATIENCE, IO_RETRY_ATTEMPTS, IO_RETRY_DELAY, KILL_GRACE, STALL_RETRIES, UNCONFIRMED_GRACE,
 )
 
 
@@ -118,6 +118,9 @@ class _Plan:
     has_archives: bool
     out_root: Path
     temp_root: Path
+
+
+STAGE_WORDS = {"convert": "converting", "verify": "verifying", "extract": "extracting"}
 
 
 class BatchRunner:
@@ -276,6 +279,25 @@ class BatchRunner:
                 pass
             return False
 
+    def _await_exit(self, proc: subprocess.Popen, patience: float, label: str) -> bool:
+        """After closing a tool that had finished its work: True once it has really exited. One that outlives the kill is stuck inside Windows
+        (typically a big file reaching a slow drive, or antivirus scanning it), which a kill can't interrupt, so it is waited for, up to
+        `patience` seconds, saying so, and ending early if Stop is pressed."""
+        start, said = time.monotonic(), False
+        while True:
+            try:
+                proc.wait(timeout=1.0)
+                return True
+            except subprocess.TimeoutExpired:
+                pass
+            waited = time.monotonic() - start
+            if self._stop.is_set() or waited >= patience:
+                return False
+            if not said and waited >= KILL_GRACE:
+                said = True
+                self._log(f"{label}: it is still closing its file (Windows is likely finishing writing it to the drive). "
+                          f"Waiting up to {patience / 60:g} min.\n")
+
     def _run_gated(self, args: list[str], tid: int, state: str, label: str, exe: str | None = None,
                    disk: tuple[Path, ...] = (), watch: Path | None = None, stage: str = "convert",
                    clean: Path | None = None, progress_re: re.Pattern = PROGRESS_RE,
@@ -291,10 +313,16 @@ class BatchRunner:
                 with self._gate.hold(disk, self._stop, wait):
                     return self._spawn(args, tid, state, label, exe, watch, stage, progress_re, cwd, done_re)
             except _Stalled as stall:
-                self._log(f"\n--- STALLED: {label} made no progress for {stall.minutes:g} min and was killed ---\n")
-                if clean:
-                    self._drop_part(clean)
-                if stall.abandoned or attempt == STALL_RETRIES or self._stop.is_set():
+                if stall.finished:  # its output is whole: don't delete it, and starting the same job again would only end the same way
+                    self._log(f"\n--- {label}: chdman reported that it had finished, but it could not be closed within "
+                              f"{FLUSH_PATIENCE / 60:g} min (stuck in Windows; often a slow or busy drive, or antivirus scanning the new file). "
+                              "Not restarted." + (f" What it wrote was left as {clean.name}." if clean else "") + " ---\n")
+                else:
+                    self._log(f"\n--- STALLED while {STAGE_WORDS.get(stage, stage)}: {label} showed no sign of life for "
+                              f"{stall.minutes:g} min and was killed" + (" (but it would not exit)" if stall.abandoned else "") + " ---\n")
+                    if clean:
+                        self._drop_part(clean)
+                if stall.abandoned or stall.finished or attempt == STALL_RETRIES or self._stop.is_set():
                     raise
                 self._set(tid, "[  RETRYING  ]", f"{label} (stalled - restarting)")
         raise AssertionError("unreachable")
@@ -366,6 +394,9 @@ class BatchRunner:
                 while not finished.wait(0.5):
                     if dog.stalled.is_set():
                         break
+                    if proc.poll() is not None:  # it has exited; the end of its output should follow at once. If something else is holding
+                        finished.wait(2.0)  # the pipe open (a stray child, antivirus), don't wait on that: the exit code is already known
+                        break
                     now = time.monotonic()
                     if (done_at and now - done_at > FINISH_GRACE) or (full_at and now - full_at > UNCONFIRMED_GRACE):
                         lingering = True
@@ -378,9 +409,9 @@ class BatchRunner:
                         proc.kill()
                     except OSError:
                         pass
-                    abandoned = not self._reap(proc)
+                    abandoned = not self._await_exit(proc, FLUSH_PATIENCE, label)
                     if abandoned:
-                        raise _Stalled(self.cfg.stall_minutes, stage, abandoned)
+                        raise _Stalled(self.cfg.stall_minutes, stage, abandoned, finished=bool(done_at))
                     rc = 0
                 else:
                     if dog.stalled.is_set():
@@ -1272,9 +1303,13 @@ class BatchRunner:
     # ---- jobs ---------------------------------------------------------------
     def _stall_failure(self, tid: int, label: str, stall: _Stalled, doing: str) -> None:
         """Log and record a title that is skipped because its tool hung."""
-        why = (f"Stalled: no progress for {stall.minutes:g} min"
-               + (" - the tool could not be terminated and may still hold its files" if stall.abandoned
-                  else " (restarted once, stalled again)" if STALL_RETRIES else ""))
+        if stall.finished:
+            why = (f"chdman wrote its output and reported it finished, but could not be closed within {FLUSH_PATIENCE / 60:g} min "
+                   "(stuck in Windows: often a slow or busy drive, or antivirus scanning the new file); the output was kept as it was")
+        else:
+            why = (f"Stalled: no sign of life for {stall.minutes:g} min"
+                   + (" - the tool could not be terminated and may still hold its files" if stall.abandoned
+                      else " (restarted once, stalled again)" if STALL_RETRIES else ""))
         self._set(tid, "[  STALLED   ]", f"{label} ({doing} made no progress - skipped)")
         self._log(f"Skipping {label}: {why}\n")
         if not self._stop.is_set():
@@ -1413,6 +1448,8 @@ class BatchRunner:
             with self._gate.hold((src.path, temp), self._stop, wait):
                 self._set(tid, "[ EXTRACTING ]", name)
                 self._extract(src.path, temp)
+            for note in repair_sheet_references(temp):  # unpacking can rename a track file that its cue sheet still names the old way
+                self._log(f"{name}: {note}\n")
 
             targets = sorted(p for p in temp.rglob("*") if p.is_file() and self.cfg.wants(p))
             if not targets:

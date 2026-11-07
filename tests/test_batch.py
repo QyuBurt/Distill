@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from distill.batch import BatchRunner
 from distill.models import Config
 from tests.helpers import (FAKE_CHDMAN, FAKE_PKG_EXTRACTOR, POSIX_ONLY, TempDirTest, build_pkg, logs, make_tool,
                            run_batch)
@@ -59,6 +61,38 @@ class ChdRunTests(IsolatedAppDir):
         self.assertEqual(summary.failures, ())
         self.assertTrue(all(not p.exists() for p in good))
         self.assertTrue(keep.exists())
+
+    def strict_chdman(self) -> None:
+        """A chdman that, like the real one, fails when a track file named in the cue sheet isn't there."""
+        check = ('    for line in src.read_text(errors="ignore").splitlines():\n'
+                 '        if line.strip().upper().startswith("FILE"):\n'
+                 '            ref = line.split(chr(34))[1]\n'
+                 '            if not (src.parent / ref).is_file():\n'
+                 '                print("Error opening input file", ref); sys.exit(1)\n')
+        body = FAKE_CHDMAN.replace('    out.write_bytes(b"MComprHD"', check + '    out.write_bytes(b"MComprHD"', 1)
+        self.assertNotEqual(body, FAKE_CHDMAN)
+        self.chdman = str(make_tool(self.tmp / "strict_chdman", body))
+
+    def zip_with_renamed_track(self) -> None:
+        import zipfile
+        (self.tmp / "in").mkdir(exist_ok=True)
+        with zipfile.ZipFile(self.tmp / "in" / "Burn Cycle.zip", "w") as z:
+            z.writestr("Burn Cycle.cue", 'FILE "Burn: Cycle.bin" BINARY\n  TRACK 01 MODE2/2352\n')
+            z.writestr("Burn_ Cycle.bin", b"b" * 5000)  # how unpacking on Windows names a file called 'Burn: Cycle.bin'
+
+    def test_a_track_file_renamed_by_unpacking_is_found_again_by_its_cue_sheet(self):
+        self.strict_chdman()
+        self.zip_with_renamed_track()
+        events, summary = run_batch(self.cfg(extract=True))
+        self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
+        self.assertIn("is stored as 'Burn_ Cycle.bin'", logs(events))  # said in the log, so it isn't a silent change
+
+    def test_without_the_repair_that_same_zip_would_fail(self):
+        self.strict_chdman()
+        self.zip_with_renamed_track()
+        with mock.patch("distill.batch.repair_sheet_references", return_value=[]):
+            _events, summary = run_batch(self.cfg(extract=True))
+        self.assertEqual(summary.converted, 0)  # the test above passes because of the repair, not by accident
 
     def test_each_title_is_one_line_that_only_changes_state_and_ends_at_100_percent(self):
         import zipfile
@@ -115,6 +149,29 @@ class ChdRunTests(IsolatedAppDir):
         events, summary = self.run_hanging()
         self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
         self.assertIn("reached 100%", logs(events))
+
+    def test_a_finished_chdman_that_cannot_be_closed_is_reported_as_that_and_not_restarted(self):
+        self.hanging('print("Compression complete ... final ratio = 40.0%", flush=True)\n    import time; time.sleep(600)')
+        with mock.patch.object(BatchRunner, "_await_exit", return_value=False):  # as if Windows were still flushing the file
+            events, summary = self.run_hanging()
+        text = logs(events)
+        self.assertEqual(summary.converted, 0)
+        self.assertEqual(len(summary.failures), 1, text)
+        self.assertIn("could not be closed", summary.failures[0].reason)
+        self.assertIn("reported that it had finished", text)
+        self.assertNotIn("made no progress for", text)  # not the old, misleading "3 min" wording
+        self.assertNotIn("RETRYING", text)  # the same job would only end the same way
+
+    def test_a_chdman_that_exits_while_something_else_holds_its_output_open_is_not_waited_for(self):
+        stray = ("import subprocess\n    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'])  # inherits the output pipe\n"
+                 "    print('Compression complete ... final ratio = 40.0%', flush=True); sys.exit(0)")
+        self.hanging(stray)
+        self.make_game("Cdi Game")
+        started = time.monotonic()
+        with mock.patch("distill.batch.FINISH_GRACE", 60.0):  # so only the exit check can end the wait in time
+            events, summary = run_batch(self.cfg())
+        self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
+        self.assertLess(time.monotonic() - started, 7.0)
 
     def test_a_hang_that_leaves_no_usable_file_is_a_failure_not_a_success(self):
         body = FAKE_CHDMAN.replace('out.write_bytes(b"MComprHD" + b"\\0" * 4096)', "pass").replace(
