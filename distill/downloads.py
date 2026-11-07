@@ -584,6 +584,7 @@ class DownloadRunner:
         self._told_paused = False
         self.post_action = ""  # '' | 'extract' | 'extract_delete': what to do with archives once everything has finished
         self.completed_paths: list[Path] = []  # files that finished (or were already there), for the post step
+        self.completed_urls: dict[Path, str] = {}  # where each of them came from (the site's name is a likely archive password)
         self._finals: dict[int, Path] = {}  # where a file really ended up, when the name had no extension (yt-dlp)
         self._no_ranges: set[str] = set()  # sites that ignored a Range request: downloaded on one connection
 
@@ -1252,7 +1253,8 @@ class DownloadRunner:
                 self.done += 1
         self._settle(idx, outcome)
         with self._lock:
-            self.completed_paths.append(self._finals.pop(idx, dest))
+            self.completed_paths.append(final := self._finals.pop(idx, dest))
+            self.completed_urls[final] = rf.url
         if outcome == "skipped":
             self._emit(("dl_row", idx, "Already downloaded"))
         else:
@@ -1261,10 +1263,11 @@ class DownloadRunner:
         return True
 
     def _post_process(self) -> None:
-        from .postprocess import unpack_all  # noqa: PLC0415
+        from .postprocess import load_passwords, password_hints, unpack_all  # noqa: PLC0415
         try:
+            hints = {path: password_hints(url) for path, url in self.completed_urls.items()}
             unpack_all(self.completed_paths, self.post_action == "extract_delete",
-                       lambda m: self._emit(("log", m)), self._stop)
+                       lambda m: self._emit(("log", m)), self._stop, load_passwords(), hints)
         except Exception as exc:  # unpacking is a bonus: it must never lose the download summary
             self._emit(("log", f"Unpacking stopped: {exc}"))
 

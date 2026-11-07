@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from .. import magnet
 from ..clipwatch import links_in_text
+from ..folderwatch import FolderWatcher, WATCH_FOLDER
 from ..dlfiles import (
     compact_plan, delete_files, explorer_select_command, files_on_disk, magnet_for,
     nearest_folder, per_item_for, wait_until,
@@ -385,6 +386,32 @@ class DownloadMixin:
         self.dl_url_text.setPlainText((existing + "\n" if existing else "") + "\n".join(fresh))
         self._toast(f"Captured {len(fresh)} link(s) from the clipboard. Press Fetch to list them.", "ok", 5000)
         self._dl_save_soon()
+
+    def _dl_watch_toggled(self, on: bool) -> None:
+        """Settings > Downloads > Watch a folder: look in the watch folder every few seconds while it is on."""
+        if not on:
+            self._dl_watch_timer.stop()
+            self._dl_watcher = None
+            return
+        try:
+            WATCH_FOLDER.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.dl_watch.setChecked(False)
+            self._toast(f"Couldn't make the watch folder {WATCH_FOLDER}: {exc.strerror or exc}", "warn", 6000)
+            return
+        self._dl_watcher = FolderWatcher(WATCH_FOLDER)
+        self._dl_watch_timer.start()
+        if getattr(self, "_p_ready", False):  # a person switching it on (not the start-up restore) is told where it is
+            self._toast(f"Watching {WATCH_FOLDER}. Drop a .txt, .torrent or .magnet file in it.", "ok", 6000)
+
+    def _dl_watch_tick(self) -> None:
+        if self._dl_watcher is None or self.org_busy:
+            return
+        drops = self._dl_watcher.poll()
+        if links := [link for drop in drops for link in drop.links]:
+            self._toast(f"Queued {len(links)} link(s) from {', '.join(d.name for d in drops[:3])}"
+                        + (f" and {len(drops) - 3} more" if len(drops) > 3 else ""), "ok", 5000)
+            self._dl_add_links(links)
 
     def _dl_hand_to_organize(self) -> None:
         folder = self._clean(self.dl_dest.text())

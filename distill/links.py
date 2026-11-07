@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-from . import debrid, hosters, ytdlp
+from . import crawl, debrid, hosters, ytdlp
 from .downloads import (
     http_open, LINKS_NEED_DEBRID, LinkError, list_1fichier, list_archive_item,
     list_open_directory, LOGINS, parse_archive_url, RemoteFile, site_for,
@@ -24,44 +24,16 @@ from .torrents import (
 
 
 def resolve_links(text: str) -> tuple[list[RemoteFile], list[str]]:
-    """Turn pasted text (any number of links) into one de-duplicated file list plus per-link problems."""
+    """Turn pasted text (any number of links) into one de-duplicated file list plus per-link problems.
+    `scan:URL` (or `scan[zip,7z]:URL`) reads that web page and lists the download links on it (see crawl.py)."""
     files, errors, seen = [], [], set()
     for token in text.split():
         try:
-            if is_torrent_token(token):
-                found = list_torrent(token)
-                for f in found:
-                    if f.url not in seen:
-                        seen.add(f.url)
-                        files.append(f)
-                continue
-            if ytdlp.is_video_url(token) or token.lower().startswith(ytdlp.FORCE_PREFIXES):
-                try:
-                    found = ytdlp.list_entries(token)
-                except ytdlp.YtdlpError as exc:
-                    raise LinkError(str(exc)) from None
-                for f in found:
-                    if f.url not in seen:
-                        seen.add(f.url)
-                        files.append(f)
-                continue
-            parsed = parse_archive_url(token)
-            full = token if "://" in token else "https://" + token
-            if parsed:
-                found = list_archive_item(*parsed)
-            elif site_for(full) == "1fichier" and (LOGINS.get("1fichier") or {}).get("apikey"):
-                found = list_1fichier(full)
-            elif unlocked := _debrid_entry(full):  # a debrid service supports this site: name and size come from it
-                found = [unlocked]
-            elif site_for(full) == "1fichier":
-                found = list_1fichier(full)
-            elif handler := hosters.hoster_for(full):
-                found = [hosters.entry(handler, full)]
-            elif host_of(full).endswith(LINKS_NEED_DEBRID):
-                raise LinkError(f"{host_of(full)}: this host needs a debrid service (Real-Debrid, AllDebrid or Premiumize "
-                                "support it). Add one in Settings > Accounts.")
+            if request := crawl.parse_scan_token(token):
+                found, problems = _scan_page(request)
+                errors.extend(problems)
             else:
-                found = list_open_directory(full)
+                found = _resolve_token(token)
         except LinkError as exc:
             errors.append(str(exc))
             continue
@@ -70,6 +42,59 @@ def resolve_links(text: str) -> tuple[list[RemoteFile], list[str]]:
                 seen.add(f.url)
                 files.append(f)
     return files, errors
+
+
+def _scan_page(request: crawl.ScanRequest) -> tuple[list[RemoteFile], list[str]]:
+    """The files behind a page's download links. Plain file links become rows at once (their sizes arrive afterwards, as
+    for any listing); magnets and file-host links are looked up one by one like pasted ones, and any that can't be are
+    summed up in a single line so a page with fifty dead links doesn't bury the list in errors."""
+    urls, title = crawl.scan_page(request.url, request.exts)
+    group = title[:80] or host_of(request.url)
+    direct = [u for u in urls if crawl.is_direct_file(u, request.exts)]
+    names = dict(zip(direct, crawl.unique_names(direct)))
+    files: list[RemoteFile] = []
+    problems: list[str] = []
+    for url in urls:
+        if url in names:
+            files.append(RemoteFile(names[url], url, None, group))
+            continue
+        try:
+            files.extend(_resolve_token(url))
+        except LinkError as exc:
+            problems.append(str(exc))
+    if len(problems) > 3:
+        problems = problems[:3] + [f"{request.url}: {len(problems) - 3} more links on the page could not be listed"]
+    return files, problems
+
+
+def _resolve_token(token: str) -> list[RemoteFile]:
+    """The files one pasted link stands for. Raises LinkError with a plain reason."""
+    if is_torrent_token(token):
+        return list_torrent(token)
+    if ytdlp.is_video_url(token) or token.lower().startswith(ytdlp.FORCE_PREFIXES):
+        try:
+            return ytdlp.list_entries(token)
+        except ytdlp.YtdlpError as exc:
+            raise LinkError(str(exc)) from None
+    parsed = parse_archive_url(token)
+    full = token if "://" in token else "https://" + token
+    if parsed:
+        return list_archive_item(*parsed)
+    if site_for(full) == "1fichier" and (LOGINS.get("1fichier") or {}).get("apikey"):
+        return list_1fichier(full)
+    if unlocked := _debrid_entry(full):  # a debrid service supports this site: name and size come from it
+        return [unlocked]
+    if site_for(full) == "1fichier":
+        return list_1fichier(full)
+    if handler := hosters.hoster_for(full):
+        if handler.expand:  # a folder or list on a host that can list them (Pixeldrain)
+            if listed := handler.expand(full):
+                return listed
+        return [hosters.entry(handler, full)]
+    if host_of(full).endswith(LINKS_NEED_DEBRID):
+        raise LinkError(f"{host_of(full)}: this host needs a debrid service (Real-Debrid, AllDebrid or Premiumize "
+                        "support it). Add one in Settings > Accounts.")
+    return list_open_directory(full)
 
 
 def _debrid_entry(url: str) -> RemoteFile | None:

@@ -104,6 +104,44 @@ class ReleaseChoiceTests(Isolated):
         self.assertEqual(em.choose(e, rels, "stable", "windows", "x64")[0].tag, "v2.4.0")
         self.assertEqual(em.choose(e, rels, "nightly", "windows", "x64")[0].tag, "v2.5.1")
 
+    def test_a_channel_with_its_own_repo_is_read_from_it_and_cached_apart(self):
+        e = emu(source="forgejo", host="h", repo="p/Stable", channels=("stable", "nightly"), channel_repos={"nightly": "p/Canary"})
+        seen = []
+
+        def fake(url, *a, **k):
+            seen.append(url)
+            return json.dumps([{"tag_name": "Canary-1.3.197" if "Canary" in url else "1.3.3", "assets": []}]).encode()
+        with mock.patch.object(rc, "_get", side_effect=fake):
+            self.assertEqual(em.fetch_releases(e, self.store, force=True)[0].tag, "1.3.3")
+            self.assertEqual(em.fetch_releases(e, self.store, force=True, channel="nightly")[0].tag, "Canary-1.3.197")
+            self.assertEqual(em.fetch_releases(e, self.store)[0].tag, "1.3.3")  # cached: the nightly listing did not overwrite it
+        self.assertTrue(any("p/Canary" in u for u in seen) and any("p/Stable" in u for u in seen))
+
+    def test_a_prefixed_tag_of_the_same_build_is_not_an_update(self):
+        self.assertFalse(rc.is_newer("1.3.197", "Canary-1.3.197"))
+        self.assertTrue(rc.is_newer("1.3.196", "Canary-1.3.197"))
+
+    def test_eden_picks_the_recommended_build_for_each_os_and_cpu(self):
+        eden = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}["eden"]
+        names = ["Eden-Windows-v0.2.1-" + x for x in ("amd64-clang-pgo.zip", "amd64-gcc-standard.zip", "amd64-msvc-standard.zip", "arm64-clang-pgo.zip",
+                                                      "arm64-clang-standard.zip", "rog-ally-clang-pgo.zip", "rog-ally-gcc-standard.zip")]
+        names += ["Eden-Linux-v0.2.1-" + x for x in ("steamdeck-clang-pgo.AppImage", "rog-ally-clang-pgo.AppImage", "legacy-clang-pgo.AppImage",
+                                                     "amd64-gcc-standard.AppImage", "amd64-clang-pgo.AppImage", "aarch64-clang-pgo.AppImage",
+                                                     "aarch64-gcc-standard.AppImage")]
+        names += ["Eden-macOS-v0.2.1.dmg", "Eden-Linux-amd64-clang-pgo.AppImage.zsync", "Eden-v0.2.1.torrent", "Eden-Android-v0.2.1-standard.apk"]
+        assets = [asset(n) for n in names]
+        pick = lambda plat, mach: rc.pick_asset(assets, eden, plat, mach)["name"]
+        self.assertEqual(pick("windows", "x64"), "Eden-Windows-v0.2.1-amd64-clang-pgo.zip")
+        self.assertEqual(pick("windows", "arm64"), "Eden-Windows-v0.2.1-arm64-clang-pgo.zip")
+        self.assertEqual(pick("linux", "x64"), "Eden-Linux-v0.2.1-amd64-clang-pgo.AppImage")  # not the zsync, steamdeck or rog-ally file
+        self.assertEqual(pick("linux", "arm64"), "Eden-Linux-v0.2.1-aarch64-clang-pgo.AppImage")
+        self.assertEqual(pick("macos", "arm64"), "Eden-macOS-v0.2.1.dmg")
+
+    def test_eden_falls_back_to_the_msvc_zip_when_a_release_has_no_pgo_build(self):
+        eden = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}["eden"]
+        got = rc.pick_asset([asset("Eden-Windows-abc-amd64-gcc-standard.zip"), asset("Eden-Windows-abc-amd64-msvc-standard.zip")], eden, "windows", "x64")
+        self.assertEqual(got["name"], "Eden-Windows-abc-amd64-msvc-standard.zip")
+
     def test_a_release_with_no_file_for_this_os_is_skipped(self):
         e = emu()
         rels = [rel("v3", asset("pcsx2-v3-linux.AppImage")), rel("v2", asset("pcsx2-v2-windows-x64.7z"))]

@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QComboBox, QDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
@@ -20,6 +20,7 @@ from ..constants import (
     RVZ_MAX_LEVEL, TOOL_MISSING_TEXT,
 )
 from ..downloads import DL_MAX_PARALLEL
+from ..folderwatch import WATCH_FOLDER
 from ..system import portable_path, resolve_dolphintool, resolve_tool_path
 from . import motion
 from .state import LABEL_W, TOOL_GROUPS, TOOLS
@@ -303,7 +304,16 @@ class SettingsMixin:
                                 "Ordinary web pages are ignored.")
         self._dl_clip_last = ""
         QApplication.clipboard().dataChanged.connect(self._dl_clipboard_changed)
-        for box in (self.dl_verify, self.dl_folders, self.dl_clip):
+        self.dl_watch = AnimCheckBox("Watch a folder for link files")
+        self.dl_watch.setToolTip(f"Drop a .txt, .torrent, .magnet or .url file into {WATCH_FOLDER} and its links are listed on the "
+                                 "Download page by themselves. A file that has been taken moves into a 'queued' folder inside it. "
+                                 "A .txt can hold any number of links, including scan:<page address> to read a web page for links.")
+        self._dl_watcher = None
+        self._dl_watch_timer = QTimer(self)
+        self._dl_watch_timer.setInterval(3000)
+        self._dl_watch_timer.timeout.connect(self._dl_watch_tick)
+        self.dl_watch.toggled.connect(self._dl_watch_toggled)
+        for box in (self.dl_verify, self.dl_folders, self.dl_clip, self.dl_watch):
             box.toggled.connect(lambda *_: self._dl_save_soon())
             card.add(box)
         lay.addWidget(card)

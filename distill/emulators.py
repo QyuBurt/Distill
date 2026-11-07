@@ -56,7 +56,7 @@ class Emulator:
     adapter: str = ""  # custom: dolphin_update | libretro_buildbot | blastem_site | bigpemu_site | bluestacks_winget | scummvm_site
     endpoint: str = ""
     version_from: str = "tag"  # tag | published_at | asset: what tells one build from the next
-    asset: dict = field(default_factory=dict)  # per OS, a regex for the right release file when the guess is wrong
+    asset: dict = field(default_factory=dict)  # per OS ("windows") or OS and CPU ("windows-arm64"), a regex, or a list of them best first, for the right release file when the guess is wrong
     exe: str = ""  # regex for the executable when the guess is wrong
     platforms: tuple[str, ...] = ("windows", "linux", "macos")
     website: str = ""
@@ -65,6 +65,7 @@ class Emulator:
     portable_auto: bool = True  # False: Distill does not add it for a fresh install (the program is portable already)
     trusted_owner: str = ""
     channels: tuple[str, ...] = ("stable",)
+    channel_repos: dict = field(default_factory=dict)  # a channel that lives in a repository of its own: {"nightly": "Ryubing/Canary"}
     available: bool = True  # False: listed, but there is nothing to download yet
     verify: bool = False
     systems: tuple[str, ...] = ()  # library system names it plays, as the Library Report writes them
@@ -96,7 +97,8 @@ def _emulator(d: dict, plat: str) -> Emulator:
         host=d.get("host", ""), adapter=d.get("adapter", ""), endpoint=d.get("api_endpoint", "") or d.get("endpoint", ""),
         version_from=d.get("version_from", "tag"), asset=dict(d.get("asset") or {}), exe=d.get("exe", ""),
         platforms=_tuple(d.get("platforms")) or ("windows", "linux", "macos"), website=d.get("website", ""), notes=notes,
-        portable=d.get("portable", ""), portable_auto=d.get("portable_auto", True) is not False, trusted_owner=owner, channels=_tuple(d.get("channels")) or ("stable",), available=available,
+        portable=d.get("portable", ""), portable_auto=d.get("portable_auto", True) is not False, trusted_owner=owner, channels=_tuple(d.get("channels")) or ("stable",),
+        channel_repos={str(k): str(v) for k, v in (d.get("channel_repos") or {}).items()}, available=available,
         verify=bool(d.get("verify")), systems=_tuple(d.get("systems")), aliases=tuple(a for a in _tuple(d.get("aliases")) if a),
         logo=str(d.get("logo") or ""))
 
@@ -507,11 +509,15 @@ def _why(exc: BaseException) -> str:
     return f" ({text[:80]})" if text else ""
 
 
-def fetch_releases(em: Emulator, store: rc.Store | None = None, force: bool = False) -> list[rc.Release]:
-    """Newest first. Cached for an hour per emulator; when the site can't be reached the last cached listing is used."""
+def fetch_releases(em: Emulator, store: rc.Store | None = None, force: bool = False, channel: str = "stable") -> list[rc.Release]:
+    """Newest first. Cached for an hour per emulator; when the site can't be reached the last cached listing is used.
+    A channel with a repository of its own (`channel_repos`) is read from that repository, and cached apart from the stable one."""
+    other = em.channel_repos.get(channel, "") if channel != "stable" else ""
+    if other:
+        em = replace(em, repo=other)
     if em.source == "github":
         return rc.releases(em.repo, store, force)
-    key = f"emu:{em.id}"
+    key = f"emu:{em.id}:{channel}" if other else f"emu:{em.id}"
     if store and not force and (hit := store.cache_get(key)) is not None:
         return [rc._release_of(d) for d in hit]
     try:
@@ -536,7 +542,7 @@ def fetch_releases(em: Emulator, store: rc.Store | None = None, force: bool = Fa
 
 def choose(em: Emulator, rels: list[rc.Release], channel: str = "stable", plat: str = "", machine: str = "") -> tuple[rc.Release, dict] | None:
     """Stable: the newest non-pre-release that has a file for this OS (else the newest pre-release that does).
-    Nightly: simply the newest release that has one."""
+    Nightly: simply the newest release that has one (an emulator whose nightly has its own repository is given that repository's releases)."""
     if channel == "nightly":
         for rel in rels:
             if asset := rc.pick_asset(rel.assets, em, plat, machine):
@@ -552,7 +558,8 @@ def latest_for(em: Emulator, store: rc.Store, force: bool = False) -> tuple[rc.R
     if not for_this_os(em):
         return f"{em.name} has no build for {rc.platform_key()}."
     try:
-        found = choose(em, fetch_releases(em, store, force), channel_of(store, em))
+        chan = channel_of(store, em)
+        found = choose(em, fetch_releases(em, store, force, chan), chan)
     except rc.RecompError as exc:
         return str(exc)
     return found if found else f"No download for {rc.platform_key()} in the recent releases. Use the website link."

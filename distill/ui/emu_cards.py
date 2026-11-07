@@ -15,12 +15,12 @@ from .icons import pixmap
 from .theme import T
 
 
-GROUP_COLOURS = {"Sony": "#4d9bff", "Nintendo": "#8a7cf5", "Microsoft": "#5fd4a0", "Sega": "#3f74e8", "Multi": "#b585f4", "Frontend": "#f2f4f8", "Atari": "#f5a742",
+GROUP_COLOURS = {"Sony": "#4d9bff", "Nintendo": "#8a7cf5", "Microsoft": "#5fd4a0", "Sega": "#3f74e8", "Arcade": "#b585f4", "Frontend": "#f2f4f8", "Atari": "#f5a742",
                  "PC": "#22c1dc", "Mobile": "#ee6fb5"}
 
 
 GROUP_LOGOS = {"Sony": "playstation", "Nintendo": "gamecube", "Microsoft": "xbox", "Sega": "dreamcast", "Atari": "atari",
-               "Multi": "multi", "PC": "pc", "Mobile": "mobile", "Frontend": "retroarch"}  # group -> bundled mark
+               "Arcade": "multi", "PC": "pc", "Mobile": "mobile", "Frontend": "retroarch"}  # group -> bundled mark
 
 
 def group_colour(group: str) -> QColor:

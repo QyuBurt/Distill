@@ -1,4 +1,4 @@
-"""Direct handlers for the file hosts people actually paste: Google Drive, MediaFire, Dropbox and OneDrive.
+"""Direct handlers for the file hosts people actually paste: Google Drive, MediaFire, Dropbox, OneDrive and Pixeldrain.
 
 Each handler turns a share link into the real download address (`direct`) at download time, so short-lived addresses
 never go stale in a saved list, and `entry` builds the list row (file name and size from the server's own headers).
@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import json
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -96,11 +97,52 @@ def mediafire_direct(url: str, fetch: Callable[[str], str] | None = None) -> str
     return link
 
 
+# ---- Pixeldrain: files have a public API, and its lists can be listed ------------------------------------------------
+_PD_API = "https://pixeldrain.com/api"
+_PD_FILE = re.compile(r"^/(?:u|api/file)/([A-Za-z0-9_-]{4,})")
+_PD_LIST = re.compile(r"^/(?:l|api/list)/([A-Za-z0-9_-]{4,})")
+
+
+def pixeldrain_direct(url: str) -> str:
+    m = _PD_FILE.match(urllib.parse.urlsplit(url).path)
+    if not m:
+        if _PD_LIST.match(urllib.parse.urlsplit(url).path):
+            raise LinkError("Pixeldrain list: it is listed file by file when pasted, not downloaded as one address")
+        raise LinkError("Pixeldrain: couldn't find the file ID in that link")
+    return f"{_PD_API}/file/{m.group(1)}?download"
+
+
+def _pd_json(url: str) -> dict:
+    try:
+        with http_open(url) as resp:
+            return json.loads(resp.read(4 << 20).decode("utf-8", "replace"))
+    except (OSError, ValueError) as exc:
+        raise LinkError(f"Pixeldrain: {describe_error(exc)}") from None
+
+
+def pixeldrain_list(url: str, fetch_json: Callable[[str], dict] | None = None) -> list[RemoteFile] | None:
+    """The files of a Pixeldrain list link, or None when the link is a single file (then it is handled like any other host)."""
+    m = _PD_LIST.match(urllib.parse.urlsplit(url).path)
+    if not m:
+        return None
+    data = (fetch_json or _pd_json)(f"{_PD_API}/list/{m.group(1)}")
+    if data.get("success") is False:
+        raise LinkError(f"Pixeldrain: {data.get('message') or data.get('value') or 'that list is gone or private'}")
+    group = str(data.get("title") or "Pixeldrain list")
+    files = [RemoteFile(str(f.get("name") or f["id"]), f"https://pixeldrain.com/u/{f['id']}", int(f["size"]) if str(f.get("size", "")).isdigit() else None,
+                        group, None, False, True)
+             for f in data.get("files") or [] if f.get("id")]
+    if not files:
+        raise LinkError("Pixeldrain: that list has no files")
+    return files
+
+
 @dataclass(frozen=True, slots=True)
 class Hoster:
     name: str
     hosts: tuple[str, ...]
     direct: Callable[[str], str]
+    expand: Callable[[str], list[RemoteFile] | None] | None = None  # folder / list links: the files in them, or None for a single file
 
 
 HOSTERS = (
@@ -108,6 +150,7 @@ HOSTERS = (
     Hoster("MediaFire", ("mediafire.com",), mediafire_direct),
     Hoster("Dropbox", ("dropbox.com",), dropbox_direct),
     Hoster("OneDrive", ("1drv.ms", "onedrive.live.com"), onedrive_direct),
+    Hoster("Pixeldrain", ("pixeldrain.com", "pixeldrain.net", "pixeldra.in"), pixeldrain_direct, pixeldrain_list),
 )
 
 

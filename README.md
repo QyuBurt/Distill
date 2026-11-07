@@ -40,6 +40,9 @@ Settings and downloaded tools are kept next to the `.exe`, so both builds are po
 ### Downloads
 
 - **Files & Torrents** is a download queue for direct links, archive.org, torrents, debrid services (including TorBox) and video or audio sites through yt-dlp. It has speed limits, schedules and per-site limits, resumes partial files, and has a right-click menu for starting, stopping and deleting.
+  - **Scan a page for links:** paste `scan:https://example.com/page` (or `scan[zip,7z]:https://...` to pick file types) and every download link on that page is listed: files, magnets and links to Drive, MediaFire, Dropbox, OneDrive, Pixeldrain, 1fichier and archive.org. Pixeldrain lists are expanded into their files.
+  - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into the `Watch` folder beside Distill and its links are listed. Taken files move into `Watch/queued`.
+  - **Unpacking:** multi-part sets (`.part1.rar`, `.7z.001`, `.rar` + `.r00`, `.zip` + `.z01`) are unpacked from the first part and, with "then delete them", every part goes afterwards. Password-protected archives are tried with each line of `distill_archive_passwords.txt` (next to Distill), then with ones worked out from the site the file came from (`www.site.com`, `site.com`, `site`), then with their own name.
 - **Soundtrack Grabber** takes a list of game names (or reads them from your library) and finds each game's soundtrack on archive.org. It scores the matches, previews tracks, and can fill in missing tags and cover art.
 
 ### Convert & compress
@@ -133,6 +136,7 @@ distill/
   batch.py, formats.py, system.py     conversion engine and disc / PKG readers
   organize.py, library.py, systems.py organiser tools
   downloads.py, torrents.py, torbox.py, ytdlp.py   downloader
+  crawl.py, hosters.py, folderwatch.py, postprocess.py   page scanner, file hosts, watch folder, unpacking
   recomps.py, emulators.py            PC Recomps and Emulators catalogs
   soundtracks.py                      Soundtrack Grabber
   switchconv.py                       Switch NSZ / NUP

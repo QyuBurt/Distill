@@ -809,13 +809,17 @@ _BAD = {"source", "src", "debug", "symbols", "dbg", "headless", "server", "dedic
 
 
 def pick_asset(assets: Iterable[dict], rc: Recomp | None = None, plat: str = "", machine: str = "") -> dict | None:
-    """The release file for this OS and CPU: a per-project regex when the catalog gives one, else a scored guess.
+    """The release file for this OS and CPU: a per-project regex (or list of them, best first; keyed "windows" or "windows-arm64") when the catalog gives one, else a scored guess.
     Archives beat installers; a file naming another OS is out; an ARM build is only taken on ARM."""
     plat, machine = plat or platform_key(), machine or machine_key()
     assets = [a for a in assets if a.get("url") and a.get("name")]
-    if rc and (pattern := rc.asset.get(plat)):
-        rx = re.compile(pattern, re.IGNORECASE)
-        return next((a for a in assets if rx.search(a["name"])), None)
+    if rc and (pattern := rc.asset.get(f"{plat}-{machine}") or rc.asset.get(plat)):
+        # "windows-arm64" beats "windows"; a list is tried in order, so the build wanted most wins and the next is the fallback
+        for one in ([pattern] if isinstance(pattern, str) else pattern):
+            rx = re.compile(one, re.IGNORECASE)
+            if hit := next((a for a in assets if rx.search(a["name"])), None):
+                return hit
+        return None
     best, best_score = None, 0
     for a in assets:
         name = a["name"].lower()
@@ -863,8 +867,8 @@ def sha256_of(asset: dict) -> str:
 
 def is_newer(installed: str, latest: str) -> bool:
     """Different tags mean an update unless the installed one is the newer (compared as dotted numbers when both are)."""
-    if installed == latest:
-        return False
+    if installed == latest or re.sub(r"^\D+", "", installed) == re.sub(r"^\D+", "", latest) != "":
+        return False  # "1.3.197" against "Canary-1.3.197": the same build, only the tag has a prefix
     a, b = (tuple(int(x) for x in re.findall(r"\d+", t)) for t in (installed, latest))
     return b > a if a and b and a != b else True
 

@@ -215,6 +215,9 @@
     "stable",
     "nightly"
    ],
+   "channel_repos": {
+    "nightly": "Ryubing/Canary"
+   },
    "portable": "portable/"
   },
   {
@@ -222,7 +225,9 @@
    "name": "Eden",
    "system": "Switch",
    "group": "Nintendo",
-   "repo": "eden-emulator/Releases",
+   "source": "forgejo",
+   "repo": "eden-emu/eden",
+   "host": "git.eden-emu.dev",
    "website": "https://eden-emu.dev/",
    "verify": true,
    "notes": "A community-focused Nintendo Switch emulator branch derived from the broader ecosystem.",
@@ -233,7 +238,15 @@
     "eden"
    ],
    "portable": "user/",
-   "trusted_owner": "eden-emulator"
+   "asset": {
+    "windows-x64": "-amd64-msvc-standard\\.zip$"
+   },
+   "channels": [
+    "stable"
+   ],
+   "channel_repos": {
+    "nightly": "eden-ci/nightly"
+   }
   },
   {
    "id": "sudachi",
@@ -454,7 +467,7 @@
    "id": "mame",
    "name": "MAME",
    "system": "Arcade",
-   "group": "Multi",
+   "group": "Arcade",
    "repo": "mamedev/mame",
    "website": "https://www.mamedev.org/",
    "platforms": [
@@ -471,7 +484,7 @@
    "id": "ares",
    "name": "ares",
    "system": "Multi-system",
-   "group": "Multi",
+   "group": "Arcade",
    "repo": "ares-emulator/ares",
    "website": "https://ares-emu.net/",
    "systems": [
@@ -544,7 +557,7 @@
    "id": "fbneo",
    "name": "FinalBurn Neo",
    "system": "Arcade",
-   "group": "Multi",
+   "group": "Arcade",
    "repo": "finalburnneo/FBNeo",
    "website": "https://neo-source.com/",
    "notes": "A multi-system arcade emulator designed for retro gaming enthusiasts.",
