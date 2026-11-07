@@ -92,12 +92,11 @@ class ScriptTests(unittest.TestCase):
             tmp = Path(tmp)
             (tmp / "icon.png").write_bytes(b"png")
             (tmp / "payload.zip").write_bytes(b"zip")
-            spec = {"logo": str(tmp / "icon.png"), "display_font": str(tmp / "missing.ttf"), "text_font": "", "start": 0.7}
+            spec = {"logo": str(tmp / "icon.png"), "start": 0.7}
             spec_path, ready = updater._stage_splash(spec, tmp / "payload.zip", "portable")
             data = json.loads(spec_path.read_text(encoding="utf-8"))
             self.assertEqual((data["kind"], data["start"], data["ready"]), ("portable", 0.7, str(ready)))
             self.assertTrue(Path(data["logo"]).is_file())
-            self.assertEqual((data["display_font"], data["text_font"]), ("", ""))  # absent fonts fall back to Segoe UI in the script
             self.assertTrue(spec_path.with_suffix(".ps1").is_file())
             self.assertFalse(ready.exists())  # the script creates it once its window is up
             self.assertIsNone(updater._stage_splash({"logo": str(tmp / "nope.png")}, tmp / "payload.zip", "portable"))
@@ -109,6 +108,8 @@ class ScriptTests(unittest.TestCase):
         self.assertIn("exit 0", update_splash.SCRIPT)
         self.assertEqual(update_splash.SCRIPT.count("{"), update_splash.SCRIPT.count("}"))
         self.assertEqual(update_splash.SCRIPT.count("("), update_splash.SCRIPT.count(")"))
+        self.assertIn("UpdateLayeredWindow", update_splash.SCRIPT)  # the bare logo is a per-pixel-alpha window, not a box with a colour key
+        self.assertNotIn("DrawString", update_splash.SCRIPT)  # and it carries no text
 
 
 class FillMathTests(unittest.TestCase):

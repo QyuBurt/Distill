@@ -159,20 +159,16 @@ def _script(kind: str, payload: Path, tag: str = "", splash: Path | None = None)
 
 def _stage_splash(spec: dict, payload: Path, kind: str) -> tuple[Path, Path] | None:
     """Put everything the install window needs next to the download (the bundled folder disappears with a single-file build
-    once it quits): the logo and fonts, the script and its spec. Returns (spec file, 'window is up' marker file), or None
+    once it quits): the logo, the script and its spec. Returns (spec file, 'window is up' marker file), or None
     if anything is missing, in which case the update just installs without the window."""
     try:
         dest = payload.parent
         out = dict(spec)
-        for key, name in (("logo", "update-logo.png"), ("display_font", "update-display.ttf"), ("text_font", "update-text.ttf")):
-            src = Path(str(spec.get(key) or ""))
-            if src.is_file():
-                shutil.copyfile(src, dest / name)
-                out[key] = str(dest / name)
-            else:
-                out[key] = ""
-        if not out["logo"]:
+        src = Path(str(spec.get("logo") or ""))
+        if not src.is_file():
             return None
+        shutil.copyfile(src, dest / "update-logo.png")
+        out["logo"] = str(dest / "update-logo.png")
         ready = dest / "splash-ready.txt"
         ready.unlink(missing_ok=True)
         out.update(kind=kind, payload=str(payload), app_dir=str(APP_DIR), exe=str(Path(sys.executable).resolve()), ready=str(ready))

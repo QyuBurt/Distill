@@ -754,6 +754,54 @@ class ForkTests(Isolated):
 
 
 
+class ForkFolderTests(Isolated):
+    """A fork's folder often carries its parent's name too, so a scan hands it to the parent; linking it to the fork must take it back."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.parent = emu(id="kytyps5", name="KytyPS5", system="PlayStation 5", repo="KytyPS5/KytyPS5", systems=("PlayStation 5",), exe="kyty.*\\.exe$")
+        self.fork = em.make_fork(self.parent, "Jetsku/KytyPS5", accepted=True)
+        self.exe = self.touch("KytyPS5 Jetsku/kyty.exe")
+
+    def scan(self, catalog):
+        em.apply_scan(self.store, em.scan_folder(self.tmp / "emus", catalog, "windows"))
+
+    def test_a_scan_without_the_fork_gives_the_folder_to_the_parent(self):
+        self.scan([self.parent])
+        self.assertIsNotNone(self.store.installed("kytyps5"))  # the situation the person is in
+
+    def test_linking_the_fork_takes_the_folder_from_the_parent(self):
+        self.scan([self.parent])
+        found = em.link(self.store, self.fork, self.exe.parent, "windows")
+        self.assertEqual(found.released, ("kytyps5",))
+        self.assertIsNone(self.store.installed("kytyps5"))
+        self.assertEqual(self.store.installed(self.fork.id).folder, str(self.exe.parent))
+        self.assertTrue(self.exe.exists())  # nothing on disk was touched
+
+    def test_a_later_scan_does_not_give_it_back_to_the_parent(self):
+        self.scan([self.parent])
+        em.link(self.store, self.fork, self.exe.parent, "windows")
+        self.scan([self.parent, self.fork])
+        self.scan([self.parent])
+        self.assertIsNone(self.store.installed("kytyps5"))
+        self.assertIsNotNone(self.store.installed(self.fork.id))
+
+    def test_a_folder_distill_installed_for_another_emulator_is_not_taken(self):
+        self.store.set_installed(rc.Installed("kytyps5", "1", str(self.exe.parent), "kyty.exe", 0.0, ""))  # a managed install: linked is empty
+        with self.assertRaises(rc.RecompError):
+            em.link(self.store, self.fork, self.exe.parent, "windows")
+        self.assertIsNotNone(self.store.installed("kytyps5"))
+        self.assertIsNone(self.store.installed(self.fork.id))
+
+    def test_two_forks_in_their_own_folders_stay_apart(self):
+        dlss = em.make_fork(self.parent, "someone/KytyPS5-DLSS", accepted=True)
+        other = self.touch("KytyPS5 DLSS/kyty.exe")
+        em.link(self.store, self.fork, self.exe.parent, "windows")
+        found = em.link(self.store, dlss, other.parent, "windows")
+        self.assertEqual(found.released, ())
+        self.assertEqual({self.store.installed(self.fork.id).folder, self.store.installed(dlss.id).folder}, {str(self.exe.parent), str(other.parent)})
+
+
 class PortableTests(Isolated):
     def test_marker_file_or_folder_is_made_beside_the_exe(self):
         d = Path(tempfile.mkdtemp())

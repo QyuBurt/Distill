@@ -656,6 +656,7 @@ class Found:
     linked: str  # "folder" | "file"
     version: str = ""
     stamp: str = ""
+    released: tuple[str, ...] = ()  # link(): emulators that had been pointed at this same program and no longer are
 
 
 def default_roots(plat: str = "") -> list[Path]:
@@ -868,6 +869,22 @@ def scan_all(store: rc.Store, catalog: Iterable[Emulator], plat: str = "", stop:
     return out
 
 
+def _program_key(folder: str, exe: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.join(folder, exe)))
+
+
+def others_at(store: rc.Store, rid: str, folder: str, exe: str) -> list[str]:
+    """The ids of other emulators the store records at this very program. One program is one emulator: a fork lives in a folder of its
+    own, so when its folder also carries its parent's name (\"KytyPS5 Jetsku\") a scan can hand it to the parent, and the parent would
+    then update the fork's files with its own downloads."""
+    key = _program_key(folder, exe)
+    out = []
+    for other in list((store.data.get("installed") or {})):
+        if other != rid and (inst := store.installed(other)) is not None and _program_key(inst.folder, inst.exe) == key:
+            out.append(other)
+    return out
+
+
 def apply_scan(store: rc.Store, found: dict[str, Found]) -> list[str]:
     """Remember what a scan found. A managed install, or a link whose files are still there, is kept; a missing or new one is set.
     Returns the ids that are newly linked."""
@@ -876,6 +893,8 @@ def apply_scan(store: rc.Store, found: dict[str, Found]) -> list[str]:
         cur = store.installed(rid)
         if cur and cur.exe_path().exists():
             continue
+        if others_at(store, rid, f.folder, f.exe):
+            continue  # another emulator already has this program (a fork linked by hand, say): a name match doesn't take it back
         store.set_installed(rc.Installed(rid, f.version, f.folder, f.exe, time.time(), f.linked, f.stamp))
         new.append(rid)
     return new
@@ -899,9 +918,17 @@ def link(store: rc.Store, em: Emulator, path: Path, plat: str = "") -> Found:
         shared.add(root)
     kind = "file" if folder in shared else "folder"  # an exe sitting loose in a shared folder: never merge updates into it
     rel = exe.relative_to(folder).as_posix()
+    rivals = others_at(store, em.id, str(folder), rel)
+    for other in rivals:
+        held = store.installed(other)
+        if held is not None and not held.linked:
+            raise rc.RecompError(f"That is the copy Distill installed for {other}, so it can't also be {em.name}.")
     ver, stamp = detect_version(em, folder, exe)
     f = Found(em.id, str(folder), rel, kind, ver, stamp)
     store.set_installed(rc.Installed(em.id, ver, str(folder), rel, time.time(), kind, stamp))
+    for other in rivals:  # the person has said what this program is: whoever else had been linked to it (the parent, after a scan) lets go
+        store.set_installed(None, other)
+    f.released = tuple(rivals)
     return f
 
 

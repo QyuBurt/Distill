@@ -1,10 +1,13 @@
 """The install window of a self-update, as a PowerShell script (Windows PowerShell 5.1 ships with every Windows 10/11).
 
 Distill has quit by the time the new files go in, so the window cannot be Distill's own. This script draws the same picture
-as ui/update_screen.py (the grey logo filling with its colours, the percentage, one line of text) at the same place on the
-screen, waits for Distill to exit, extracts the new version with a running percentage, and exits 0. Anything unexpected makes
-it exit 1, and the batch file that started it then does the swap the plain way (see updater._script), so a problem here can
+as ui/update_screen.py (just the logo, floating: grey, filling with its colours as the update goes in; no frame, no text) at
+the same place on the screen, waits for Distill to exit, extracts the new version, and exits 0. Anything unexpected makes it
+exit 1, and the batch file that started it then does the swap the plain way (see updater._script), so a problem here can
 never leave an install half done.
+
+The window is a layered window whose picture is pushed with UpdateLayeredWindow, which is what gives the logo its soft edges
+over whatever is behind it (a colour key would leave a hard, fringed outline).
 
 The text must stay pure ASCII: PowerShell 5.1 reads a script file without a byte-order mark as ANSI."""
 from __future__ import annotations
@@ -20,58 +23,80 @@ try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -ReferencedAssemblies 'System.Drawing' -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Runtime.InteropServices;
+namespace Distill {
+    public static class Win {
+        [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x; public int y; }
+        [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int cx; public int cy; }
+        [StructLayout(LayoutKind.Sequential, Pack = 1)] public struct BLEND { public byte Op; public byte Flags; public byte Alpha; public byte Format; }
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] static extern int SetWindowLong(IntPtr h, int i, int v);
+        [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLEND pblend, int dwFlags);
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        public static void MakeLayered(IntPtr hwnd) {
+            SetWindowLong(hwnd, -20, GetWindowLong(hwnd, -20) | 0x80000);
+        }
+        // Show `bmp` (32-bit with alpha) as the whole window, with its top left at x, y on the screen.
+        public static void Push(IntPtr hwnd, Bitmap bmp, int x, int y) {
+            IntPtr screen = GetDC(IntPtr.Zero);
+            IntPtr mem = CreateCompatibleDC(screen);
+            IntPtr hbmp = IntPtr.Zero;
+            IntPtr old = IntPtr.Zero;
+            try {
+                hbmp = bmp.GetHbitmap(Color.FromArgb(0));
+                old = SelectObject(mem, hbmp);
+                POINT dst = new POINT();
+                dst.x = x;
+                dst.y = y;
+                SIZE size = new SIZE();
+                size.cx = bmp.Width;
+                size.cy = bmp.Height;
+                POINT src = new POINT();
+                BLEND blend = new BLEND();
+                blend.Op = 0;
+                blend.Flags = 0;
+                blend.Alpha = 255;
+                blend.Format = 1;
+                UpdateLayeredWindow(hwnd, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2);
+            } finally {
+                if (old != IntPtr.Zero) { SelectObject(mem, old); }
+                if (hbmp != IntPtr.Zero) { DeleteObject(hbmp); }
+                DeleteDC(mem);
+                ReleaseDC(IntPtr.Zero, screen);
+            }
+        }
+    }
+}
+'@
     try {
         # Without this Windows scales the window itself and it lands in the wrong place on a zoomed display.
-        Add-Type -Namespace Distill -Name Dpi -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
-        [void][Distill.Dpi]::SetProcessDPIAware()
+        [void][Distill.Win]::SetProcessDPIAware()
     } catch { }
 
     $s = Get-Content -LiteralPath $Spec -Raw -Encoding UTF8 | ConvertFrom-Json
     Log ('start, kind=' + $s.kind)
 
-    function Col([string]$hex) { return [System.Drawing.ColorTranslator]::FromHtml($hex) }
-    $script:keep = @()
-    function Fam([string]$path, [string]$fallback) {
-        try {
-            if ($path -and (Test-Path -LiteralPath $path)) {
-                $c = New-Object System.Drawing.Text.PrivateFontCollection
-                $c.AddFontFile($path)
-                $script:keep += $c
-                return $c.Families[0]
-            }
-        } catch { }
-        return [System.Drawing.FontFamily]::new($fallback)
-    }
-
-    # ---- what to draw, exactly where Distill's own update screen drew it ----
+    # ---- what to draw, exactly where Distill's own update screen drew it: the window is the logo ----
     $script:W = [int]$s.w
     $script:H = [int]$s.h
-    $script:lx = [int]$s.logo_rect.x
-    $script:ly = [int]$s.logo_rect.y
-    $script:lw = [int]$s.logo_rect.w
-    $script:lh = [int]$s.logo_rect.h
-    $script:pctRect = [System.Drawing.RectangleF]::new([single]$s.pct_rect.x, [single]$s.pct_rect.y, [single]$s.pct_rect.w, [single]$s.pct_rect.h)
-    $script:staRect = [System.Drawing.RectangleF]::new([single]$s.status_rect.x, [single]$s.status_rect.y, [single]$s.status_rect.w, [single]$s.status_rect.h)
-    $script:bg = Col $s.bg
-    $script:penBorder = [System.Drawing.Pen]::new((Col $s.border))
-    $script:brTitle = [System.Drawing.SolidBrush]::new((Col $s.title))
-    $script:brMuted = [System.Drawing.SolidBrush]::new((Col $s.fg3))
-    $script:fmt = [System.Drawing.StringFormat]::new()
-    $script:fmt.Alignment = [System.Drawing.StringAlignment]::Center
-    $script:fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
-    $script:fmt.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
-    $script:pctFont = [System.Drawing.Font]::new((Fam $s.display_font 'Segoe UI'), [single]$s.pct_px, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-    $script:staFont = [System.Drawing.Font]::new((Fam $s.text_font 'Segoe UI'), [single]$s.status_px, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-    $script:statusText = [string]$s.status_text
 
     # The logo in colour, and the same picture in grey (the same weights the app uses; the transparent corners are kept).
     $src = [System.Drawing.Image]::FromFile([string]$s.logo)
-    $script:colour = [System.Drawing.Bitmap]::new($script:lw, $script:lh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $script:colour = [System.Drawing.Bitmap]::new($script:W, $script:H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($script:colour)
     $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
     $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-    $g.DrawImage($src, 0, 0, $script:lw, $script:lh)
+    $g.DrawImage($src, 0, 0, $script:W, $script:H)
     $g.Dispose()
     $src.Dispose()
     $m = [single[][]]@(
@@ -82,12 +107,19 @@ try {
         @(0, 0, 0, 0, 1))
     $attr = [System.Drawing.Imaging.ImageAttributes]::new()
     $attr.SetColorMatrix([System.Drawing.Imaging.ColorMatrix]::new($m))
-    $script:grey = [System.Drawing.Bitmap]::new($script:lw, $script:lh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $script:grey = [System.Drawing.Bitmap]::new($script:W, $script:H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($script:grey)
-    $g.DrawImage($script:colour, [System.Drawing.Rectangle]::new(0, 0, $script:lw, $script:lh), 0, 0, $script:lw, $script:lh, [System.Drawing.GraphicsUnit]::Pixel, $attr)
+    $g.DrawImage($script:colour, [System.Drawing.Rectangle]::new(0, 0, $script:W, $script:H), 0, 0, $script:W, $script:H, [System.Drawing.GraphicsUnit]::Pixel, $attr)
     $g.Dispose()
 
+    # One frame is drawn here and then handed to the window whole.
+    $script:frame = [System.Drawing.Bitmap]::new($script:W, $script:H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $script:gfx = [System.Drawing.Graphics]::FromImage($script:frame)
+    $script:gfx.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
     # ---- the window ----
+    $script:wx = [int]$s.x
+    $script:wy = [int]$s.y
     $script:start = [double]$s.start
     $script:shown = $script:start
     $script:target = $script:start
@@ -98,46 +130,41 @@ try {
     $form = New-Object System.Windows.Forms.Form
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.ShowInTaskbar = $false
     $form.Text = 'Updating Distill'
-    $form.BackColor = $script:bg
     $form.TopMost = $true
-    $form.Bounds = [System.Drawing.Rectangle]::new([int]$s.x, [int]$s.y, $script:W, $script:H)
-    [void]$form.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($form, $true, $null)
+    $form.Bounds = [System.Drawing.Rectangle]::new($script:wx, $script:wy, $script:W, $script:H)
+    $hwnd = $form.Handle   # creates the window (still hidden), so it can be made see-through before anything is shown
+    [Distill.Win]::MakeLayered($hwnd)
 
-    $form.Add_Paint({
-        param($sender, $e)
-        $g = $e.Graphics
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-        $g.DrawRectangle($script:penBorder, 0, 0, $script:W - 1, $script:H - 1)
-        $lx = $script:lx; $ly = $script:ly; $lw = $script:lw; $lh = $script:lh
+    # Draw the logo: grey, with the colour from the bottom up to the fill line and a small ripple on that edge (as in the app).
+    function Render {
+        $g = $script:gfx
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $lw = $script:W; $lh = $script:H
         $f = $script:shown
-        $g.DrawImage($script:grey, $lx, $ly, $lw, $lh)
+        $g.DrawImage($script:grey, 0, 0, $lw, $lh)
         if ($f -ge 0.999) {
-            $g.DrawImage($script:colour, $lx, $ly, $lw, $lh)
+            $g.DrawImage($script:colour, 0, 0, $lw, $lh)
         } elseif ($f -gt 0) {
-            # the colour, from the bottom up to the fill line, with a small ripple on the edge (as in the app)
-            $y = $ly + $lh * (1.0 - $f)
+            $y = $lh * (1.0 - $f)
             $amp = 4.0 * [math]::Sqrt([math]::Sin([math]::PI * $f)) * ($lw / 240.0)
             $pts = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
-            $pts.Add([System.Drawing.PointF]::new([single]$lx, [single]($ly + $lh)))
+            $pts.Add([System.Drawing.PointF]::new([single]0, [single]$lh))
             for ($x = 0; $x -le $lw; $x += 4) {
                 $wy = $y + $amp * [math]::Sin(2.0 * [math]::PI * $x / ($lw * 0.6) + $script:phase)
-                $pts.Add([System.Drawing.PointF]::new([single]($lx + $x), [single]$wy))
+                $pts.Add([System.Drawing.PointF]::new([single]$x, [single]$wy))
             }
-            $pts.Add([System.Drawing.PointF]::new([single]($lx + $lw), [single]($ly + $lh)))
+            $pts.Add([System.Drawing.PointF]::new([single]$lw, [single]$lh))
             $path = [System.Drawing.Drawing2D.GraphicsPath]::new()
             $path.AddPolygon($pts.ToArray())
             $g.SetClip($path)
-            $g.DrawImage($script:colour, $lx, $ly, $lw, $lh)
+            $g.DrawImage($script:colour, 0, 0, $lw, $lh)
             $g.ResetClip()
             $path.Dispose()
         }
-        if ($f -ge 0.999) { $p = 100 } else { $p = [math]::Min(99, [math]::Floor($f * 100 + 0.000001)) }
-        $g.DrawString(([string]$p + '%'), $script:pctFont, $script:brTitle, $script:pctRect, $script:fmt)
-        $g.DrawString($script:statusText, $script:staFont, $script:brMuted, $script:staRect, $script:fmt)
-    })
+        [Distill.Win]::Push($hwnd, $script:frame, $script:wx, $script:wy)
+    }
 
     # Redraw about 30 times a second, easing the shown fill towards the real one, and let the window process its messages.
     function Pump([bool]$force = $false) {
@@ -146,10 +173,11 @@ try {
         $d = $script:target - $script:shown
         if ([math]::Abs($d) -lt 0.001) { $script:shown = $script:target } else { $script:shown += $d * 0.2 }
         $script:phase += 0.12
-        $form.Invalidate()
+        Render
         [System.Windows.Forms.Application]::DoEvents()
     }
 
+    Render             # the first picture goes in while the window is still hidden, so no blank box ever shows
     $form.Show()
     Pump $true
     Set-Content -LiteralPath ([string]$s.ready) -Value 'ok'   # Distill waits for this before it quits, so the two windows overlap
@@ -210,7 +238,6 @@ try {
 
     # ---- done: a moment of full colour, then hand back to the batch file, which starts Distill ----
     $script:target = 1.0
-    $script:statusText = 'Starting Distill'
     $t = [System.Diagnostics.Stopwatch]::StartNew()
     while ($t.ElapsedMilliseconds -lt 700) { Start-Sleep -Milliseconds 20; Pump }
     $form.Close()

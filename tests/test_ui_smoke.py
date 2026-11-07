@@ -1577,15 +1577,15 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         asked = []
         screen.cancelled.connect(lambda: asked.append(1))
         screen.set_progress(12 << 20, 48 << 20)  # a quarter of the download is 70% of that: 17% of the logo
-        self.assertEqual(screen.percent.text(), "17%")
-        self.assertIn("12.0 of 48.0 MB", screen.status.text())
+        self.assertEqual(screen.percent, "17%")
+        self.assertIn("12.0 of 48.0 MB", screen.status)
         screen.set_progress(48 << 20, 48 << 20)
         screen.set_installing()  # the download is its share of the fill; the install window does the rest
-        self.assertEqual((screen.percent.text(), screen.cancel.isHidden()), ("70%", True))
+        self.assertEqual((screen.percent, screen.can_cancel()), ("70%", False))
         screen.set_progress(1, 48 << 20)  # a late chunk must not drag the screen back
-        self.assertEqual(screen.percent.text(), "70%")
+        self.assertEqual(screen.percent, "70%")
         screen.set_install_progress(1.0)
-        self.assertEqual(screen.percent.text(), "100%")
+        self.assertEqual(screen.percent, "100%")
         screen.reject()
         self.assertEqual(asked, [])  # too late to cancel
         screen.dismiss()
@@ -1638,6 +1638,24 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertNotEqual((below.red(), below.green()), (below.green(), below.blue()))  # colour
 
 
+    def test_update_screen_is_only_the_logo(self):
+        from PySide6.QtCore import Qt
+
+        from distill.ui.update_screen import LOGO, UpdateScreen
+
+        screen = UpdateScreen(None, "Distill v9.9")
+        self.addCleanup(screen.deleteLater)
+        self.assertEqual((screen.width(), screen.height()), (LOGO, LOGO))  # the window is the logo: no margins, no labels, no button
+        self.assertTrue(screen.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertTrue(screen.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        self.assertEqual(len(screen.findChildren(type(screen.logo))), 1)
+        self.assertEqual(screen.logo.geometry().getRect(), (0, 0, LOGO, LOGO))
+        screen.set_progress(12 << 20, 48 << 20)
+        self.assertIn("17%", screen.logo.toolTip())  # the detail is one hover away
+        self.assertIn("cancel", screen.logo.toolTip().lower())
+        screen.set_installing()
+        self.assertNotIn("cancel", screen.logo.toolTip().lower())  # nothing to cancel any more
+
     def test_update_screen_describes_itself_for_the_install_window(self):
         from pathlib import Path
 
@@ -1650,15 +1668,10 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         screen.set_installing()
         spec = screen.handoff_spec()
         self.assertAlmostEqual(spec["start"], 0.7)
-        self.assertGreater(spec["w"], 300)
-        self.assertGreater(spec["h"], 300)
-        for key in ("logo_rect", "pct_rect", "status_rect"):
-            self.assertTrue(all(spec[key][k] >= 0 for k in "xywh"), key)
-        self.assertGreater(spec["logo_rect"]["w"], 200)
-        self.assertGreater(spec["pct_px"], spec["status_px"])
+        self.assertGreaterEqual(spec["w"], 240)
+        self.assertEqual(spec["w"], spec["h"])  # the window is the logo, so it is square
         self.assertTrue(Path(spec["logo"]).is_file())
-        self.assertTrue(spec["bg"].startswith("#"))
-        self.assertIn("Installing", spec["status_text"])
+        self.assertNotIn("status_text", spec)  # no text to carry over
 
 
 if __name__ == "__main__":

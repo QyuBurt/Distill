@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTex
 from .. import emulators as em
 from .. import recomps as rc
 from .theme import T
-from .widgets import accent_button, AnimCheckBox, hint
+from .widgets import accent_button, AnimCheckBox, hint, PathRow
 
 
 class AddForkDialog(QDialog):
@@ -47,6 +47,9 @@ class AddForkDialog(QDialog):
         self.desc.setPlaceholderText("What is it for? One or two lines, e.g. \"Fixes for Astro Bot. Experimental.\"")
         self.desc.setFixedHeight(66)
         lay.addWidget(self.desc)
+        self.existing = PathRow("A copy you already have (optional)", folder=True, placeholder="The folder it is in")
+        self.existing.setToolTip("Already downloaded this fork? Choose its folder and Distill will use it as it is, instead of downloading another.")
+        lay.addWidget(self.existing)
         self.evidence = QLabel()
         self.evidence.setWordWrap(True)
         self.evidence.setTextFormat(Qt.TextFormat.RichText)
@@ -130,4 +133,5 @@ class AddForkDialog(QDialog):
     # ---- the answer ---------------------------------------------------------------------------------------------
     def values(self) -> dict:
         return {"repo": self.report.repo if self.report else self.repo.text(), "name": self.name.text().strip(),
-                "description": self.desc.toPlainText().strip(), "accepted": self.accept_risk.isChecked()}
+                "description": self.desc.toPlainText().strip(), "accepted": self.accept_risk.isChecked(),
+                "folder": self.existing.text().strip()}

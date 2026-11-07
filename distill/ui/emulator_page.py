@@ -1081,8 +1081,13 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             self.emd_msg.setText(str(exc))
             return
         shared = " It shares a folder with other programs, so Distill will launch it but won't update it." if found.linked == "file" else ""
-        self.emd_msg.setText(f"Linked {e.name}" + (f" {found.version}" if found.version else "") + f".{shared}")
+        self.emd_msg.setText(f"Linked {e.name}" + (f" {found.version}" if found.version else "") + f".{shared}{self._em_released_note(found)}")
         self._em_refresh_detail()
+
+    def _em_released_note(self, found: em.Found) -> str:
+        """Said after a link that took a program away from another entry (a fork's folder a scan had given to its parent)."""
+        names = [self._em_by_id[i].name if i in self._em_by_id else i for i in found.released]
+        return f" {' and '.join(names)} was pointing at it and no longer is." if names else ""
         self._em_fetch_latest(e)
 
     def _em_remove(self) -> None:
@@ -1178,8 +1183,17 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             self.emd_msg.setText(str(exc))
             return
         self._em_reload_forks()
+        fork = self._em_by_id.get(fork.id, fork)  # the entry as loaded, so a link below is recorded against it
+        note = ""
+        if v.get("folder"):
+            try:
+                found = em.link(self.em_store, fork, Path(v["folder"]))
+                note = f" Linked to the copy you already have.{self._em_released_note(found)}"
+            except rc.RecompError as exc:
+                note = f" Not linked: {exc}"
+        self._em_refresh_views()
         self._em_refresh_detail()
-        self.emd_msg.setText(f"Added {fork.name}.")
+        self.emd_msg.setText(f"Added {fork.name}.{note}")
         self._em_fetch_latest(fork)
 
     def _em_remove_fork(self) -> None:

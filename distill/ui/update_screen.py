@@ -1,12 +1,12 @@
-"""The update screen: a big greyscale Distill logo that fills, bottom to top, with the logo's own colours as the new
-version comes in. The arithmetic lives in fillmath.py (no Qt, so it is tested everywhere)."""
+"""The update screen: just the Distill logo, floating with no window around it, grey at first and filling bottom to top with
+its own colours as the new version comes in. The arithmetic lives in fillmath.py (no Qt, so it is tested everywhere)."""
 from __future__ import annotations
 
 import math
 
 from PySide6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFontInfo, QImage, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap
+from PySide6.QtWidgets import QDialog, QMenu, QWidget
 
 from . import fillmath, motion
 from .assets import asset
@@ -136,9 +136,12 @@ class FillLogo(QWidget):
 
 
 class UpdateScreen(QDialog):
-    """Shown while a new version downloads: the logo, the percentage, one line of detail and a Cancel button. It has no title
-    bar, so that the install window (update_splash.py), which carries on after Distill has quit, can open in exactly the same
-    place and look. `cancelled` fires when the person cancels (the button or Esc)."""
+    """Shown while a new version downloads: nothing but the logo, floating. There is no frame, no title bar, no text and no
+    button; the window is transparent, so the logo's own rounded shape is all that shows. That keeps it identical to the
+    install window (update_splash.py), which carries on after Distill has quit and opens in exactly the same place.
+
+    The detail is still there for anyone who wants it: hovering the logo shows the percentage and the line of detail, and
+    Esc or a right-click (Cancel update) cancels. `cancelled` fires when the person cancels."""
 
     cancelled = Signal()
 
@@ -149,81 +152,66 @@ class UpdateScreen(QDialog):
         self._overall = 0.0  # how full the logo is meant to be (download share + install share)
         self._finishing = False  # downloaded: nothing left to cancel
         self._dismissing = False
-        self.setWindowTitle("Updating")
+        self.percent = "0%"  # not drawn: shown in the hover tip (and read by the tests)
+        self.status = f"Downloading {name}"
+        self.setWindowTitle("Updating")  # the taskbar and Alt+Tab still need a name for it
         self.setObjectName("updateScreen")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet("#updateScreen { background: transparent; border: none; }")  # the app style must not paint a box behind it
         self.setModal(True)
-        self.setMinimumWidth(400)
+        self.setFixedSize(LOGO, LOGO)  # the window is the logo and nothing else
         self.logo = FillLogo(LOGO, self)
-        self.percent = QLabel("0%")
-        self.status = QLabel(f"Downloading {name}")
-        self.cancel = QPushButton("Cancel")
-        self.cancel.setAutoDefault(False)  # Enter must not cancel a download
-        keep = self.cancel.sizePolicy()
-        keep.setRetainSizeWhenHidden(True)  # hiding it when installing must not change the window's size
-        self.cancel.setSizePolicy(keep)
-        self.cancel.clicked.connect(self.reject)
-        for label in (self.percent, self.status):
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        T.bind_css(self, lambda: f"#updateScreen {{ background: {T.bg.name()}; border: 1px solid {T.border.name()}; }}")
-        T.bind_css(self.percent, lambda: f"background: transparent; color: {T.title.name()}; "
-                                         f"font-family: \"{T.display_font}\"; font-size: 30pt; font-weight: 700;")
-        T.bind_css(self.status, lambda: f"background: transparent; color: {T.fg3.name()}; font-size: 10pt;")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 40, 48, 28)
-        lay.setSpacing(0)
-        lay.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignHCenter)
-        lay.addSpacing(18)
-        lay.addWidget(self.percent)
-        lay.addSpacing(2)
-        lay.addWidget(self.status)
-        lay.addSpacing(24)
-        lay.addWidget(self.cancel, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.logo.move(0, 0)
+        self._refresh_tip()
+
+    def _refresh_tip(self) -> None:
+        tip = f"{self.percent}  \u00b7  {self.status}"
+        self.logo.setToolTip(tip if self._finishing else f"{tip}\nEsc, or right-click, to cancel")
 
     def _show_overall(self, frac: float) -> None:
         self._overall = min(1.0, max(0.0, frac))
         self.logo.set_fraction(self._overall)
-        self.percent.setText(fillmath.percent_text(self._overall))
+        self.percent = fillmath.percent_text(self._overall)
 
     def set_progress(self, done: int, total: int) -> None:
         if self._finishing:
             return
         self._show_overall(self._share * fillmath.fraction(done, total))
-        self.status.setText(f"Downloading {self._name}  \u00b7  {fillmath.size_text(done, total)}")
+        self.status = f"Downloading {self._name}  \u00b7  {fillmath.size_text(done, total)}"
+        self._refresh_tip()
 
     def set_installing(self) -> None:
         """The file is in: nothing left to cancel. The logo stays where the download left it; the install window carries it on."""
         self._finishing = True
-        self.cancel.setVisible(False)
         self._show_overall(self._share)
-        self.status.setText(f"Installing {self._name}. Distill restarts by itself.")
+        self.status = f"Installing {self._name}. Distill restarts by itself."
+        self._refresh_tip()
 
     def set_install_progress(self, frac: float) -> None:
         """How far the install is, 0..1: it fills the rest of the logo (used when no install window takes over)."""
         self._show_overall(self._share + (1.0 - self._share) * frac)
+        self._refresh_tip()
+
+    def can_cancel(self) -> bool:
+        return not self._finishing
+
+    def contextMenuEvent(self, event) -> None:
+        if not self.can_cancel():
+            return
+        menu = QMenu(self)
+        menu.addAction("Cancel update", self.reject)
+        menu.exec(event.globalPos())
 
     def handoff_spec(self) -> dict:
-        """Where and how this screen is drawn, in screen pixels, for the install window to continue from it seamlessly."""
+        """Where and how this screen is drawn, in screen pixels, for the install window to continue from it seamlessly. The
+        window is the logo, so a position, a size, how full it is and which picture to use is all there is to say."""
         dpr = self.devicePixelRatioF()
         g = self.geometry()
-
-        def box(w: QWidget) -> dict:
-            r = w.geometry()
-            return {"x": round(r.x() * dpr), "y": round(r.y() * dpr), "w": round(r.width() * dpr), "h": round(r.height() * dpr)}
-
-        def px(w: QWidget) -> int:
-            return round(QFontInfo(w.font()).pixelSize() * dpr)
-
         return {
             "x": round(g.x() * dpr), "y": round(g.y() * dpr), "w": round(g.width() * dpr), "h": round(g.height() * dpr),
-            "logo_rect": box(self.logo), "pct_rect": box(self.percent), "status_rect": box(self.status),
-            "pct_px": px(self.percent), "status_px": px(self.status), "status_text": self.status.text(),
             "start": self._overall,
-            "bg": T.bg.name(), "border": T.border.name(), "title": T.title.name(), "fg3": T.fg3.name(),
             "logo": str(asset("icons", f"distill-{'dark' if T.dark else 'bright'}-512.png")),
-            "display_font": str(asset("fonts", "Outfit-Bold.ttf")),
-            "text_font": str(asset("fonts", "Inter_18pt-Regular.ttf")),
         }
 
     def reject(self) -> None:
