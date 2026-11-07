@@ -7,12 +7,15 @@ laid over the window with the glow on top. The overlay lets every mouse and drag
 so dropping on a box that takes drops still works. With reduced motion it appears and goes at once and does not turn."""
 from __future__ import annotations
 
+import math
+import time
+
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QRectF, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QFont, QFontMetricsF, QPainter, QPainterPath, QPixmap,
+from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
                            QRadialGradient)
 from PySide6.QtWidgets import QApplication, QWidget
 
-from . import motion
+from . import icons, motion
 from .theme import T
 
 
@@ -39,9 +42,9 @@ class DropGlow(QWidget):
     PINK = 0.4  # how far the last brand colour is let into the mix (0 = none)
     FADE_IN, FADE_OUT = 420, 360  # ms
     TINT = (90, 70)  # alpha of the calming wash over the window: dark theme, light theme
-    LABEL = "Drop files anywhere"  # centred on the window; "" for none
-    LABEL_PT, LABEL_SPACING = 11.5, 0.8  # point size, and the extra space between letters in px
-    HALO = 0.55  # how much of the page colour softly backs the label, so it reads without a box
+    BADGE = 92  # px: the brand tile in the middle of the window that says "drop here"
+    RIPPLE_S, BOB_S = 2.6, 1.8  # seconds for a ripple to spread and fade; for the arrow to nod once
+    HALO = 0.55  # how much of the page colour softly backs the badge, so it reads over any window
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -213,39 +216,63 @@ class DropGlow(QWidget):
         p.drawPixmap(self.rect(), self._back)
         if self._frame is not None:
             p.drawPixmap(self.rect(), self._frame)  # stretched back up: bilinear, so the fade stays smooth
-        if self.LABEL:
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self._paint_label(p, QRectF(self.rect()).center())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_badge(p, QRectF(self.rect()).center())
 
-    def _paint_label(self, p: QPainter, centre) -> None:
-        """The invitation: a quiet label on a soft pool of the page colour, with no box or outline round it."""
-        font = QFont(T.text_font)
-        font.setPointSizeF(self.LABEL_PT)
-        font.setWeight(QFont.Weight.DemiBold)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.LABEL_SPACING)
-        fm = QFontMetricsF(font)
-        width = fm.horizontalAdvance(self.LABEL)
-        box = QRectF(0, 0, width + 8, fm.height() + 4)
-        box.moveCenter(centre)
-        radius = width * 0.75 + 30
-        halo = QRadialGradient(0, 0, radius)  # fades to nothing by its rim: the label sits in a pool, not a pill
-        for stop, alpha in ((0.0, 1.0), (0.35, 0.8), (0.65, 0.32), (1.0, 0.0)):
+    def _paint_badge(self, p: QPainter, centre) -> None:
+        """The invitation, with no words: a tile in the brand gradient holding the app's download tray and arrow, on a soft pool of the
+        page colour, with ripples spreading from it and the arrow nodding down into the tray. With reduced motion it is the tile and
+        one still ring."""
+        size, live, now = float(self.BADGE), motion.on(), time.monotonic()
+        corner = size * 0.28
+        radius = size * 2.1
+        halo = QRadialGradient(0, 0, radius)  # fades to nothing by its rim, so there is no box round the badge
+        for stop, alpha in ((0.0, 1.0), (0.45, 0.7), (0.75, 0.28), (1.0, 0.0)):
             col = QColor(T.bg)
             col.setAlpha(round(255 * self.HALO * alpha))
             halo.setColorAt(stop, col)
         p.save()
         p.translate(centre)
-        p.scale(1.0, 0.42)  # the pool is a wide oval
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(halo))
         p.drawEllipse(QRectF(-radius, -radius, radius * 2, radius * 2))
         p.restore()
-        p.setFont(font)
-        text = QColor(T.title)
-        text.setAlpha(225)
-        p.setPen(text)
-        # the last letter is followed by the letter spacing too: shift left by half of it so the text sits truly centred
-        p.drawText(box.translated(-self.LABEL_SPACING / 2, 0), int(Qt.AlignmentFlag.AlignCenter), self.LABEL)
+
+        c0, c1, c2 = (QColor(c) for c in T.grad)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for beat in ((0.0, 0.5) if live else (0.3,)):  # two ripples half a cycle apart
+            k = ((now / self.RIPPLE_S) + beat) % 1.0 if live else beat
+            grow = size * 0.12 + size * 0.5 * k
+            ring = QColor(c1)
+            ring.setAlpha(round(120 * (1.0 - k) ** 1.6))
+            box = QRectF(0, 0, size + 2 * grow, size + 2 * grow)
+            box.moveCenter(centre)
+            p.setPen(QPen(ring, 2.0))
+            p.drawRoundedRect(box, corner + grow, corner + grow)
+
+        tile = QRectF(0, 0, size, size)
+        tile.moveCenter(centre)
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(6):  # a soft shadow underneath, built from a few faint layers
+            p.setBrush(QColor(0, 0, 0, 10))
+            p.drawRoundedRect(tile.adjusted(-i, 6 - i, i, 6 + i), corner + i, corner + i)
+        fill = QLinearGradient(tile.topLeft(), tile.bottomRight())
+        fill.setColorAt(0.0, c0)
+        fill.setColorAt(0.55, c1)
+        fill.setColorAt(1.0, c2)
+        p.setBrush(QBrush(fill))
+        p.drawRoundedRect(tile, corner, corner)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 70), 1.0))  # a thin light edge, as on the Start button
+        p.drawRoundedRect(tile.adjusted(0.5, 0.5, -0.5, -0.5), corner, corner)
+
+        glyph = round(size * 0.52)
+        nod = math.sin(now * 2 * math.pi / self.BOB_S) * size * 0.04 if live else 0.0
+        pm = icons.pixmap("download", QColor(255, 255, 255), glyph, stroke=2.2)
+        target = QRectF(0, 0, glyph, glyph)
+        target.moveCenter(centre)
+        target.translate(0, nod)
+        p.drawPixmap(target, pm, QRectF(pm.rect()))
 
 
 class DropGlowFilter(QObject):

@@ -749,6 +749,18 @@ class Expander(Card):
             QTimer.singleShot(0, parent.refit)
 
 
+def link_expanders(*cards: Expander) -> None:
+    """Make cards that sit side by side fold and unfold as one. Equal-height columns keep a collapsed card as tall as its open
+    neighbour, so a card folding alone leaves an empty frame; folded together the whole row closes down to its headings."""
+    def follow(source: Expander, open_: bool) -> None:
+        for other in cards:
+            if other is not source and other.header.isChecked() != open_:  # setChecked emits only on a change, so this can't loop
+                other.header.setChecked(open_)
+
+    for card in cards:
+        card.header.toggled.connect(lambda open_, c=card: follow(c, open_))
+
+
 class PathRow(QWidget):
     """A small label above a text box with a Browse... button, for a folder or a program. (`label_width` is accepted
     for older callers; the label now sits above the box.)"""

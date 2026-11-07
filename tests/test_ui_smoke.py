@@ -1406,6 +1406,57 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         card.header.setChecked(True)
         self.assertFalse(card.body.isHidden())
 
+    def test_linked_expanders_fold_and_unfold_together(self):
+        from distill.ui.widgets import Expander, link_expanders
+
+        left, right = Expander("Links", expanded=True), Expander("Save", expanded=True)
+        link_expanders(left, right)
+        left.header.setChecked(False)
+        self.assertFalse(right.header.isChecked())
+        right.header.setChecked(True)
+        self.assertTrue(left.header.isChecked())
+
+    def test_the_soundtrack_cards_fold_together(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.st_dest_card.header.setChecked(False)
+        self.assertFalse(win.st_games_card.header.isChecked())
+        win.st_games_card.header.setChecked(True)
+        self.assertTrue(win.st_dest_card.header.isChecked())
+
+    def test_the_drop_badge_paints_with_and_without_motion(self):
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtWidgets import QWidget
+
+        from distill.ui import motion
+        from distill.ui.dropglow import DropGlow
+
+        host = QWidget()
+        host.resize(600, 400)
+        glow = DropGlow(host)
+        glow.resize(600, 400)
+        glow._fade = 1.0
+        glow._back = QPixmap(600, 400)
+        glow._back.fill()
+        self.addCleanup(setattr, motion.Motion, "reduce", motion.Motion.reduce)
+        for reduce in (False, True):
+            motion.Motion.reduce = reduce
+            shot = QPixmap(600, 400)
+            shot.fill()
+            painter = QPainter(shot)
+            glow._paint_badge(painter, glow.rect().center())
+            painter.end()
+            self.assertTrue(any(shot.toImage().pixelColor(x, 200).rgb() != 0xFFFFFFFF for x in range(250, 350)))  # the tile is there
+
+    def test_recomp_cover_flight_helpers_are_safe_with_nothing_open(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertIsNone(win._rc_poster_box("no-such-game"))
+        self.assertEqual(win._rc_hold_id, "")
+        win._rc_cancel_flight()  # nothing in the air: a no-op
+        win._rc_back()  # already on the grid: nothing to fly back from
+        self.assertEqual(win._rc_hold_id, "")
+
     def test_stack_pins_compact_pages_to_their_content(self):
         from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 

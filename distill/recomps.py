@@ -1183,13 +1183,31 @@ def uninstall(store: Store, rc: Recomp) -> None:
     store.set_installed(None, rc.id)
 
 
+def _is_console_exe(exe: Path) -> bool:
+    """True for a Windows program built for a console (PE subsystem 3). Such a program must be given a console of its own when started
+    from a window-only app like this one: with none, some (Ryujinx) stop at once. A normal double-click gives them one."""
+    try:
+        with exe.open("rb") as f:
+            head = f.read(64)
+            at = int.from_bytes(head[0x3C:0x40], "little")
+            f.seek(at)
+            pe = f.read(24 + 70)
+    except OSError:
+        return False
+    return len(pe) >= 24 + 70 and pe[:4] == b"PE\0\0" and int.from_bytes(pe[24 + 68:24 + 70], "little") == 3
+
+
 def launch(inst: Installed) -> None:
     exe = inst.exe_path()
     if not exe.exists():
         raise RecompError("The game's files are missing. Install it again.")
     flags = 0
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if sys.platform == "win32":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        if _is_console_exe(exe):
+            flags, quiet = subprocess.CREATE_NEW_CONSOLE, {}  # as when double-clicked: its own console, its own streams
+        else:
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         cmd = [str(exe)]
     elif sys.platform == "darwin" and exe.suffix == ".app":
         cmd = ["open", str(exe)]
@@ -1197,8 +1215,7 @@ def launch(inst: Installed) -> None:
         cmd = [str(exe)]
     try:
         subprocess.Popen(cmd, cwd=str(exe.parent), creationflags=flags, close_fds=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=(sys.platform != "win32"))
+                         start_new_session=(sys.platform != "win32"), **quiet)
     except OSError as exc:
         raise RecompError(f"Couldn't start it: {exc}") from exc
 

@@ -9,7 +9,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QUrl
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMessageBox, QProgressBar,
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import recomps as rc
-from . import icons, motion
+from . import flight, icons, motion
 from .emu_cards import Callout, chip_css, clear_layout, break_path, FactList, pill_css, section_header, tint, TwoColumn
 from .motion import smooth_scroll
 from .theme import AlignC, AlignL, AlignV, T
@@ -113,6 +113,7 @@ class PosterDelegate(QStyledItemDelegate):
         state = index.data(STATE_ROLE) or {}
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setOpacity(0.0 if r.id == self.win._rc_hold_id else 1.0)  # a cover still in the air towards this cell leaves its place empty until it lands
         cell = option.rect
         slot = QRectF(cell.x() + (cell.width() - POSTER_W) / 2, cell.y() + 6, POSTER_W, POSTER_H)  # the room a poster has; the text lines up to it
         pix = self.win._rc_pixmap(r)
@@ -172,6 +173,7 @@ class PosterDelegate(QStyledItemDelegate):
             p.drawPolygon(star_polygon(box.x() + 13, box.center().y() + 0.5, 6.5))
             p.setPen(QColor(255, 255, 255))
             p.drawText(QRectF(box.x() + 22, box.y(), w - 26, box.height()), AlignL | AlignV, text)
+        p.setOpacity(1.0)
         name_font = QFont(option.font)
         name_font.setBold(True)
         p.setFont(name_font)
@@ -208,6 +210,10 @@ class RecompMixin:
         self._rc_busy: dict[str, threading.Event] = {}  # installs in progress (the Event cancels)
         self._rc_current = ""
         self._rc_snap = False  # the next detail refresh follows a change of game: no animation
+        self._rc_flight: flight.Flight | None = None  # the cover in the air between the grid and a page
+        self._rc_flight_id = 0  # bumped by every new flight and cancellation
+        self._rc_hold_id = ""  # the game whose grid cell is left empty while its cover flies to it
+        self._rc_list_scroll = 0  # where the grid was scrolled to when a page was opened
         self._rc_loaded = False
         self._rc_about: dict[str, str] = {}  # id -> the one-line description the developers gave the repository
         self._rc_check_stop = threading.Event()
@@ -683,14 +689,89 @@ class RecompMixin:
         self._rc_show_detail(item.data(ID_ROLE))
 
     def _rc_back(self) -> None:
+        rid = self._rc_current
+        self._rc_cancel_flight()
+        leaving = None  # the page's cover and where it is, for it to glide back to its place in the grid
+        if rid and self._rc_can_fly() and self.rc_views.currentIndex() == 1:
+            view = self.settings_scroll.viewport()
+            box = flight.box_of(self.rcd_cover, view)
+            if view.rect().intersects(box):
+                leaving = (flight.picture_of(self.rcd_cover), box)
         self._rc_current = ""
         self.rc_views.setCurrentIndex(0)
         self._rc_fill()
+        self._rc_scroll_list(self._rc_list_scroll)  # back to where the grid was
+        if leaving is not None:
+            self._rc_fly_to_poster(rid, *leaving)
+
+    # ---- the cover's flight between the grid and a page -------------------------------------------------------
+    def _rc_can_fly(self) -> bool:
+        return motion.on() and self.rc_views.isVisible() and self.rc_views.window().isVisible()
+
+    def _rc_scroll_list(self, value: int) -> None:
+        """Move the grid's scroll bar, now and once more after it has been laid out (a rebuilt list starts at the top)."""
+        bar = self.rc_list.verticalScrollBar()
+        bar.setValue(value)
+        QTimer.singleShot(0, lambda: bar.setValue(value))
+
+    def _rc_poster_box(self, rid: str) -> QRect | None:
+        """Where this game's cover is in the grid, in the coordinates of the scroll area's viewport (where the flying picture lives);
+        None when the game isn't in the grid or its row is scrolled out of sight."""
+        if rid not in self._rc_by_id:
+            return None
+        for i in range(self.rc_list.count()):
+            item = self.rc_list.item(i)
+            if item.data(ID_ROLE) == rid:
+                break
+        else:
+            return None
+        cell = self.rc_list.visualItemRect(item)
+        grid = self.rc_list.viewport()
+        if not grid.rect().intersects(cell):
+            return None
+        slot = QRectF(cell.x() + (cell.width() - POSTER_W) / 2, cell.y() + 6, POSTER_W, POSTER_H)  # the same slot the delegate paints into
+        poster = art_rect(slot, self._rc_art.get(rid)).toRect()
+        return QRect(grid.mapTo(self.settings_scroll.viewport(), poster.topLeft()), poster.size())
+
+    def _rc_cancel_flight(self) -> None:
+        self._rc_flight_id += 1
+        if self._rc_flight is not None:
+            self._rc_flight.finish()  # puts back whatever it was holding hidden
+            self._rc_flight = None
+
+    def _rc_fly_to_page(self, start: QRect) -> None:
+        """The grid's cover glides to its place on the page while the page fades in; the page's own copy stays hidden until it lands."""
+        view = self.settings_scroll.viewport()
+        cover = self.rcd_cover
+        picture = flight.picture_of(cover)
+        motion.reveal(self.rc_views.widget(1))
+        flight.hold(cover)
+        self._rc_flight = flight.Flight(view, picture, start, lambda: flight.box_of(cover, view), done=lambda: flight.release(cover)).go()
+
+    def _rc_fly_to_poster(self, rid: str, picture, start: QRect) -> None:
+        """The page's cover glides back down to its cell while the grid fades in. The cell is looked up on every frame (the grid may still be
+        settling) and its own cover stays out of sight until the picture lands on it."""
+        view = self.settings_scroll.viewport()
+        self._rc_hold_id = rid
+        self.rc_list.viewport().update()
+
+        def done() -> None:
+            self._rc_hold_id = ""
+            self.rc_list.viewport().update()
+
+        motion.reveal(self.rc_views.widget(0))
+        self._rc_flight = flight.Flight(view, picture, start, lambda: self._rc_poster_box(rid), done=done).go()
 
     def _rc_show_detail(self, rid: str) -> None:
         r = self._rc_by_id.get(rid)
         if r is None:
             return
+        self._rc_cancel_flight()
+        leaving = None  # where this game's cover is in the grid, for it to glide up from
+        if self.rc_views.currentIndex() == 0:
+            self._rc_list_scroll = self.rc_list.verticalScrollBar().value()
+            if self._rc_can_fly():
+                leaving = self._rc_poster_box(rid)
         self._rc_current = rid
         self._rc_snap = True  # a different game: its buttons swap at once; only a change to the same one animates
         self.rc_views.setCurrentIndex(1)
@@ -737,6 +818,8 @@ class RecompMixin:
         self._rc_refresh_detail()
         if rid not in self._rc_latest:
             self._rc_fetch_latest(r)
+        if leaving is not None:
+            self._rc_fly_to_page(leaving)
 
     def _rc_toggle_notes(self, open_: bool) -> None:
         motion.set_visible(self.rcd_notes, open_, axis="height", animate=not self._rc_snap)

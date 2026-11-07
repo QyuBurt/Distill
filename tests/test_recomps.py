@@ -895,3 +895,52 @@ class PortedDescriptionTests(unittest.TestCase):
     def test_things_that_are_not_games_are_not_taken_for_one(self):
         for text in ("Tools ported to Windows", "Fast native renderer written in Rust"):
             self.assertEqual(rc.game_from_description(text), "", text)
+
+
+def fake_pe(subsystem: int, plus: bool = True) -> bytes:
+    """Just enough of a Windows program: DOS header pointing at a PE header with the given subsystem."""
+    opt = (b"\x0b\x02" if plus else b"\x0b\x01") + b"\0" * 66 + subsystem.to_bytes(2, "little") + b"\0" * 30
+    return b"MZ" + b"\0" * 58 + (0x80).to_bytes(4, "little") + b"\0" * 64 + b"PE\0\0" + b"\0" * 20 + opt
+
+
+class LaunchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        td = tempfile.TemporaryDirectory(prefix="distill_launch_")
+        self.addCleanup(td.cleanup)
+        self.dir = Path(td.name)
+
+    def exe(self, data: bytes) -> Path:
+        p = self.dir / "Ryujinx.exe"
+        p.write_bytes(data)
+        return p
+
+    def test_console_programs_are_told_apart_from_window_programs(self):
+        self.assertTrue(rc._is_console_exe(self.exe(fake_pe(3))))
+        self.assertTrue(rc._is_console_exe(self.exe(fake_pe(3, plus=False))))
+        self.assertFalse(rc._is_console_exe(self.exe(fake_pe(2))))
+        self.assertFalse(rc._is_console_exe(self.exe(b"not a program")))
+        self.assertFalse(rc._is_console_exe(self.dir / "missing.exe"))
+
+    def started(self, data: bytes) -> dict:
+        inst = rc.Installed("g", "1", str(self.dir), "Ryujinx.exe")
+        self.exe(data)
+        with mock.patch.object(rc.sys, "platform", "win32"), mock.patch.object(rc.subprocess, "Popen") as popen, \
+                mock.patch.object(rc.subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True), \
+                mock.patch.object(rc.subprocess, "DETACHED_PROCESS", 0x8, create=True), \
+                mock.patch.object(rc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True):
+            rc.launch(inst)
+        return popen.call_args.kwargs
+
+    def test_a_console_program_gets_a_console_and_its_own_streams(self):
+        kw = self.started(fake_pe(3))
+        self.assertEqual(kw["creationflags"], 0x10)
+        self.assertNotIn("stdout", kw)
+
+    def test_a_window_program_is_still_detached_and_silenced(self):
+        kw = self.started(fake_pe(2))
+        self.assertEqual(kw["creationflags"], 0x8 | 0x200)
+        self.assertEqual(kw["stdout"], rc.subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    unittest.main()

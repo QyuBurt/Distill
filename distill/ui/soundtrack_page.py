@@ -30,7 +30,7 @@ from .theme import T
 from .trackrow import TrackRow
 from .treeslide import TreeSlide
 from . import motion
-from .widgets import (accent_button, AnimCheckBox, Card, Expander, fit_columns, hint, PathRow, PlaceholderTree,
+from .widgets import (accent_button, AnimCheckBox, Card, Expander, fit_columns, hint, link_expanders, PathRow, PlaceholderTree,
                       RevealDelegate,
                       StageSwitch, SwitchToggle)
 
@@ -243,6 +243,7 @@ class SoundtrackMixin:
         side_lay.setSpacing(14)
         dest.body_lay.addStretch(1)
         side_lay.addWidget(dest)
+        link_expanders(games, dest)  # one height while open, so they fold down together
         lay.addWidget(TwoColumn(main, side, wide_at=760, equal=True, fill=True))  # the two cards are one height
 
         found = Card()

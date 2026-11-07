@@ -38,7 +38,7 @@ from .dialogs import LoginsDialog, TorrentDialog
 from .state import LABEL_W
 from .torrent_search import TorrentSearchDialog
 from .emu_cards import hairline, labelled, section_header, TwoColumn
-from .widgets import (accent_button, AnimCheckBox, Card, Expander, hint, PathRow, ToggleTable)
+from .widgets import (accent_button, AnimCheckBox, Card, Expander, hint, link_expanders, PathRow, ToggleTable)
 from .ytdlp_picker import DlDelegate, FormatRows
 
 
@@ -144,6 +144,7 @@ class DownloadMixin:
         side_lay.setSpacing(14)
         dest.body_lay.addStretch(1)
         side_lay.addWidget(dest)
+        link_expanders(links, dest)  # one height while open, so they fold down together
         lay.addWidget(TwoColumn(main, side, wide_at=760, equal=True, fill=True))  # the two cards are one height
 
         # -- the list, across the full width
