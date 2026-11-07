@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QByteArray, QTimer
 from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QSpinBox
 
 from ..constants import APP_DIR, APP_VERSION
+from ..system import resolve_tool_path
+from .state import TOOLS
 from .switch_page import SW_PERSIST
 from .theme import T
 from .whatsnew import NOTES, WhatsNewDialog
@@ -95,9 +99,26 @@ class PersistMixin:
                      "ps3_output", "pkg_layout", "pkg_merge", "pkg_zar", "ps5_kyty", "notify_check", "reduce_motion", "em_view_cards", *SW_PERSIST):
             if (widget := getattr(self, name, None)) is not None:
                 self._persist_bind(name, widget)
+        for key in TOOLS:
+            if rows := self._tool_rows.get(key):
+                self._persist_tool(key, rows[0])
         for key, page in self.pages.items():
             for card in page.findChildren(Expander):
                 card.header.toggled.connect(self._persist_soon)
+
+    def _persist_tool(self, key: str, row) -> None:
+        """A tool path the person chose (Browse or typed). The path the app found or downloaded is never kept: it names a
+        version folder that an update replaces, and the app finds its own copy again at every start."""
+        def get() -> str:
+            text = row.path.text().strip()
+            return "" if text == self._auto.get(key, "") else text
+
+        def put(value) -> None:
+            value = str(value or "").strip()
+            if value and (Path(resolve_tool_path(value)).exists() or shutil.which(value)):  # a copy that was moved or deleted is let go
+                self._set_tool_text(key, value)
+        self._p_binds[f"tool.{key}"] = (get, put)
+        row.path.edit.textChanged.connect(self._persist_soon)
 
     @staticmethod
     def _card_id(page_key: str, card: Expander) -> str:

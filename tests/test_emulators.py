@@ -444,9 +444,25 @@ class InstallTests(Isolated):
              mock.patch.object(rc.urllib.request, "urlopen", side_effect=AssertionError("must not download")):
             with self.assertRaises(rc.RecompError) as cm:
                 em.EmulatorInstaller(self.store).install(emu(), rel("v2", asset("a.zip")), asset("a.zip"))
-        self.assertIn("administrator", str(cm.exception))
+        self.assertIn("Move ", str(cm.exception))  # the way out: move it somewhere writable and link it again
+        self.assertNotIn("administrator", str(cm.exception))
         self.assertIn(str(exe.parent), str(cm.exception))
         self.assertEqual(exe.read_bytes(), b"old")
+
+    def test_update_blocked_says_why_only_for_a_protected_folder(self):
+        exe = self.touch("ScummVM/scummvm.exe", b"old")
+        inst = rc.Installed("scummvm", "v1", str(exe.parent), "scummvm.exe", 0.0, "folder")
+        e = emu(id="scummvm", name="ScummVM")
+        self.assertEqual(em.update_blocked(e, inst), "")  # an ordinary folder is fine
+        self.assertEqual(em.update_blocked(e, None), "")  # nothing installed: nothing to block
+        with mock.patch.object(rc, "writable", return_value=False):
+            why = em.update_blocked(e, inst)
+        self.assertIn("ScummVM", why)
+        self.assertIn(str(exe.parent), why)
+        self.assertIn("Move ScummVM to a folder you can write to", why)
+        gone = rc.Installed("scummvm", "v1", str(self.tmp / "missing"), "scummvm.exe", 0.0, "folder")
+        with mock.patch.object(rc, "writable", return_value=False):
+            self.assertEqual(em.update_blocked(e, gone), "")  # a folder that isn't there is a different problem ("Files missing")
 
     def test_a_refused_file_is_reported_plainly_and_the_old_one_survives(self):
         src, dest = self.tmp / "stage", self.tmp / "live"

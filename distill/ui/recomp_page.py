@@ -543,21 +543,7 @@ class RecompMixin:
             row.addWidget(b)
         row.addStretch(1)
         lay.addLayout(row)
-        lay.addWidget(hint("SteamGridDB API key (free, from steamgriddb.com > Preferences > API). With it, posters come from SteamGridDB in a "
-                           "consistent portrait size; without it, from LaunchBox."))
-        key_row = QHBoxLayout()
-        key_edit = QLineEdit(self.rc_store.sgdb_key())
-        key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        key_edit.setPlaceholderText("SteamGridDB API key (optional)")
-        test = QPushButton("Test")
-
-        def test_key() -> None:
-            bad = rc.sgdb_test(key_edit.text().strip()) if key_edit.text().strip() else "Enter a key first."
-            QMessageBox.information(dlg, "SteamGridDB", bad or "The key works.")
-        test.clicked.connect(test_key)
-        key_row.addWidget(key_edit, 1)
-        key_row.addWidget(test)
-        lay.addLayout(key_row)
+        lay.addWidget(hint("The SteamGridDB and GitHub keys moved to Settings > General > API keys."))
         find = QCheckBox("Also search GitHub for new recomp projects (unverified; some are tools, not games)")
         find.setChecked(self.rc_store.find_new())
         lay.addWidget(find)
@@ -584,11 +570,6 @@ class RecompMixin:
         cancel.clicked.connect(dlg.reject)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        key_changed = key_edit.text().strip() != self.rc_store.sgdb_key()
-        self.rc_store.set_sgdb_key(key_edit.text())
-        if key_changed:
-            self._rc_art_tried.clear()  # fetch posters again with the new key
-            self._rc_fill()
         self.rc_store.set_sources([lst.item(i).text() for i in range(lst.count())], find.isChecked())
         self.rc_store.set_curation(curation_box.currentData())
         self._rc_reload_catalog(force=True)

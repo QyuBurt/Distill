@@ -23,6 +23,7 @@ from ..downloads import DL_MAX_PARALLEL
 from ..system import portable_path, resolve_dolphintool, resolve_tool_path
 from . import motion
 from .state import LABEL_W, TOOL_GROUPS, TOOLS
+from .apikeys_card import ApiKeysCard
 from .dialogs import LoginsDialog, TorrentDialog
 from .motion import Motion
 from .rules_panel import RulesPanel
@@ -132,6 +133,12 @@ class SettingsMixin:
         self.settings_dlg.show()
         self.settings_dlg.raise_()
         self.settings_dlg.activateWindow()
+
+    def _api_key_changed(self, name: str) -> None:
+        """A key was saved in Settings > General: SteamGridDB posters that were looked for without it are looked for again."""
+        if name == "sgdb" and hasattr(self, "_rc_art_tried"):
+            self._rc_art_tried.clear()
+            self._rc_fill()
 
     def _logins_saved(self) -> None:
         self.dl_remember = self.logins_panel.remember_value
@@ -342,7 +349,7 @@ class SettingsMixin:
 
         # -- General: app-wide behaviour
         lay, _ = page("General")
-        lay.addWidget(hint("App-wide behaviour: animations and notifications."))
+        lay.addWidget(hint("App-wide behaviour: animations, notifications and your API keys."))
         card = Card("Run Feedback")
         self.reduce_motion = AnimCheckBox("Reduce motion (turn off all animations)")
         self.reduce_motion.setToolTip("Stops the Start button's drifting gradient, folding and sliding, checkbox bounces, "
@@ -356,6 +363,9 @@ class SettingsMixin:
                                      "20 seconds never notify.")
         card.add(self.notify_check)
         lay.addWidget(card)
+        self.api_keys = ApiKeysCard()
+        self.api_keys.changed.connect(self._api_key_changed)
+        lay.addWidget(self.api_keys)
 
         lay.addStretch(1)
         nav.setCurrentRow(0)

@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QRect, QSize, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
     QTextBrowser, QVBoxLayout, QWidget,
 )
 
@@ -24,6 +24,7 @@ from .emu_cards import (
 )
 from .fork_dialog import AddForkDialog
 from .retroarch_cores import CoresMixin
+from .ryujinx_ldn import LdnMixin
 from .theme import T
 from .widgets import accent_button, Card, hint
 
@@ -31,7 +32,7 @@ FILTERS = ("All emulators", "Installed", "Updates available", "Not installed", "
 TILES = (("installed", "installed", 1), ("updates", "updates available", 2), ("library", "match your library", 4))  # key, caption, filter it applies
 
 
-class EmulatorMixin(CoresMixin):
+class EmulatorMixin(CoresMixin, LdnMixin):
     """Methods only; the state lives on DistillWindow (initialised by `_em_init`)."""
 
     def _em_init(self) -> None:
@@ -55,6 +56,7 @@ class EmulatorMixin(CoresMixin):
         self._em_logos_started = False
         self._em_list_scroll = 0  # where the list was scrolled to when an emulator was opened
         self._cores_init()  # RetroArch's Cores card
+        self._ldn_init()  # Ryujinx's Local wireless card
         self._em_flight: flight.Flight | None = None  # the icon in the air between the list and a page
         self._em_flight_id = 0  # bumped by every new flight and cancellation, so a stale one knows to stand down
 
@@ -314,6 +316,8 @@ class EmulatorMixin(CoresMixin):
         left.addWidget(self.emd_notes_card)
         self.emd_cores_card = self._cores_build_card()  # shown on RetroArch's page only
         left.addWidget(self.emd_cores_card)
+        self.emd_ldn_card = self._ldn_build_card()  # shown on Ryujinx's page only
+        left.addWidget(self.emd_ldn_card)
         self.emd_forks_card = Card()
         self.emd_forks_card.lay.setContentsMargins(20, 16, 20, 16)
         self.emd_forks_card.lay.setSpacing(10)
@@ -892,6 +896,7 @@ class EmulatorMixin(CoresMixin):
         self._em_notes_title()
         self._em_refresh_forks(e)
         self._cores_sync()
+        self._ldn_sync()
 
     # ---- latest release / update check ------------------------------------------------------------------------
     def _em_fetch_latest(self, e: em.Emulator, force: bool = False) -> None:
@@ -964,6 +969,9 @@ class EmulatorMixin(CoresMixin):
         if not isinstance(latest, tuple):
             return
         inst = self.em_store.installed(e.id)
+        if why := em.update_blocked(e, inst):  # a protected folder (Program Files): nothing is started, so nothing can hang
+            QMessageBox.information(self, "Can't update here", why)
+            return
         if inst is None and em.emulators_root(self.em_store) is None:
             answer = QMessageBox.question(
                 self, "Where should it go?",
@@ -976,11 +984,18 @@ class EmulatorMixin(CoresMixin):
                 self._em_choose_root()
                 if em.emulators_root(self.em_store) is None:
                     return
-        if inst is not None and inst.linked and QMessageBox.question(
-                self, "Update your own install?",
-                f"{e.name} is your own install in:\n{inst.folder}\n\nThe new files are copied over it. Your saves, settings and anything else "
-                "in that folder are kept.\n\nContinue?") != QMessageBox.StandardButton.Yes:
-            return
+        if inst is not None and inst.linked and not self._p_data.get("skip_own_install_confirm"):
+            box = QMessageBox(QMessageBox.Icon.Question, "Update your own install?",
+                              f"{e.name} is your own install in:\n{inst.folder}\n\nThe new files are copied over it. Your saves, settings and "
+                              "anything else in that folder are kept.\n\nContinue?",
+                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+            again = QCheckBox("Do not show this again")
+            box.setCheckBox(again)
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return  # a No is never remembered: only a Yes with the box ticked skips the question next time
+            if again.isChecked():
+                self._p_data["skip_own_install_confirm"] = True
+                self._settings_save()
         rel, asset = latest
         cancel = threading.Event()
         self._em_busy[e.id] = cancel
@@ -995,9 +1010,18 @@ class EmulatorMixin(CoresMixin):
         todo = self._em_updatable()
         if not todo or self._em_busy:
             return
+        protected = [e for e in todo if em.update_blocked(e, self.em_store.installed(e.id))]
+        todo = [e for e in todo if e not in protected]
+        left_out = ""
+        if protected:
+            left_out = (f"\n\nNot updated, because they are in protected folders: {', '.join(e.name for e in protected)}. Move them to a folder "
+                        "you can write to and link them again to update them.")
+        if not todo:
+            QMessageBox.information(self, "Can't update here", left_out.strip())
+            return
         names = ", ".join(e.name for e in todo)
         if QMessageBox.question(self, "Update all", f"Update {len(todo)} emulator{'s' if len(todo) != 1 else ''}?\n\n{names}\n\n"
-                                "Each is updated where it already is. Saves and settings are kept.") != QMessageBox.StandardButton.Yes:
+                                f"Each is updated where it already is. Saves and settings are kept.{left_out}") != QMessageBox.StandardButton.Yes:
             return
         cancel = threading.Event()
         jobs = [(e, *self._em_latest[e.id]) for e in todo]
@@ -1225,3 +1249,5 @@ class EmulatorMixin(CoresMixin):
             self.em_status.setText(ev[1])
         elif name.startswith("emu_cores_"):
             self._cores_event(ev)
+        elif name == "emu_ldn":
+            self._ldn_event(ev)

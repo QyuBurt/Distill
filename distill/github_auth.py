@@ -1,14 +1,17 @@
 """The GitHub token, if there is one. Without it GitHub allows 60 requests an hour per IP, which a few launches can use up
 (each tool is checked for updates at start-up); with a read-only token it is 5,000.
 
-Looked for in this order: $GITHUB_TOKEN / $GH_TOKEN, then `GITHUB_TOKEN` in distill/local_keys.py (an optional, git-ignored file that
-updates never overwrite; see local_keys.example.py). The PC Recomps store may also hold one saved by hand.
+Looked for in this order: the key saved in Settings > General > API keys (apikeys.py), $GITHUB_TOKEN / $GH_TOKEN, then
+`GITHUB_TOKEN` in distill/local_keys.py (an optional, git-ignored file that updates never overwrite; see
+local_keys.example.py).
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import os
+
+from . import apikeys
 
 try:
     from .local_keys import GITHUB_TOKEN as _LOCAL_TOKEN
@@ -46,7 +49,7 @@ def reveal(value: str) -> str:
 
 
 def github_token() -> str:
-    return (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or reveal(_LOCAL_TOKEN)).strip()
+    return (apikeys.get("github") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or reveal(_LOCAL_TOKEN)).strip()
 
 
 def github_headers(headers: dict) -> dict:

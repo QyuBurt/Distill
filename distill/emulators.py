@@ -597,6 +597,14 @@ def can_update(inst: rc.Installed | None) -> bool:
     return inst is not None and inst.linked != "file"
 
 
+def update_blocked(em: Emulator, inst: rc.Installed | None) -> str:
+    """Why this install can't be updated where it is ('' when it can): its folder is one the system keeps closed to normal
+    programs, such as Program Files. Distill doesn't update those; the person moves the program somewhere writable and links it."""
+    if inst is not None and Path(inst.folder).is_dir() and not rc.writable(Path(inst.folder)):
+        return rc.not_writable_message(em.name, inst.folder)
+    return ""
+
+
 # ---- settings kept in the Store ---------------------------------------------------------------------------------
 def store_path() -> Path:
     return rc.root() / "emulators_state.json"
@@ -969,9 +977,8 @@ class EmulatorInstaller(rc.Installer):
 
     def check_asset(self, em, asset: dict) -> None:
         self._guard(em)  # before anything is downloaded
-        cur = self.store.installed(em.id)
-        if cur and Path(cur.folder).is_dir() and not rc.writable(Path(cur.folder)):
-            raise rc.RecompError(rc.not_writable_message(em.name, cur.folder))  # e.g. ScummVM in Program Files: say so before a download
+        if why := update_blocked(em, self.store.installed(em.id)):
+            raise rc.RecompError(why)  # e.g. ScummVM in Program Files: say so before a download (the page checks first, this is the backstop)
         if em.parent and not (em.author_known or em.risk_accepted):
             raise rc.RecompError(f"{em.name} is by an author Distill doesn't know and you haven't confirmed. Nothing was downloaded.")
         u = urllib.parse.urlparse(asset.get("url", ""))
@@ -1211,7 +1218,7 @@ def inspect_fork(parent: Emulator, repo: str, store: rc.Store, catalog: Iterable
         facts = json.loads(rc._get(f"https://api.github.com/repos/{repo}", store.token(), "application/vnd.github+json"))
     except urllib.error.HTTPError as exc:
         rep.error = ("That repository doesn't exist, or it is private." if exc.code == 404 else
-                     "GitHub is rate-limiting this PC. Try again later, or set a GITHUB_TOKEN." if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
+                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys." if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
         return rep
     except (urllib.error.URLError, OSError, ValueError):
         rep.error = "Couldn't reach GitHub."

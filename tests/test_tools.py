@@ -206,3 +206,41 @@ class DownloadToolTests(TempDirTest):
 
     def test_both_share_one_folder(self):
         self.assertEqual(tools.YtdlpManager.SUBDIR, tools.FfmpegManager.SUBDIR)
+
+
+class HactoolnetTests(TempDirTest):
+    """LibHac's v0.19.0 release holds hactoolnet-0.19.0-linux.zip, -netcore.zip and -win.zip (nothing for macOS)."""
+    NAMES = ("hactoolnet-0.19.0-linux.zip", "hactoolnet-0.19.0-netcore.zip", "hactoolnet-0.19.0-win.zip", "LibHac.0.19.0.nupkg")
+
+    def manager(self):
+        with mock.patch.object(tools.ToolManager, "_pick_root", classmethod(lambda cls: self.tmp / "hac")):
+            (self.tmp / "hac").mkdir()
+            events: list[tuple] = []
+            return tools.HactoolnetManager(events.append), events
+
+    def latest(self, mgr, platform_name):
+        listing = release("v0.19.0", *self.NAMES)
+        with mock.patch.object(tools.urllib.request, "urlopen", return_value=FakeResponse(json.dumps(listing).encode())), \
+                mock.patch.object(tools.sys, "platform", platform_name), mock.patch.object(tools.platform, "machine", return_value="AMD64"):
+            return mgr._latest_release()
+
+    def test_each_system_gets_its_own_build_and_macos_the_portable_one(self):
+        mgr, _ = self.manager()
+        self.assertEqual(self.latest(mgr, "win32").name, "hactoolnet-0.19.0-win.zip")
+        self.assertEqual(self.latest(mgr, "linux").name, "hactoolnet-0.19.0-linux.zip")
+        self.assertEqual(self.latest(mgr, "darwin").name, "hactoolnet-0.19.0-netcore.zip")  # no macOS build: runs with dotnet
+
+    def test_a_missing_dotnet_runtime_is_named_not_reported_as_a_broken_download(self):
+        out = mock.Mock(stdout=b"", stderr=b"You must install .NET to run this application.\nApp: C:\\x\\hactoolnet.exe")
+        with mock.patch.object(tools.subprocess, "run", return_value=out):
+            with self.assertRaisesRegex(RuntimeError, r"needs the \.NET runtime"):
+                tools.HactoolnetManager._probe(self.tmp / "hactoolnet.exe")
+
+    def test_a_rate_limited_check_says_so_and_names_where_the_key_goes(self):
+        mgr, events = self.manager()
+        err = tools.urllib.error.HTTPError("u", 403, "rate limit", {}, None)
+        with mock.patch.object(mgr, "_latest_release", side_effect=err), mock.patch.object(mgr, "_local_copy", return_value=None):
+            mgr._run()
+        text = [e[1] for e in events if e[0] == "hactoolnet_status"][-1]
+        self.assertIn("rate-limiting", text)
+        self.assertIn("API keys", text)

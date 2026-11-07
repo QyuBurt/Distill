@@ -137,9 +137,11 @@ class ToolManager:
         except ReleaseUnavailable as exc:
             self._status(str(exc))
             return
-        except Exception:
-            self._status(f"Offline - using the downloaded {self.NAME}." if cached
-                         else f"Couldn't reach the download server - select {self.NAME} manually.")
+        except Exception as exc:
+            limited = isinstance(exc, urllib.error.HTTPError) and exc.code in (403, 429)
+            why = ("GitHub is rate-limiting this PC (60 checks an hour without a key): add a GitHub token under "
+                   "Settings > General > API keys, or try again later") if limited else "Couldn't reach the download server"
+            self._status(f"{why} - using the downloaded {self.NAME}." if cached else f"{why} - select {self.NAME} manually.")
             return
         if cached and cached[0] == release.tag:
             self._status(f"{self.NAME} from {self.SOURCE} {self._label(release.tag)} (up to date)")
@@ -1190,6 +1192,12 @@ class HactoolnetManager(_OwnCopyMixin, ToolManager):
         token = {"win32": "win", "darwin": "osx"}.get(sys.platform, "linux")
         return token in name or (sys.platform == "darwin" and "mac" in name)
 
+    @staticmethod
+    def _portable(asset: dict) -> bool:
+        """The -netcore package: no native launcher, runs with `dotnet` anywhere (LibHac has no macOS or ARM build of its own)."""
+        name = asset["name"].lower()
+        return name.startswith("hactoolnet") and name.endswith(".zip") and "netcore" in name
+
     def _latest_release(self) -> Release:
         headers = github_headers({"User-Agent": self.USER_AGENT, "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(urllib.request.Request(self.API_URL, headers=headers), timeout=10) as resp:
@@ -1198,8 +1206,11 @@ class HactoolnetManager(_OwnCopyMixin, ToolManager):
         if not re.fullmatch(self.TAG_RE, tag):
             raise RuntimeError(f"unexpected release tag {tag!r}")
         arm = platform.machine().lower() in ("arm64", "aarch64")
-        found = [a for a in data.get("assets", []) if self._wanted(a)]
+        assets = data.get("assets", [])
+        found = [a for a in assets if self._wanted(a)]
         found.sort(key=lambda a: (("arm" in a["name"].lower()) != arm, a["name"]))  # this machine's architecture first
+        if not found:
+            found = [a for a in assets if self._portable(a)]  # needs the .NET runtime, which _probe says when it is missing
         if not found:
             raise ReleaseUnavailable("No hactoolnet download for this system. Get it from "
                                      "github.com/Thealexbarney/LibHac/releases, or select hactoolnet yourself.")
@@ -1230,7 +1241,10 @@ class HactoolnetManager(_OwnCopyMixin, ToolManager):
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError(f"the program didn't start: {exc}") from exc
         text = (res.stdout + res.stderr).decode(errors="replace")
-        if "hactoolnet" not in text.lower() and "libhac" not in text.lower():
+        low = text.lower()
+        if "you must install" in low or "framework" in low and "not found" in low or "dotnet: not found" in low or "dotnet: command not found" in low:
+            raise RuntimeError("hactoolnet needs the .NET runtime (dotnet.microsoft.com/download), which this PC doesn't have")
+        if "hactoolnet" not in low and "libhac" not in low:
             raise RuntimeError("hactoolnet did not run (it needs the .NET runtime from dotnet.microsoft.com/download)")
         return text
 

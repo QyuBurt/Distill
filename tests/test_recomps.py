@@ -35,6 +35,11 @@ class Isolated(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         (self.tmp / "recomps").mkdir()
+        from distill import apikeys  # saved API keys stay out of the real app folder
+        p = mock.patch.object(apikeys, "FILE", self.tmp / "apikeys.json")
+        p.start()
+        self.addCleanup(p.stop)
+        apikeys._cache = None
 
 
 class CatalogTests(Isolated):
@@ -823,6 +828,20 @@ class BuiltinKeyTests(Isolated):
                 self.assertEqual(store.sgdb_key(), "saved")
                 store.set_sgdb_key("")
                 self.assertEqual(store.sgdb_key(), "built-in")
+
+
+class OlderSavedKeyTests(Isolated):
+    def test_a_key_an_older_version_saved_in_the_store_moves_to_the_api_keys_file(self):
+        from distill import apikeys
+        path = self.tmp / "old.json"
+        path.write_text(json.dumps({"sgdb_key": " old "}))
+        with mock.patch.object(rc, "BUILTIN_SGDB_KEY", ""), mock.patch.dict("os.environ", {}, clear=True):
+            store = rc.Store(path)
+            self.assertEqual(store.sgdb_key(), "old")
+            self.assertEqual(apikeys.get("sgdb"), "old")
+            self.assertNotIn("sgdb_key", json.loads(path.read_text()))
+            store.set_sgdb_key("")  # clearing it really clears it: the old copy must not come back
+            self.assertEqual(rc.Store(path).sgdb_key(), "")
 
 
 class SgdbRateLimitTests(Isolated):

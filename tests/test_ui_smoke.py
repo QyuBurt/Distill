@@ -333,6 +333,50 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
             self.assertEqual(len(win.pages[key].findChildren(TwoColumn)), 1, key)  # setup in two columns, the list under them
         self.assertEqual((win.dl_table.placeholder_icon, win.st_tree.placeholder_icon), ("download", "music"))  # empty lists say what to do
 
+    def test_a_tool_path_the_person_chose_is_remembered_but_one_the_app_found_is_not(self):
+        import tempfile
+        from pathlib import Path
+
+        td = tempfile.TemporaryDirectory(prefix="distill_toolpath_")
+        self.addCleanup(td.cleanup)
+        exe = Path(td.name) / "hactoolnet.exe"
+        exe.write_bytes(b"MZ")
+        first = self.make_window()
+        self.addCleanup(first.close)
+        first._tool_path_found("nup", "./tools/nup/abc1234/nup.py")  # found by the app: never saved
+        first._set_tool_text("hactoolnet", str(exe), user=True)  # picked by the person
+        first._settings_save()
+        second = self.make_window()
+        self.addCleanup(second.close)
+        self.assertEqual(second._tool_text("hactoolnet"), str(exe))
+        self.assertNotIn("abc1234", second._tool_text("nup"))
+        second._tool_path_found("hactoolnet", "./tools/hactoolnet/v0.19.0/hactoolnet.exe")  # a later auto-find leaves the choice alone
+        self.assertEqual(second._tool_text("hactoolnet"), str(exe))
+
+    def test_api_keys_live_in_general_settings_and_are_hidden_while_typed(self):
+        import tempfile
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QLineEdit
+
+        from distill import apikeys
+
+        td = tempfile.TemporaryDirectory(prefix="distill_apikeys_ui_")
+        self.addCleanup(td.cleanup)
+        with mock.patch.object(apikeys, "FILE", Path(td.name) / "keys.json"):
+            apikeys._cache = None
+            win = self.make_window()
+            self.addCleanup(win.close)
+            self.assertEqual(set(win.api_keys.edits), {"sgdb", "github"})
+            for edit in win.api_keys.edits.values():
+                self.assertEqual(edit.echoMode(), QLineEdit.EchoMode.Password)
+            seen = []
+            win.api_keys.changed.connect(seen.append)
+            win.api_keys.edits["github"].setText(" ghp_x ")
+            win.api_keys._save()
+            self.assertEqual((apikeys.get("github"), seen), ("ghp_x", ["github"]))
+            apikeys._cache = None
+
     def test_options_and_layout_are_remembered_between_runs(self):
         first = self.make_window()
         first.tabs["chd"].source.setText("D:/roms")

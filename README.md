@@ -97,7 +97,7 @@ Distill works without any keys. These only raise rate limits or add artwork:
 | `GITHUB_TOKEN` | Read-only token. Raises GitHub's limit from 60 to 5,000 requests an hour (PC Recomps, tool updates) |
 | `SGDB_API_KEY` | steamgriddb.com key for portrait posters in PC Recomps |
 
-Set them as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
+The easiest way is **Settings > General > API keys**: paste a key there and it is saved (encrypted for your Windows account) and used straight away, in a downloaded build too. Otherwise set them as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
 
 ## Development
 

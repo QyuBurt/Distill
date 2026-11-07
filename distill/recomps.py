@@ -38,8 +38,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .github_auth import github_token, reveal
+from . import apikeys
 from .constants import APP_DIR, APP_NAME, ASSETS_DIR
+from .github_auth import github_token, reveal
 from .models import fmt_size
 from .systems import system_of_name
 
@@ -458,7 +459,7 @@ def discover(force: bool = False, min_stars: int = 15) -> list[Recomp]:
         try:
             for topic in DISCOVER_TOPICS:
                 url = f"https://api.github.com/search/repositories?q=topic:{topic}+stars:>={min_stars}&sort=stars&per_page=60"
-                items += json.loads(_get(url, os.environ.get("GITHUB_TOKEN", ""), "application/vnd.github+json")).get("items", [])
+                items += json.loads(_get(url, github_token(), "application/vnd.github+json")).get("items", [])
             cache.write_text(json.dumps(items), encoding="utf-8")
         except (urllib.error.URLError, OSError, ValueError):
             try:
@@ -697,13 +698,17 @@ class Store:
             return bool(self.data.get("find_new"))
 
     def sgdb_key(self) -> str:
+        """The key saved in Settings > General > API keys; then one saved by an older version here (moved over on first
+        use); then the built-in one; then $SGDB_API_KEY."""
         with self._lock:
-            return str(self.data.get("sgdb_key") or "").strip() or BUILTIN_SGDB_KEY or os.environ.get("SGDB_API_KEY", "")
+            if old := str(self.data.pop("sgdb_key", "") or "").strip():
+                if not apikeys.get("sgdb"):
+                    apikeys.set("sgdb", old)
+                self.save()
+        return apikeys.get("sgdb") or BUILTIN_SGDB_KEY or os.environ.get("SGDB_API_KEY", "")
 
     def set_sgdb_key(self, key: str) -> None:
-        with self._lock:
-            self.data["sgdb_key"] = key.strip()
-            self.save()
+        apikeys.set("sgdb", key)
 
     def get(self, key: str, default: object = None) -> object:
         with self._lock:
@@ -715,7 +720,7 @@ class Store:
             self.save()
 
     def token(self) -> str:
-        return github_token() or str(self.data.get("github_token") or "")
+        return github_token() or str(self.data.get("github_token") or "")  # (the field is an older hand-edit; Settings > General holds the key now)
 
     def cache_get(self, key: str, ttl: float = RELEASE_TTL) -> object | None:
         with self._lock:
@@ -779,7 +784,7 @@ def releases(repo: str, store: Store | None = None, force: bool = False) -> list
         if store and (stale := store.cache_stale(key)) is not None:
             return [_release_of(d) for d in stale]
         if exc.code in (403, 429):
-            raise RecompError("GitHub is rate-limiting this PC. Try again later, or set a GITHUB_TOKEN.") from exc
+            raise RecompError("GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys.") from exc
         if exc.code == 404:
             raise RecompError(f"{repo} has no public releases.") from exc
         raise RecompError(f"GitHub answered {exc.code}.") from exc
@@ -1044,9 +1049,9 @@ def writable(folder: Path) -> bool:
 
 
 def not_writable_message(name: str, folder: Path | str) -> str:
-    return (f"Distill isn't allowed to change files in {folder}, so it can't update {name} there. Windows protects folders such as "
-            f"Program Files. Either close Distill, start it again with right-click > Run as administrator and update again, or "
-            f"reinstall {name} into a folder of your own and link it again.")
+    return (f"{name} is in {folder}, a protected folder that Distill isn't allowed to change (Windows keeps folders such as "
+            f"Program Files closed to normal programs), so it can't be updated there.\n\nMove {name} to a folder you can write to "
+            f"(for example inside your Emulators folder), link it again with \"I already have it...\", then update it.")
 
 
 def _replace_file(item: Path, target: Path) -> None:
@@ -1063,7 +1068,7 @@ def _replace_file(item: Path, target: Path) -> None:
         except OSError:
             pass
         if isinstance(exc, PermissionError):
-            hint = " It may be in use (close it and try again), or in a protected folder such as Program Files (run Distill as administrator)."
+            hint = " It may be in use (close it and try again), or in a protected folder such as Program Files (move the program to a folder you can write to)."
         else:
             hint = ""
         raise RecompError(f"Couldn't replace {target}: {exc.strerror or exc}.{hint}") from exc
