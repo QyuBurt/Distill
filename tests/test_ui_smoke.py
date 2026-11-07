@@ -1638,6 +1638,53 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertNotEqual((below.red(), below.green()), (below.green(), below.blue()))  # colour
 
 
+    def test_softened_picture_is_grey_and_a_little_blurred(self):
+        from PySide6.QtGui import QColor, QPainter, QPixmap
+
+        from distill.ui.veil import softened
+
+        pix = QPixmap(60, 40)
+        pix.fill(QColor(220, 20, 20))
+        p = QPainter(pix)
+        p.fillRect(30, 0, 30, 40, QColor(20, 20, 220))  # red left, blue right
+        p.end()
+        out = softened(pix, 3.0).toImage()
+        self.assertEqual((out.width(), out.height()), (60, 40))
+        for x in (2, 29, 31, 58):
+            c = out.pixelColor(x, 20)
+            self.assertTrue(c.red() == c.green() == c.blue(), (x, c.getRgb()))  # no colour left
+        left, edge, right = out.pixelColor(2, 20).red(), out.pixelColor(29, 20).red(), out.pixelColor(58, 20).red()
+        self.assertNotEqual(left, right)  # the two halves still differ
+        self.assertTrue(min(left, right) < edge < max(left, right), (left, edge, right))  # but the seam is soft, not a hard step
+
+    def test_update_screen_greys_the_app_behind_it_and_lets_go_when_it_closes(self):
+        from PySide6.QtWidgets import QWidget
+
+        from distill.ui import veil as veil_mod
+        from distill.ui.update_screen import UpdateScreen
+
+        host = QWidget()
+        host.resize(300, 200)
+        self.addCleanup(host.close)
+        self.addCleanup(setattr, veil_mod.motion.Motion, "reduce", veil_mod.motion.Motion.reduce)
+        veil_mod.motion.Motion.reduce = True  # no fades: the veil is there and gone at once
+        screen = UpdateScreen(host, "Distill v9.9")
+        screen.show()
+        veil = screen._veil
+        self.assertIsNotNone(veil)
+        self.assertEqual((veil.width(), veil.height()), (300, 200))
+        self.assertEqual(veil.opacity(), 1.0)
+        screen.dismiss()
+        self.assertIsNone(screen._veil)
+
+    def test_an_update_screen_with_no_window_behind_it_needs_no_veil(self):
+        from distill.ui.update_screen import UpdateScreen
+
+        screen = UpdateScreen(None, "Distill v9.9")
+        screen.show()
+        self.assertIsNone(screen._veil)
+        screen.dismiss()
+
     def test_update_screen_is_only_the_logo(self):
         from PySide6.QtCore import Qt
 

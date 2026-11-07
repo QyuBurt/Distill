@@ -12,6 +12,7 @@ from . import fillmath, motion
 from .assets import asset
 from .icon import app_icon_pixmap
 from .theme import T
+from .veil import Veil
 
 LOGO = 240  # the picture's side, in logical pixels
 SCALE = 2.0  # it is kept at twice that and drawn down, so it stays sharp on a high-DPI screen
@@ -163,7 +164,20 @@ class UpdateScreen(QDialog):
         self.setFixedSize(LOGO, LOGO)  # the window is the logo and nothing else
         self.logo = FillLogo(LOGO, self)
         self.logo.move(0, 0)
+        self._veil: Veil | None = None  # the app behind, in grey and a little out of focus, while this is up
         self._refresh_tip()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        parent = self.parentWidget()
+        if self._veil is None and parent is not None:
+            self._veil = Veil.over(parent.window())
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if self._veil is not None and not event.spontaneous():  # a real close, not the window system hiding it for a moment
+            self._veil.release()
+            self._veil = None
 
     def _refresh_tip(self) -> None:
         tip = f"{self.percent}  \u00b7  {self.status}"
