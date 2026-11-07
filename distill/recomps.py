@@ -4,7 +4,7 @@ own GitHub releases, update checks, "do I own the game?" matching against the li
 Nothing here imports Qt. Nothing here ships, fetches or copies a game, ROM or asset: a project's own release is
 downloaded, and the player's own dump is only ever read (hashed) to see whether it is the right one.
 
-    catalog (assets/recomps.json, plus an optional distill_recomps_catalog.json beside the app)
+    catalog (assets/recomps.json, plus an optional distill_recomps_catalog.json in the runtime config directory)
       -> Recomp                      one project: game, console, repo, which dump it needs
     GitHub releases API              latest_release() / pick_asset() choose the download for this OS
     Installer                        download, verify, unpack, find the executable; records it in the Store
@@ -40,6 +40,7 @@ from typing import Callable, Iterable
 
 from . import apikeys
 from .constants import APP_DIR, APP_NAME, ASSETS_DIR
+from . import paths
 from .github_auth import github_token, reveal
 from .models import fmt_size
 from .systems import system_of_name
@@ -64,10 +65,12 @@ ROOT: Path | None = None  # tests point this at a temp folder
 
 
 def root() -> Path:
-    """./recomps beside the app, or under %LOCALAPPDATA% / ~/.local/share when the app folder isn't writable."""
+    """Linux runtime data, or the existing app-first fallback layout on other platforms."""
     global ROOT
     if ROOT is not None:
         return ROOT
+    if sys.platform.startswith("linux"):
+        return paths.data_dir() / "recomps"
     bases = [APP_DIR]
     if local := os.environ.get("LOCALAPPDATA"):
         bases.append(Path(local) / APP_NAME)
@@ -88,12 +91,16 @@ def root() -> Path:
     return ROOT
 
 
+def cache_root() -> Path:
+    return paths.cache_dir() / "recomps" if paths.layout() == "xdg" else root()
+
+
 def bundled_catalog() -> Path:
     return ASSETS_DIR / "recomps.json"
 
 
 def user_catalog() -> Path:
-    return APP_DIR / "distill_recomps_catalog.json"  # the player's own additions and overrides, same format
+    return paths.config_dir() / "distill_recomps_catalog.json"  # the player's own additions and overrides, same format
 
 
 def platform_key() -> str:
@@ -393,8 +400,9 @@ def _replace_source(r: Recomp, source: str) -> Recomp:
 
 
 def _source_cache(spec: str) -> Path:
-    d = root() / "sources"
-    d.mkdir(parents=True, exist_ok=True)
+    d = cache_root() / "sources"
+    if not sys.platform.startswith("linux"):
+        d.mkdir(parents=True, exist_ok=True)
     return d / (hashlib.sha1(spec.encode()).hexdigest()[:16] + ".json")
 
 
@@ -415,6 +423,7 @@ def _read_source(spec: str, force: bool) -> object | None:
     try:
         raw = _get(spec, timeout=20)
         data = json.loads(raw)
+        paths.ensure_parent(cache)
         cache.write_bytes(raw)
         return data
     except (urllib.error.URLError, OSError, ValueError):
@@ -447,7 +456,7 @@ DISCOVER_TOPICS = ("recomp", "static-recompilation", "recompilation")
 def discover(force: bool = False, min_stars: int = 15) -> list[Recomp]:
     """Projects found by searching GitHub for the recomp topics. Only repos that are not forks or archived and have a few
     stars; the console is read from the repo's topics. Unverified: some hits are tools, not games."""
-    cache = root() / "discover.json"
+    cache = cache_root() / "discover.json"
     items = None
     if not force and cache.exists() and time.time() - cache.stat().st_mtime < DISCOVER_TTL:
         try:
@@ -460,6 +469,7 @@ def discover(force: bool = False, min_stars: int = 15) -> list[Recomp]:
             for topic in DISCOVER_TOPICS:
                 url = f"https://api.github.com/search/repositories?q=topic:{topic}+stars:>={min_stars}&sort=stars&per_page=60"
                 items += json.loads(_get(url, github_token(), "application/vnd.github+json")).get("items", [])
+            paths.ensure_parent(cache)
             cache.write_text(json.dumps(items), encoding="utf-8")
         except (urllib.error.URLError, OSError, ValueError):
             try:
@@ -632,6 +642,7 @@ class Store:
     def save(self) -> None:
         with self._lock:
             try:
+                paths.ensure_parent(self.path)
                 tmp = self.path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
                 tmp.replace(self.path)
@@ -1139,7 +1150,7 @@ class Installer:
     def install(self, rc: Recomp, rel: Release, asset: dict) -> Installed:
         self.check_asset(rc, asset)
         game_dir = self.folder_for(rc)
-        game_dir.mkdir(parents=True, exist_ok=True)
+        paths.ensure_dir(game_dir)
         tmp = Path(tempfile.mkdtemp(prefix="dl_", dir=game_dir))
         try:
             archive = tmp / asset["name"]
@@ -1318,8 +1329,9 @@ _IMG_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF")  # PNG, JPEG, GIF, 
 
 
 def art_dir() -> Path:
-    d = root() / "posters-v3"
-    d.mkdir(parents=True, exist_ok=True)
+    d = cache_root() / "posters-v3"
+    if not sys.platform.startswith("linux"):
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -1636,6 +1648,7 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
         if chosen:
             break
     if old and not chosen:  # the upgrade found nothing: keep what we have and don't ask SteamGridDB again
+        paths.ensure_parent(_src_file(rc))
         _src_file(rc).write_text("steamgriddb-miss")
         return old
     chosen = chosen or spare
@@ -1643,9 +1656,11 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
         for f in art_dir().glob(f"{rc.id}.*"):
             f.unlink(missing_ok=True)
         dest = art_dir() / f"{rc.id}{_ext_of(chosen[1])}"
+        paths.ensure_parent(dest)
         dest.write_bytes(chosen[1])
         _src_file(rc).write_text(chosen[0])
         return dest
+    paths.ensure_parent(miss)
     miss.write_text(rc.game, encoding="utf-8")
     if sgdb_key:
         _src_file(rc).write_text("steamgriddb-miss")

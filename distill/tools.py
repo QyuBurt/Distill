@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from .constants import APP_DIR, APP_NAME, SUBPROCESS_FLAGS, TOOLS_DIR_NAME
+from . import paths
 from .github_auth import github_headers
 from .system import _py7zr, find_7zip, portable_path, resolve_dolphintool
 
@@ -43,7 +44,7 @@ class ReleaseUnavailable(RuntimeError):
 
 
 class ToolManager:
-    """Keeps a private, auto-updated copy of a command-line tool next to the app (Windows only).
+    """Keeps a private, auto-updated copy of a command-line tool in the runtime data directory.
 
     Subclasses say where the tool comes from (class attributes + _latest_release), how to unpack a
     download (_unpack) and how to tell it works (_probe). Everything else is shared: the tool folder,
@@ -61,7 +62,9 @@ class ToolManager:
 
     @classmethod
     def _pick_root(cls) -> Path:
-        """./tools/<tool> beside the app, or under %LOCALAPPDATA% when the app folder isn't writable."""
+        """Linux runtime data, or the existing app-first fallback layout on other platforms."""
+        if sys.platform.startswith("linux"):
+            return paths.data_dir() / TOOLS_DIR_NAME / cls.SUBDIR
         bases = [APP_DIR]
         if local := os.environ.get("LOCALAPPDATA"):
             bases.append(Path(local) / APP_NAME)
@@ -204,8 +207,10 @@ class ToolManager:
 
     def _install(self, rel: Release) -> None:
         self._emit((f"{self.KEY}_busy", True))  # the window blinks this tool's marker while it downloads
-        tmp = Path(tempfile.mkdtemp(prefix="dl_", dir=self.root))
+        tmp = None
         try:
+            paths.ensure_dir(self.root)
+            tmp = Path(tempfile.mkdtemp(prefix="dl_", dir=self.root))
             archive = tmp / rel.name
             self._download(rel, archive)
             self._status(f"Extracting {self.NAME} from {self.SOURCE} {self._label(rel.tag)}...")
@@ -221,7 +226,8 @@ class ToolManager:
             self._status(f"{self.NAME} from {self.SOURCE} {self._label(rel.tag)} (just updated)")
             self._prune(rel.tag)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
             self._emit((f"{self.KEY}_busy", False))
 
 
@@ -942,8 +948,10 @@ class FlatToolManager(ToolManager):
 
     def _install(self, rel: Release) -> None:
         self._emit((f"{self.KEY}_busy", True))
-        tmp = Path(tempfile.mkdtemp(prefix="dl_", dir=self.root))
+        tmp = None
         try:
+            paths.ensure_dir(self.root)
+            tmp = Path(tempfile.mkdtemp(prefix="dl_", dir=self.root))
             archive = tmp / rel.name
             self._download(rel, archive)
             self._status(f"Extracting {self.NAME} {self._label(rel.tag)}...")
@@ -958,7 +966,8 @@ class FlatToolManager(ToolManager):
             self._emit((f"{self.KEY}_path", self._shown(self.root / self.EXE_NAME)))
             self._status(f"{self.NAME} {self._label(rel.tag)} (just updated)")
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
             self._emit((f"{self.KEY}_busy", False))
 
     def _run(self) -> None:

@@ -36,7 +36,7 @@ class IsolationTests(unittest.TestCase):
     @unittest.skipIf(sys.platform == "win32", "Windows environment is preserved")
     def test_home_and_xdg_paths_are_inside_the_run_sandbox(self):
         self.assertIn(SANDBOX, Path.home().parents)
-        for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
             with self.subTest(name=name):
                 self.assertIn(SANDBOX, Path(os.environ[name]).parents)
 
@@ -62,6 +62,18 @@ class IsolationTests(unittest.TestCase):
         for path in (organize.undo_file("tidy"), organize.run_log_file(), soundtracks.CACHE_FILE, soundtracks.SAVES_FILE):
             with self.subTest(path=path.name):
                 self.assertIn(SANDBOX, path.parents)
+
+    def test_every_moved_constant_is_inside_the_sandbox(self):
+        moved = {"persist": ("SETTINGS_FILE",), "downloads": ("LOGIN_FILE", "SESSION_FILE"),
+                 "apikeys": ("FILE",), "netrules": ("RULES_FILE",), "ytdlp": ("SETTINGS_FILE",),
+                 "torrents": ("TORRENT_FILE", "TORRENT_DIR"), "torrent_runners": ("TORRENT_DIR",),
+                 "soundtracks": ("PREFS_FILE", "SAVES_FILE", "CACHE_FILE"),
+                 "crashlog": ("CRASH_FILE",), "motion": ("MOTION_LOG",), "title_dialog": ("ICON_CACHE",),
+                 "formats": ("PS3_NAME_CACHE",), "torrentsearch": ("TRACKERS_FILE",), "download_page": ("SESSION_FILE",)}
+        for module in app_modules():
+            for name in moved.get(module.__name__.rsplit(".", 1)[-1], ()):
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertIn(SANDBOX, getattr(module, name).parents)
 
     def test_bundled_assets_are_still_read_from_the_package(self):
         from distill import recomps

@@ -12,7 +12,7 @@ from PySide6.QtCore import QEasingCurve, QEvent, QObject, QRect, Qt, QTimer, QVa
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QDialog, QGraphicsOpacityEffect, QHeaderView, QLabel,
                                QPlainTextEdit, QProgressBar, QScrollArea, QWidget)
 
-from ..constants import APP_DIR
+from .. import paths
 
 FULL = 16777215  # QWIDGETSIZE_MAX: "no height limit"
 
@@ -309,7 +309,7 @@ def reveal(widget: QWidget, duration: int = 220) -> None:
         _fade(widget, 0.0, 1.0, duration)
 
 
-MOTION_LOG = APP_DIR / "distill_motion.txt"
+MOTION_LOG = paths.state_dir() / "distill_motion.txt"
 _PROBE = bool(os.environ.get("DISTILL_MOTION_DEBUG"))
 
 
@@ -345,6 +345,7 @@ class _Probe:
                 f"{self.worst_gap * 1000:.0f} ms, layout settle {self.settle_total * 1000:.0f} ms total / "
                 f"{self.worst_settle * 1000:.0f} ms worst{scroll}\n")
         try:
+            paths.ensure_parent(MOTION_LOG)
             with open(MOTION_LOG, "a", encoding="utf-8") as f:
                 f.write(line)
         except OSError:

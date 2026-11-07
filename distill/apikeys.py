@@ -1,7 +1,7 @@
 """The person's own API keys (Settings > General > API keys): SteamGridDB and GitHub. No Qt in here.
 
 Saved the way remembered logins are (see secretstore.py): encrypted for this Windows account, or with a key in the system
-keyring, or plain text next to the app where neither exists. A key saved here is used before one from the environment or
+keyring, or plain text in the runtime config directory where neither exists. A key saved here is used before one from the environment or
 from the optional distill/local_keys.py, so a build someone else made can still be given a key afterwards.
 """
 from __future__ import annotations
@@ -14,9 +14,10 @@ import urllib.error
 import urllib.request
 
 from . import secretstore
-from .constants import APP_DIR, APP_NAME
+from . import paths
+from .constants import APP_NAME
 
-FILE = APP_DIR / "distill_apikeys.json"
+FILE = paths.config_dir() / "distill_apikeys.json"
 NAMES = ("sgdb", "github")  # what can be saved: SteamGridDB (posters, icons), GitHub (rate limit for updates and downloads)
 
 _lock = threading.RLock()
@@ -68,6 +69,7 @@ def set(name: str, value: str) -> None:  # noqa: A001
             keys.pop(name, None)
         try:
             if keys:
+                paths.ensure_parent(FILE)
                 FILE.write_text(json.dumps(secretstore.seal(json.dumps(keys).encode("utf-8"))), encoding="utf-8")
                 with contextlib.suppress(OSError):
                     os.chmod(FILE, 0o600)  # owner-only where the OS supports it

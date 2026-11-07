@@ -14,7 +14,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .constants import APP_NAME, APP_VERSION
-from . import crashlog, magnet, selftest
+from . import crashlog, magnet, paths, selftest
 from .selftest import Report
 from .ui import motion
 from .ui.assets import DISPLAY_FONT, MONO_FONT, TEXT_FONT, load_fonts
@@ -106,6 +106,7 @@ def main() -> int:
         if getattr(sys, "frozen", False):
             _hard_exit(code)  # no event loop to unwind; skip every DLL's shutdown code, which is what crashes
         return code
+    paths.migrate_legacy()
     crashlog.install(_tell_about_crash)
     if sys.platform == "win32":
         with contextlib.suppress(Exception):  # a taskbar identity of its own, not "python"

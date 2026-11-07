@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import paths
 from .constants import (
-    APP_DIR, CUE_FILE_RE, DOLPHIN_ONLY_EXTENSIONS, DVD_ISO_MIN_BYTES,
+    CUE_FILE_RE, DOLPHIN_ONLY_EXTENSIONS, DVD_ISO_MIN_BYTES,
     GDI_FILE_RE, ILLEGAL_NAME_CHARS,
 )
 from .system import file_size, iter_files, read_head
@@ -475,7 +476,7 @@ def is_xbox_image(path: Path) -> bool:
 PS3_SECTOR = 2048
 
 
-PS3_NAME_CACHE = APP_DIR / "ps3_names.json"  # source ISO name + size -> "Game Name - Title ID" (lets a re-run skip finished titles)
+PS3_NAME_CACHE = paths.cache_dir() / "ps3_names.json"  # source ISO name + size -> "Game Name - Title ID" (lets a re-run skip finished titles)
 
 
 _PS3_CACHE_LOCK = threading.Lock()
@@ -505,6 +506,7 @@ def ps3_remember_name(path: Path, name: str) -> None:
             data = {}
         data[_ps3_cache_key(path)] = name
         try:
+            paths.ensure_parent(PS3_NAME_CACHE)
             tmp = PS3_NAME_CACHE.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=0), "utf-8")
             os.replace(tmp, PS3_NAME_CACHE)

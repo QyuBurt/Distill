@@ -39,6 +39,9 @@ class Isolated(unittest.TestCase):
         p = mock.patch.object(rc, "ROOT", self.tmp / "state")
         p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.object(rc, "cache_root", return_value=self.tmp / "state")
+        p.start()
+        self.addCleanup(p.stop)
         self.store = rc.Store(self.tmp / "emulators_state.json")
 
     def touch(self, rel_path: str, data: bytes = b"MZ") -> Path:

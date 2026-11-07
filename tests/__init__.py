@@ -29,10 +29,12 @@ SANDBOX = Path(tempfile.mkdtemp(prefix="distill_tests_app_"))
 atexit.register(shutil.rmtree, SANDBOX, True)
 if sys.platform != "win32":
     for name, relative in (("HOME", "home"), ("XDG_CONFIG_HOME", "home/.config"),
-                           ("XDG_DATA_HOME", "home/.local/share"), ("XDG_CACHE_HOME", "home/.cache")):
+                           ("XDG_DATA_HOME", "home/.local/share"), ("XDG_STATE_HOME", "home/.local/state"),
+                           ("XDG_CACHE_HOME", "home/.cache")):
         folder = SANDBOX / relative
         folder.mkdir(parents=True, exist_ok=True)
         os.environ[name] = str(folder)
+os.environ.pop("DISTILL_PORTABLE", None)
 
 try:
     import keyring

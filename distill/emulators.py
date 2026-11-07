@@ -3,7 +3,7 @@
 Nothing here imports Qt. It sits on the PC Recomps engine (`distill.recomps`): the same Store, release picking, download +
 checksum, unpack and launch code, with four differences.
 
-    catalog (assets/emulators.json, plus an optional distill_emulators_catalog.json beside the app)
+    catalog (assets/emulators.json, plus an optional distill_emulators_catalog.json in the runtime config directory)
       -> Emulator                     one emulator: systems it plays, where its builds come from, how to find its exe
     fetch_releases()                  GitHub, GitLab, Forgejo, or a small adapter for sites that publish no release feed
     scan_folder() / link()            find installs the person already has (their Emulators folder, the usual places) and
@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import recomps as rc
-from .constants import APP_DIR, ASSETS_DIR, ILLEGAL_NAME_CHARS
+from . import paths
+from .constants import ASSETS_DIR, ILLEGAL_NAME_CHARS
 from .systems import system_of_name
 
 SIDECAR = ".distill.json"  # written beside an install so its version survives a lost state file
@@ -129,7 +130,7 @@ def bundled_image(em: Emulator) -> Path | None:
 
 
 def user_manifest() -> Path:
-    return APP_DIR / "distill_emulators_catalog.json"  # the person's own additions and overrides, same format
+    return paths.config_dir() / "distill_emulators_catalog.json"  # the person's own additions and overrides, same format
 
 
 def load_catalog(paths: Iterable[Path] | None = None, plat: str = "") -> list[Emulator]:
@@ -256,8 +257,9 @@ def parse_relation(emulators_data, platforms_data) -> Relation:
 
 
 def _relation_dir() -> Path:
-    d = rc.root() / "emurelation"
-    d.mkdir(parents=True, exist_ok=True)
+    d = rc.cache_root() / "emurelation"
+    if not sys.platform.startswith("linux"):
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -273,6 +275,7 @@ def load_relation(force: bool = False, fetch: Callable[[str], bytes] | None = No
             try:
                 data = fetch(RELATION_BASE + name)
                 json.loads(data)  # only a file that parses replaces the cached one
+                paths.ensure_parent(path)
                 path.write_bytes(data)
             except (urllib.error.URLError, OSError, ValueError):
                 pass
@@ -1092,7 +1095,7 @@ def status_text(em: Emulator, inst: rc.Installed | None, latest) -> tuple[str, s
 
 # ---- forks: community builds the person adds under an emulator ---------------------------------------------------
 def forks_manifest() -> Path:
-    return APP_DIR / "distill_forks.json"  # written by the app (Add fork / Remove fork); kept apart from the hand-edited catalog
+    return paths.config_dir() / "distill_forks.json"  # written by the app (Add fork / Remove fork); kept apart from the hand-edited catalog
 
 
 def parse_repo(text: str) -> str:
@@ -1186,7 +1189,7 @@ def _read_fork_entries(path: Path) -> list[dict]:
 
 
 def _write_fork_entries(path: Path, entries: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    paths.ensure_parent(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps({"forks": entries}, indent=2), encoding="utf-8")
     os.replace(tmp, path)
@@ -1295,7 +1298,7 @@ def logo_url(em: Emulator) -> str:
 
 
 def logo_file(em: Emulator) -> Path:
-    return rc.root() / "logos" / (re.sub(r"[^a-z0-9._-]+", "-", em.id.lower()) + ".img")
+    return rc.cache_root() / "logos" / (re.sub(r"[^a-z0-9._-]+", "-", em.id.lower()) + ".img")
 
 
 def logo_source_file(em: Emulator) -> Path:
@@ -1313,7 +1316,7 @@ def logo_source(em: Emulator) -> str:
 
 def _set_logo_source(em: Emulator, source: str) -> None:
     try:
-        logo_source_file(em).parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(logo_source_file(em))
         logo_source_file(em).write_text(source)
     except OSError:
         pass
@@ -1378,7 +1381,7 @@ def fetch_logo_best(em: Emulator, sgdb_key: str = "", fetch: Callable[[str], byt
     if not data or len(data) > LOGO_MAX:
         return None
     try:
-        logo_file(em).parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(logo_file(em))
         logo_file(em).write_bytes(data)
     except OSError:
         return None
@@ -1403,7 +1406,7 @@ def fetch_logo(em: Emulator, fetch: Callable[[str], bytes] | None = None) -> Pat
     if not data or len(data) > LOGO_MAX or not (magic.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8")) or (magic[:4] == b"RIFF" and magic[8:12] == b"WEBP")):
         return None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(path)
         path.write_bytes(data)
     except OSError:
         return None

@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Callable
 
 from . import debrid, secretstore, ytdlp
-from .constants import APP_DIR, APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
+from . import paths
+from .constants import APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
 from .models import fmt_size
 from .netrules import GATE, PAUSED, RULES, THROTTLE, host_of
 from .system import _Aborted
@@ -85,10 +86,10 @@ class RemoteFile:
     fmt: str = ""  # a video / audio site row's own choice from the picker ('mp4:1080', 'mp3:320'); blank = Settings
 
 
-SESSION_FILE = APP_DIR / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
+SESSION_FILE = paths.state_dir() / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
 
 
-LOGIN_FILE = APP_DIR / "distill_logins.json"  # only written when "Remember" is ticked in the Logins window
+LOGIN_FILE = paths.config_dir() / "distill_logins.json"  # only written when "Remember" is ticked in the Logins window
 
 
 # Sites with their own sign-in: key -> (name, hostnames, ((field, label, hidden), ...), where to find the key, required)
@@ -196,10 +197,11 @@ def load_logins() -> bool:
 
 
 def save_logins(remember: bool) -> None:
-    """Keep the logins on disk (plain text, next to the app) only while 'Remember' is ticked."""
+    """Keep the logins in the runtime config directory only while 'Remember' is ticked."""
     try:
         if remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom")):
             sealed = secretstore.seal(json.dumps(LOGINS).encode("utf-8"))  # plain text only where nothing better exists
+            paths.ensure_parent(LOGIN_FILE)
             LOGIN_FILE.write_text(json.dumps(sealed), encoding="utf-8")
             with contextlib.suppress(OSError):
                 os.chmod(LOGIN_FILE, 0o600)  # owner-only where the OS supports it

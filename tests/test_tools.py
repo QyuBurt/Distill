@@ -51,6 +51,10 @@ class AssetChoiceTests(unittest.TestCase):
 class PkgExtractorManagerTests(TempDirTest):
     def setUp(self):
         super().setUp()
+        # These fixtures exercise the preserved Windows app-relative layout.
+        patcher = mock.patch.object(tools.sys, "platform", "win32")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(tools, "APP_DIR", self.tmp)
         patcher.start()
         self.addCleanup(patcher.stop)

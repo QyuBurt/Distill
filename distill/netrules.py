@@ -12,9 +12,9 @@ from datetime import datetime
 from typing import Callable
 from urllib.parse import urlsplit
 
-from .constants import APP_DIR
+from . import paths
 
-RULES_FILE = APP_DIR / "distill_rules.json"
+RULES_FILE = paths.config_dir() / "distill_rules.json"
 MAX_SEGMENTS = 16
 UNLIMITED, PAUSED = 0, -1  # values of a speed limit in KB/s; anything above is a real limit
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -133,6 +133,7 @@ def set_rules(new: Rules) -> None:
 def save_rules() -> None:
     try:
         if RULES.global_kbps or RULES.segments > 1 or RULES.proxy or RULES.schedule or RULES.hosts:
+            paths.ensure_parent(RULES_FILE)
             RULES_FILE.write_text(json.dumps(RULES.to_json(), indent=1), encoding="utf-8")
         else:
             RULES_FILE.unlink(missing_ok=True)

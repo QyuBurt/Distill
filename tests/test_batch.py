@@ -14,11 +14,14 @@ from tests.helpers import (FAKE_CHDMAN, FAKE_PKG_EXTRACTOR, POSIX_ONLY, TempDirT
 
 
 class IsolatedAppDir(TempDirTest):
-    """Engine runs write logs under APP_DIR; keep that out of the source tree."""
+    """Keep engine logs in the per-test directory in both XDG and legacy layouts."""
 
     def setUp(self):
         super().setUp()
         patcher = mock.patch("distill.batch.APP_DIR", self.tmp / "app")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch("distill.batch.paths.state_dir", return_value=self.tmp / "app")
         patcher.start()
         self.addCleanup(patcher.stop)
 

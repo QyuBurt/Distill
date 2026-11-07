@@ -26,7 +26,23 @@ Grab a build from the [Releases](../../releases/latest) page:
 | `Distill-portable.zip` | Folder build. Starts fastest and trips antivirus the least. Unzip anywhere and run `Distill.exe`. |
 | `Distill.exe` | Single file. Slower to start, since it unpacks itself to a temp folder each time. |
 
-Settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+On Windows, settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+
+### Linux runtime files
+
+Linux uses per-user XDG locations: config in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`),
+installed tools and recomps in `$XDG_DATA_HOME/distill` (default `~/.local/share/distill`),
+state in `$XDG_STATE_HOME/distill` (default `~/.local/state/distill`), and caches in
+`$XDG_CACHE_HOME/distill` (default `~/.cache/distill`). Empty or non-absolute overrides use the defaults.
+Bundled assets stay with the application. This path layout does not imply complete Linux support.
+
+Set `DISTILL_PORTABLE=1` to keep runtime files beside the source launcher or frozen executable instead.
+An unwritable portable directory reports the existing write error; it never selects another location.
+At normal startup, missing XDG files are copied from legacy settings, emulator/recomp catalogs, forks,
+yt-dlp/torrent/soundtrack preferences, soundtrack saves, and known Organize undo histories. Existing XDG
+content wins and originals are preserved. Login-data files (API keys and logins), rules (which may contain
+passwords), queue sessions and torrent directories, logs, caches, tools/recomps trees and user libraries
+are **not automatically migrated**; deferred files stay beside the app and remain usable in portable mode.
 
 **Updates:** Distill checks GitHub for a newer release when it starts and asks whether to install it. You can update in one click, skip a version, or ignore it. Your settings and tools are kept.
 

@@ -135,7 +135,8 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_rc_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             self.assertIn("recomps", win.pages)
@@ -170,7 +171,8 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_em_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             self.assertIn("emus", win.pages)
@@ -213,7 +215,8 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_em_view_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             with mock.patch("threading.Thread.start", lambda self: None):
@@ -279,7 +282,9 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_fork_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)), mock.patch.object(em, "forks_manifest", lambda: Path(td.name) / "forks.json"):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)), \
+                mock.patch.object(em, "forks_manifest", lambda: Path(td.name) / "forks.json"):
             win = self.make_window()
             self.addCleanup(win.close)
             with mock.patch("threading.Thread.start", lambda self: None):

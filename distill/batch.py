@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
+from . import paths
 from .constants import (
     APP_DIR, APP_NAME, APP_VERSION, ARCHIVE_EXTENSIONS,
     CHD_CODECS, CHD_DONE_RE, DVD_HUNK_SIZE, ILLEGAL_NAME_CHARS, LINE_SPLIT_RE,
@@ -780,10 +781,13 @@ class BatchRunner:
         if info:
             label = f"{label} ({info.kind}{f' v{info.version}' if info.version else ''})"
         self._set(tid, "[ EXTRACTING ]", f"(00.0%) {label}")
-        logs: Path | None = APP_DIR / "pkg_logs"  # an extractor may write debug_log.txt into its working folder
+        logs: Path | None = paths.state_dir() / "pkg_logs" if paths.layout() == "xdg" else APP_DIR / "pkg_logs"
         try:
-            logs.mkdir(parents=True, exist_ok=True)
-        except OSError:
+            paths.ensure_dir(logs)
+        except OSError as exc:
+            if sys.platform.startswith("linux") and not self.cfg.is_ps5_pkg:
+                return _ToolRun(1, f"Couldn't create package log directory {logs}: {exc}", label,
+                                lambda: False, needs_source=False)
             logs = None
         if self.cfg.is_ps5_pkg:  # pkg-to-anyps5 writes no log file into its working folder
             logs = None
