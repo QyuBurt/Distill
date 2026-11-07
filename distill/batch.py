@@ -311,20 +311,17 @@ class BatchRunner:
         last_pct = -1.0
         src = getattr(self._ctx, "src", None)  # captured here: the reader thread below has no context of its own
         output: deque[str] = deque(maxlen=40)
-        row, latest = label, ""  # the task row's first line, and the newest line the tool itself printed
+        row = label  # the task's single line: its state, then (when the tool reports one) the percentage, then the title
 
         def show() -> None:
-            """The row is its status line plus, under it, the tool's newest output line: always replaced, never
-            appended, so a glance at the log shows the tool is alive without scrolling past a wall of text."""
-            tail = f"\n      > {latest}" if latest and self.cfg.tool_output else ""
-            self._set(tid, state, row + tail)
+            self._set(tid, state, row)
 
         failure: list[BaseException] = []
         finished = threading.Event()
         dog = _Watchdog(proc, self.cfg.stall_minutes, watch)
 
         def handle(raw: bytes) -> None:
-            nonlocal last_pct, row, latest
+            nonlocal last_pct, row
             if m := progress_re.search(raw):
                 pct = float(m.group(1))
                 if pct - last_pct >= 1.0 or (pct >= 99.9 and last_pct < 99.9):
@@ -334,10 +331,7 @@ class BatchRunner:
                     if stage == "convert":
                         self._part_pct(src, tid, pct)
             elif text := raw.decode(errors="replace").strip():
-                output.append(text)
-                if self.cfg.tool_output:
-                    latest = text[:160]
-                    show()
+                output.append(text)  # kept for an error report, never shown as a second line under the title
 
         def pump() -> None:
             tail = b""
@@ -369,6 +363,11 @@ class BatchRunner:
                 rc = proc.wait()
             if failure:
                 raise failure[0]
+            if rc == 0 and 0 <= last_pct < 100.0:  # the tool's last printed percentage is rarely 100: it finished, so say so
+                row = f"(100.0%) {label}"
+                show()
+                if stage == "convert":
+                    self._part_pct(src, tid, 100.0)
             return rc, "\n".join(output)
         finally:
             if not abandoned:  # an abandoned tool stays registered so Stop can still try to kill it
@@ -1386,10 +1385,7 @@ class BatchRunner:
             wait = lambda: self._set(tid, "[  QUEUED    ]", f"{name} (waiting for disk)")
             with self._gate.hold((src.path, temp), self._stop, wait):
                 self._set(tid, "[ EXTRACTING ]", name)
-                started = time.monotonic()
-                self._log(f"  [extract] {name}: unpacking ({fmt_size(src.size)}) ...")
                 self._extract(src.path, temp)
-                self._log(f"  [extract] {name}: unpacked in {time.monotonic() - started:.0f} s")
 
             targets = sorted(p for p in temp.rglob("*") if p.is_file() and self.cfg.wants(p))
             if not targets:
@@ -1399,6 +1395,8 @@ class BatchRunner:
             multi = len(targets) > 1
             if multi:
                 self._set(tid, "[  UNZIPPED  ]", f"{name} ({len(targets)} games)")
+            else:  # unpacked: the row must stop saying EXTRACTING while it waits for a free converter
+                self._set(tid, "[  WAITING   ]", targets[0].stem)
             ws = Workspace(temp, len(targets), self._release_workspace)
             with self._lock:
                 src.remaining += len(targets)

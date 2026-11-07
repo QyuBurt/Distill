@@ -52,8 +52,7 @@ class Config:
     io_mode: str = "auto"  # "auto" | "hdd" | "ssd" (see DiskGate)
     temp_dir: str = ""  # extraction workspace root; blank = system temp. Point at a RAM disk / SSD.
     platform_folders: bool = True  # blank Destination: file results under '<source>/<Platform>/' (False: next to each source)
-    stall_minutes: float = 10  # a tool with no progress this long is killed and restarted once (0 = off)
-    tool_output: bool = True  # show each tool's newest output line under its task in the process log
+    stall_minutes: float = 3  # a tool showing no sign of life (no output, no CPU, no file growth) this long is killed and restarted once (0 = off)
 
     @property
     def is_rvz(self) -> bool:

@@ -60,6 +60,28 @@ class ChdRunTests(IsolatedAppDir):
         self.assertTrue(all(not p.exists() for p in good))
         self.assertTrue(keep.exists())
 
+    def test_each_title_is_one_line_that_only_changes_state_and_ends_at_100_percent(self):
+        import zipfile
+
+        chatty = FAKE_CHDMAN.replace('print("Compression complete ... final ratio = 40.0%")',
+                                     'print("Compressing, 97.9% complete... (ratio=57.1%)"); print("Compression complete ... final ratio = 57.1%")')
+        self.chdman = str(make_tool(self.tmp / "chatty_chdman", chatty))
+        self.make_game("Plain Game")
+        with zipfile.ZipFile(self.tmp / "in" / "Zipped Game.zip", "w") as z:
+            z.writestr("Zipped Game.cue", 'FILE "Zipped Game.bin" BINARY\n  TRACK 01 MODE2/2352\n')
+            z.writestr("Zipped Game.bin", b"b" * 5000)
+        events, summary = run_batch(self.cfg(extract=True))
+        self.assertEqual(summary.failures, (), logs(events))
+        rows = [e for e in events if e[0] == "update"]
+        self.assertTrue(rows)
+        self.assertFalse([e for e in rows if "\n" in e[3] or "      >" in e[3]], "a title's row is one line, never a tool-output second line")
+        self.assertNotIn("[extract]", logs(events), "no separate extraction messages under a title still being worked on")
+        zipped = [e[2].strip() for e in rows if "Zipped Game" in e[3] and e[2].strip() in ("[ EXTRACTING ]", "[  WAITING   ]", "[ CONVERTING ]")]
+        self.assertLess(zipped.index("[ EXTRACTING ]"), zipped.index("[  WAITING   ]"), zipped)  # unpacked = no longer EXTRACTING
+        converting = [e for e in rows if e[2] == "[ CONVERTING ]"]
+        self.assertTrue(any(e[3].startswith("(97.9%)") for e in converting))
+        self.assertTrue(any(e[3].startswith("(100.0%)") for e in converting), "the row reaches 100% when the tool finishes")
+
     def test_a_failing_tool_is_reported_and_the_source_survives(self):
         broken = self.make_game("BROKEN")
         good = self.make_game("Fine")

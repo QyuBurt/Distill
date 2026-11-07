@@ -612,7 +612,7 @@ class SwitchRunner:
 
     def _exec(self, cmd: list[str], tid: int, label: str, state: str = "[ CONVERTING ]", env: dict | None = None,
               cwd: Path | None = None, watch: Path | None = None) -> tuple[int, str]:
-        """Run a command, showing its percentage and its newest line under the task; returns (exit code, output tail)."""
+        """Run a command, showing its percentage on the task's one line; returns (exit code, output tail)."""
         try:
             proc = self._popen(cmd, env, cwd)
         except OSError as exc:
@@ -629,7 +629,7 @@ class SwitchRunner:
                     except OSError:
                         continue
                     if written and not latest:
-                        self._set(tid, state, f"{row}\n      > {fmt_size(written)} written")
+                        self._set(tid, state, f"({fmt_size(written)} written) {row}")
             beat = threading.Thread(target=pulse, daemon=True, name="pulse")
             beat.start()
         try:
@@ -649,7 +649,7 @@ class SwitchRunner:
                         tail.append(text)
                         del tail[:-40]
                     latest = text[:160]
-                    self._set(tid, state, row + (f"\n      > {latest}" if latest else ""))
+                    self._set(tid, state, row)
             if buf.strip():
                 tail.append(buf.decode(errors="replace").strip())
             return proc.wait(), "\n".join(tail)
