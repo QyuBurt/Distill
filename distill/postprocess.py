@@ -193,14 +193,20 @@ def _extract(archive: Path, target: Path, password: str = "") -> None:
     name = archive.name.lower()
     seven = find_7zip()
     if name.endswith(".zip") and not is_multipart(archive):
+        if seven:  # 7-Zip first: faster, and it copes with names Python's zipfile mangles on Windows; Python is the fallback
+            try:
+                _seven_extract(seven, archive, target, password)
+                return
+            except NeedPassword:
+                raise
+            except (RuntimeError, OSError):
+                shutil.rmtree(target, ignore_errors=True)
+                target.mkdir()
         try:
             _safe_zip_extract(archive, target, password)
             return
         except NotImplementedError:  # AES-encrypted or an unusual method: only 7-Zip can open it
-            if not seven:
-                raise RuntimeError("this zip needs 7-Zip installed to open it") from None
-            shutil.rmtree(target, ignore_errors=True)
-            target.mkdir()
+            raise RuntimeError("this zip needs 7-Zip installed to open it") from None
     if seven:
         _seven_extract(seven, archive, target, password)
         return

@@ -92,9 +92,10 @@ def repair_sheet_references(root: Path) -> list[str]:
             if not (m := CUE_FILE_RE.match(line)):
                 continue
             ref = m[1] or m[2]
-            if (sheet.parent / ref.replace("\\", "/")).is_file():
-                continue  # as written
             leaf = ref.replace("\\", "/").rsplit("/", 1)[-1]
+            # compare against the real names, not is_file(): Windows ignores case there, so "GAME.BIN" would count as present for "Game.bin"
+            if (leaf == ref and ref in on_disk.values()) or (leaf != ref and (sheet.parent / ref.replace("\\", "/")).is_file()):
+                continue  # as written
             actual = on_disk.get(leaf.lower()) or next((on_disk[v.lower()] for v in _name_variants(leaf) if v.lower() in on_disk), None)
             if actual is None:  # one track file left over, of the same kind as the one missing: it can only be that one
                 spare = [n for n in on_disk.values() if n.lower().endswith(Path(leaf).suffix.lower()) and n not in

@@ -461,42 +461,55 @@ class BatchRunner:
         return list(stems), size
 
     def _extract(self, archive: Path, dest: Path) -> None:
+        sevenzip = find_7zip()
         if archive.suffix.lower() == ".zip":
+            if sevenzip:  # 7-Zip first: it copes with names Python's zipfile mangles on Windows; Python is the fallback
+                try:
+                    self._seven_unpack(sevenzip, archive, dest)
+                    return
+                except RuntimeError as exc:
+                    self._log(f"{archive.name}: 7-Zip could not open it ({exc}); trying Python's zip reader\n")
+                    shutil.rmtree(dest, ignore_errors=True)
+                    dest.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(archive) as z:
                 z.extractall(dest)
             return
-        if sevenzip := find_7zip():
-            for attempt in range(1 + STALL_RETRIES):
-                proc = self._popen(
-                    [sevenzip, "x", "-y", "-bso0", "-bsp0", f"-o{dest}", str(archive)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                with _Watchdog(proc, self.cfg.stall_minutes, watch=dest) as dog:
-                    rc, give_up = None, None
-                    while rc is None:
-                        try:
-                            rc = proc.wait(timeout=0.5)
-                        except subprocess.TimeoutExpired:
-                            if dog.stalled.is_set():
-                                give_up = give_up or time.monotonic() + KILL_GRACE
-                                if time.monotonic() > give_up:
-                                    break
-                if rc is not None:
-                    self._forget(proc)  # (an unkillable tool stays registered so Stop can retry the kill)
-                if dog.stalled.is_set() and rc != 0:
-                    abandoned = rc is None
-                    self._log(f"\n--- STALLED: extracting {archive.name} made no progress for "
-                              f"{self.cfg.stall_minutes:g} min and was killed ---\n")
-                    if abandoned or attempt == STALL_RETRIES or self._stop.is_set():
-                        raise _Stalled(self.cfg.stall_minutes, "extract", abandoned)
-                    shutil.rmtree(dest, ignore_errors=True)  # restart from a clean workspace
-                    dest.mkdir(parents=True, exist_ok=True)
-                    continue
-                if rc not in (0, 1):  # 1 = non-fatal warning
-                    raise RuntimeError(f"7-Zip exited with code {rc}")
-                return
+        if sevenzip:
+            self._seven_unpack(sevenzip, archive, dest)
+            return
         with _py7zr().SevenZipFile(archive) as z:
             z.extractall(path=dest)
+
+    def _seven_unpack(self, sevenzip: str, archive: Path, dest: Path) -> None:
+        for attempt in range(1 + STALL_RETRIES):
+            proc = self._popen(
+                [sevenzip, "x", "-y", "-bso0", "-bsp0", f"-o{dest}", str(archive)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            with _Watchdog(proc, self.cfg.stall_minutes, watch=dest) as dog:
+                rc, give_up = None, None
+                while rc is None:
+                    try:
+                        rc = proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        if dog.stalled.is_set():
+                            give_up = give_up or time.monotonic() + KILL_GRACE
+                            if time.monotonic() > give_up:
+                                break
+            if rc is not None:
+                self._forget(proc)  # (an unkillable tool stays registered so Stop can retry the kill)
+            if dog.stalled.is_set() and rc != 0:
+                abandoned = rc is None
+                self._log(f"\n--- STALLED: extracting {archive.name} made no progress for "
+                          f"{self.cfg.stall_minutes:g} min and was killed ---\n")
+                if abandoned or attempt == STALL_RETRIES or self._stop.is_set():
+                    raise _Stalled(self.cfg.stall_minutes, "extract", abandoned)
+                shutil.rmtree(dest, ignore_errors=True)  # restart from a clean workspace
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            if rc not in (0, 1):  # 1 = non-fatal warning
+                raise RuntimeError(f"7-Zip exited with code {rc}")
+            return
 
     def _make_workspace(self, needed: int | None, tid: int, name: str) -> Path:
         """Create the extraction folder. With a user-chosen temp folder (RAM disk / SSD) wait for earlier
@@ -1265,6 +1278,8 @@ class BatchRunner:
                 if not self._stop.is_set():
                     self._set(tid, "[   ERROR    ]", f"{run.label} (Conversion failed - exit code {run.rc})")
                     self._log(f"\n--- ERROR FOR {run.label} ---\n{run.output}\n")
+                    if "find bin file" in run.output.lower() or "no such file" in run.output.lower():
+                        self._log(self._sheet_diagnostics(src_file))
                     self._fail("convert", run.label, exit_reason(self.cfg.tool_name, run.rc, run.output))
                 return None
             final = run.out or out
@@ -1340,6 +1355,18 @@ class BatchRunner:
         self._release_part(src)
         if ws:
             ws.release()
+
+    @staticmethod
+    def _sheet_diagnostics(sheet: Path) -> str:
+        """What chdman could not find, laid out: the cue's own FILE lines next to what is really in the folder."""
+        try:
+            text = sheet.read_text(encoding="utf-8", errors="replace") if sheet.suffix.lower() == ".cue" else ""
+            files = sorted(p.name for p in sheet.parent.iterdir())
+        except OSError as exc:
+            return f"(could not inspect {sheet.parent}: {exc})\n"
+        refs = [ln.strip() for ln in text.splitlines() if ln.strip().upper().startswith("FILE")]
+        return ("--- DIAGNOSTICS ---\n" + "cue says:\n" + "".join(f"  {r!r}\n" for r in refs)
+                + "folder holds:\n" + "".join(f"  {n!r}\n" for n in files) + "\n")
 
     def _convert_job(self, src: Source, target: Path, out_dir: Path, tid: int, label: str,
                      cores: int, ws: Workspace | None = None) -> None:
