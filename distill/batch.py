@@ -20,7 +20,7 @@ from typing import Callable
 
 from .constants import (
     APP_DIR, APP_NAME, APP_VERSION, ARCHIVE_EXTENSIONS,
-    CHD_CODECS, DVD_HUNK_SIZE, ILLEGAL_NAME_CHARS, LINE_SPLIT_RE,
+    CHD_CODECS, CHD_DONE_RE, DVD_HUNK_SIZE, ILLEGAL_NAME_CHARS, LINE_SPLIT_RE,
     MAXCSO_FORMAT, NO_PROGRESS_RE, PERCENT_RE, PHASE_WORK,
     PROGRESS_RE, RVZ_BLOCK_SIZE, SUBPROCESS_FLAGS,
 )
@@ -43,7 +43,7 @@ from .models import (
 from .system import (
     _Aborted, _py7zr, _Stalled, _Watchdog,
     bind_to_app_lifetime, DiskGate, file_size, find_7zip, free_bytes,
-    IO_RETRY_ATTEMPTS, IO_RETRY_DELAY, KILL_GRACE, STALL_RETRIES,
+    FINISH_GRACE, IO_RETRY_ATTEMPTS, IO_RETRY_DELAY, KILL_GRACE, STALL_RETRIES, UNCONFIRMED_GRACE,
 )
 
 
@@ -279,7 +279,7 @@ class BatchRunner:
     def _run_gated(self, args: list[str], tid: int, state: str, label: str, exe: str | None = None,
                    disk: tuple[Path, ...] = (), watch: Path | None = None, stage: str = "convert",
                    clean: Path | None = None, progress_re: re.Pattern = PROGRESS_RE,
-                   cwd: Path | None = None) -> tuple[int, str]:
+                   cwd: Path | None = None, done_re: re.Pattern | None = None) -> tuple[int, str]:
         """Run a tool once the disks it touches (`disk`) are free; see DiskGate.
 
         A tool that stalls is killed and restarted (`clean`: a half-written output to delete first). If it
@@ -289,7 +289,7 @@ class BatchRunner:
         for attempt in range(1 + STALL_RETRIES):
             try:
                 with self._gate.hold(disk, self._stop, wait):
-                    return self._spawn(args, tid, state, label, exe, watch, stage, progress_re, cwd)
+                    return self._spawn(args, tid, state, label, exe, watch, stage, progress_re, cwd, done_re)
             except _Stalled as stall:
                 self._log(f"\n--- STALLED: {label} made no progress for {stall.minutes:g} min and was killed ---\n")
                 if clean:
@@ -301,10 +301,14 @@ class BatchRunner:
 
     def _spawn(self, args: list[str], tid: int, state: str, label: str, exe: str | None = None,
                watch: Path | None = None, stage: str = "convert",
-               progress_re: re.Pattern = PROGRESS_RE, cwd: Path | None = None) -> tuple[int, str]:
+               progress_re: re.Pattern = PROGRESS_RE, cwd: Path | None = None,
+               done_re: re.Pattern | None = None) -> tuple[int, str]:
         """Run chdman (or DolphinTool / maxcso / a PKG extractor via exe=), streaming its output, under a watchdog.
 
         Output is read on a helper thread so a tool stuck in the kernel can never block this one forever.
+        `done_re` matches the line a tool prints when its work is finished: one that then fails to exit within FINISH_GRACE
+        seconds (silent, or spinning the CPU, which the watchdog counts as progress) is closed and counted as having succeeded,
+        and the check that follows the conversion is the proof that its output is whole.
         """
         proc = self._popen([exe or self.cfg.chdman, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            bufsize=0, cwd=cwd)
@@ -319,11 +323,16 @@ class BatchRunner:
         failure: list[BaseException] = []
         finished = threading.Event()
         dog = _Watchdog(proc, self.cfg.stall_minutes, watch)
+        done_at = full_at = 0.0  # when the tool said it had finished, and when its progress first reached 100% (0: not yet)
 
         def handle(raw: bytes) -> None:
-            nonlocal last_pct, row
+            nonlocal last_pct, row, done_at, full_at
+            if done_re is not None and not done_at and done_re.search(raw):
+                done_at = time.monotonic()
             if m := progress_re.search(raw):
                 pct = float(m.group(1))
+                if done_re is not None and pct >= 99.9 and not full_at:
+                    full_at = time.monotonic()
                 if pct - last_pct >= 1.0 or (pct >= 99.9 and last_pct < 99.9):
                     last_pct = pct
                     row = f"({pct:04.1f}%) {label}"
@@ -353,14 +362,32 @@ class BatchRunner:
         try:
             with dog:
                 threading.Thread(target=pump, daemon=True, name="pump").start()
+                lingering = False  # said it had finished, then didn't exit
                 while not finished.wait(0.5):
                     if dog.stalled.is_set():
                         break
-                if dog.stalled.is_set():
+                    now = time.monotonic()
+                    if (done_at and now - done_at > FINISH_GRACE) or (full_at and now - full_at > UNCONFIRMED_GRACE):
+                        lingering = True
+                        break
+                if lingering:
+                    said = (f"reported that it had finished but did not exit within {FINISH_GRACE:g} s" if done_at else
+                            f"reached 100% but neither said it had finished nor exited within {UNCONFIRMED_GRACE:g} s")
+                    self._log(f"\n{label}: the tool {said}, so it was closed. The result goes on to be checked.\n")
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
                     abandoned = not self._reap(proc)
-                    if abandoned or proc.returncode != 0:  # (rc 0 = it finished just before the kill)
+                    if abandoned:
                         raise _Stalled(self.cfg.stall_minutes, stage, abandoned)
-                rc = proc.wait()
+                    rc = 0
+                else:
+                    if dog.stalled.is_set():
+                        abandoned = not self._reap(proc)
+                        if abandoned or proc.returncode != 0:  # (rc 0 = it finished just before the kill)
+                            raise _Stalled(self.cfg.stall_minutes, stage, abandoned)
+                    rc = proc.wait()
             if failure:
                 raise failure[0]
             if rc == 0 and 0 <= last_pct < 100.0:  # the tool's last printed percentage is rarely 100: it finished, so say so
@@ -666,7 +693,7 @@ class BatchRunner:
         def run(codec: str | None) -> tuple[int, str]:
             args = [*mode, "-i", str(src_file), "-o", str(part), "-np", str(cores)]
             return self._run_gated([*args, *(["-c", codec] if codec else [])], tid, "[ CONVERTING ]", label,
-                                   disk=(src_file, part), watch=part, clean=part)
+                                   disk=(src_file, part), watch=part, clean=part, done_re=CHD_DONE_RE)
 
         rc, output = run(codec)
         if rc != 0 and codec and not self._stop.is_set() and "compressor" in output.lower():

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .constants import CHD_EXTENSIONS, DOLPHIN_ONLY_EXTENSIONS
 from .formats import (
-    is_gamecube_wii_image, is_ps3_image, is_ps4_game_folder, is_ps4_pkg, is_ps5_pkg, is_psp_image, is_xbox_image, PKG_MAGIC,
+    is_gamecube_wii_image, is_ps3_game_folder, is_ps3_image, is_ps4_game_folder, is_ps4_pkg, is_ps5_pkg, is_psp_image, is_xbox_image, PKG_MAGIC,
     PS5_PKG_MAGIC,
 )
 from .patcher import PATCH_EXTENSIONS
@@ -178,6 +178,8 @@ def _names_hit(names: list[str], zf: zipfile.ZipFile | None) -> _Hit | None:
 def _folder_target(folder: Path) -> DropTarget | None:
     if is_nx_dump(folder):
         return _switch_target([folder])
+    if is_ps3_game_folder(folder):  # an unpacked PS3 game belongs on the PS3 page (RPCS3 can't read a .zar)
+        return DropTarget("ps3", folder, (), folder.name, "Unpacked PS3 game folder; this page reads PS3 ISOs")
     if is_ps4_game_folder(folder):  # one game folder: pack it alone, from its parent
         return DropTarget("zar", folder.parent, (folder,), folder.name, "PlayStation game folder")
     tally: Counter[str] = Counter()
@@ -186,6 +188,10 @@ def _folder_target(folder: Path) -> DropTarget | None:
     for root, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith((".", ".distill_nx_"))]
         here = Path(root)
+        if here != folder and is_ps3_game_folder(here):
+            tally["ps3"] += 1  # taken whole, so the EBOOT.BIN in its USRDIR isn't mistaken for a PS4 game
+            dirs[:] = []
+            continue
         if here != folder and is_ps4_game_folder(here):
             tally["zar"] += 1
             dirs[:] = []

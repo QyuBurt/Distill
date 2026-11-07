@@ -118,6 +118,21 @@ class RouteDropTests(unittest.TestCase):
         self.assertEqual(route_drop([self.tmp / "ps4"]).page, "zar")
         one = route_drop([self.tmp / "ps4" / "Game"])
         self.assertEqual((one.page, one.source, one.only), ("zar", self.tmp / "ps4", (self.tmp / "ps4" / "Game",)))
+
+    def test_an_unpacked_ps3_game_goes_to_the_ps3_page_not_zar(self):
+        for name in ("PS3_GAME/PARAM.SFO", "PS3_GAME/USRDIR/EBOOT.BIN", "PS3_DISC.SFB"):
+            self.make(f"ps3/Game/{name}")
+        self.assertEqual(self.page(self.tmp / "ps3" / "Game"), "ps3")  # the game's own folder
+        self.assertEqual(self.page(self.tmp / "ps3"), "ps3")  # a library folder of them
+        self.assertEqual(self.page(self.tmp / "ps3" / "Game" / "PS3_GAME"), "ps3")  # its PS3_GAME folder on its own
+        self.assertEqual(route_drop([self.tmp / "ps3" / "Game"]).source, self.tmp / "ps3" / "Game")
+
+    def test_a_ps3_folder_beside_ps4_ones_does_not_turn_them_into_ps3(self):
+        self.make("mix/PS3Game/PS3_GAME/PARAM.SFO")
+        self.make("mix/PS3Game/PS3_GAME/USRDIR/EBOOT.BIN")
+        for n in ("A", "B", "C"):
+            self.make(f"mix/{n}/sce_sys/param.sfo")
+        self.assertEqual(self.page(self.tmp / "mix"), "zar")  # three PS4 folders outnumber the one PS3 game
         (self.tmp / "dump" / "exefs").mkdir(parents=True)
         t = route_drop([self.tmp / "dump"])
         self.assertEqual((t.page, t.switch.action), ("switch", "pack"))

@@ -297,6 +297,8 @@ STALL_RETRIES = 1  # a stalled tool is restarted this many times before the titl
 
 
 KILL_GRACE = 20.0  # seconds a killed tool gets to really exit before it is abandoned
+FINISH_GRACE = 30.0  # seconds a tool gets to exit after printing that it has finished; past that it is closed, whatever it is doing
+UNCONFIRMED_GRACE = 180.0  # ... and to say so, or exit, once its progress has reached 100% (some hang there without ever printing it)
 
 
 IO_RETRY_ATTEMPTS = 40  # a file another program holds open (antivirus, indexer) is retried ...

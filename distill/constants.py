@@ -116,6 +116,9 @@ ARCHIVE_EXTENSIONS = frozenset({".zip", ".7z", ".7zip"})
 PROGRESS_RE = re.compile(rb"(\d+(?:\.\d+)?)%\s*complete")
 
 
+CHD_DONE_RE = re.compile(rb"compression complete", re.I)  # chdman's last line once the whole CHD is written; it should exit within moments
+
+
 PERCENT_RE = re.compile(rb"(\d+(?:\.\d+)?)\s*%")
 
 

@@ -313,9 +313,21 @@ def find_anyps5_libs(relinker: Path) -> Path | None:
     return None
 
 
-def is_ps4_game_folder(d: Path) -> bool:
-    """A loose, already-extracted PS4 game / update / DLC folder: it has its sce_sys/param.sfo or its eboot.bin."""
+def is_ps3_game_folder(d: Path) -> bool:
+    """A loose, already-unpacked PS3 game: the disc's root (PS3_GAME next to PS3_DISC.SFB), or the PS3_GAME folder itself (PARAM.SFO and USRDIR)."""
     try:
+        return ((d / "PS3_GAME" / "PARAM.SFO").is_file() or (d / "PS3_DISC.SFB").is_file()
+                or ((d / "PARAM.SFO").is_file() and (d / "USRDIR").is_dir()))
+    except OSError:
+        return False
+
+
+def is_ps4_game_folder(d: Path) -> bool:
+    """A loose, already-extracted PS4 game / update / DLC folder: it has its sce_sys/param.sfo or its eboot.bin. A PS3 game keeps an
+    EBOOT.BIN in its USRDIR too, so a folder inside a PS3 game is never taken for a PS4 one."""
+    try:
+        if (d / "PARAM.SFO").is_file() or (d.name.upper() == "USRDIR" and (d.parent / "PARAM.SFO").is_file()):
+            return False  # PS3 layout (PS4 keeps its param.sfo under sce_sys)
         return (d / "sce_sys" / "param.sfo").is_file() or (d / "eboot.bin").is_file()
     except OSError:
         return False

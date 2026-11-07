@@ -82,6 +82,49 @@ class ChdRunTests(IsolatedAppDir):
         self.assertTrue(any(e[3].startswith("(97.9%)") for e in converting))
         self.assertTrue(any(e[3].startswith("(100.0%)") for e in converting), "the row reaches 100% when the tool finishes")
 
+    # ---- a chdman that does not exit --------------------------------------------------------------------------------
+    DONE = 'print("Compression complete ... final ratio = 40.0%"); sys.exit(0)'
+
+    def hanging(self, after: str) -> None:
+        """A chdman that writes its CHD, then runs `after` instead of exiting."""
+        body = FAKE_CHDMAN.replace(self.DONE, after)
+        self.assertNotEqual(body, FAKE_CHDMAN)
+        self.chdman = str(make_tool(self.tmp / "hanging_chdman", body))
+
+    def run_hanging(self):
+        self.make_game("Cdi Game")
+        with mock.patch("distill.batch.FINISH_GRACE", 1.0), mock.patch("distill.batch.UNCONFIRMED_GRACE", 1.5):
+            return run_batch(self.cfg())
+
+    def test_a_chdman_that_says_it_finished_and_then_spins_is_closed_and_its_file_checked(self):
+        self.hanging('print("Compression complete ... final ratio = 40.0%", flush=True)\n    while True: pass')
+        events, summary = self.run_hanging()  # the watchdog is off here: CPU use would have counted as progress anyway
+        self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
+        self.assertIn("did not exit", logs(events))
+        self.assertEqual([p.name for p in (self.tmp / "out").rglob("*.chd")], ["Cdi Game.chd"])
+        self.assertFalse(list((self.tmp / "out").rglob("*.part")))
+
+    def test_a_chdman_that_says_it_finished_and_then_goes_silent_is_closed_not_restarted(self):
+        self.hanging('print("Compression complete ... final ratio = 40.0%", flush=True)\n    import time; time.sleep(600)')
+        events, summary = self.run_hanging()
+        self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
+        self.assertNotIn("STALLED", logs(events))  # the finished file is kept, not thrown away and converted again
+
+    def test_a_chdman_stuck_at_100_percent_without_its_final_line_is_closed_and_its_file_checked(self):
+        self.hanging('print("Compressing, 100.0% complete... (ratio=40.0%)", flush=True)\n    while True: pass')
+        events, summary = self.run_hanging()
+        self.assertEqual((summary.converted, summary.failures), (1, ()), logs(events))
+        self.assertIn("reached 100%", logs(events))
+
+    def test_a_hang_that_leaves_no_usable_file_is_a_failure_not_a_success(self):
+        body = FAKE_CHDMAN.replace('out.write_bytes(b"MComprHD" + b"\\0" * 4096)', "pass").replace(
+            self.DONE, 'print("Compressing, 100.0% complete... (ratio=40.0%)", flush=True)\n    while True: pass')
+        self.chdman = str(make_tool(self.tmp / "hanging_chdman", body))
+        events, summary = self.run_hanging()
+        self.assertEqual(summary.converted, 0)
+        self.assertEqual(len(summary.failures), 1, logs(events))
+        self.assertFalse(list((self.tmp / "out").rglob("*.chd")))
+
     def test_a_failing_tool_is_reported_and_the_source_survives(self):
         broken = self.make_game("BROKEN")
         good = self.make_game("Fine")
