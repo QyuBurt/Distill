@@ -121,27 +121,6 @@ class ReleaseChoiceTests(Isolated):
         self.assertFalse(rc.is_newer("1.3.197", "Canary-1.3.197"))
         self.assertTrue(rc.is_newer("1.3.196", "Canary-1.3.197"))
 
-    def test_eden_picks_the_recommended_build_for_each_os_and_cpu(self):
-        eden = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}["eden"]
-        names = ["Eden-Windows-v0.2.1-" + x for x in ("amd64-clang-pgo.zip", "amd64-gcc-standard.zip", "amd64-msvc-standard.zip", "arm64-clang-pgo.zip",
-                                                      "arm64-clang-standard.zip", "rog-ally-clang-pgo.zip", "rog-ally-gcc-standard.zip")]
-        names += ["Eden-Linux-v0.2.1-" + x for x in ("steamdeck-clang-pgo.AppImage", "rog-ally-clang-pgo.AppImage", "legacy-clang-pgo.AppImage",
-                                                     "amd64-gcc-standard.AppImage", "amd64-clang-pgo.AppImage", "aarch64-clang-pgo.AppImage",
-                                                     "aarch64-gcc-standard.AppImage")]
-        names += ["Eden-macOS-v0.2.1.dmg", "Eden-Linux-amd64-clang-pgo.AppImage.zsync", "Eden-v0.2.1.torrent", "Eden-Android-v0.2.1-standard.apk"]
-        assets = [asset(n) for n in names]
-        pick = lambda plat, mach: rc.pick_asset(assets, eden, plat, mach)["name"]
-        self.assertEqual(pick("windows", "x64"), "Eden-Windows-v0.2.1-amd64-clang-pgo.zip")
-        self.assertEqual(pick("windows", "arm64"), "Eden-Windows-v0.2.1-arm64-clang-pgo.zip")
-        self.assertEqual(pick("linux", "x64"), "Eden-Linux-v0.2.1-amd64-clang-pgo.AppImage")  # not the zsync, steamdeck or rog-ally file
-        self.assertEqual(pick("linux", "arm64"), "Eden-Linux-v0.2.1-aarch64-clang-pgo.AppImage")
-        self.assertEqual(pick("macos", "arm64"), "Eden-macOS-v0.2.1.dmg")
-
-    def test_eden_falls_back_to_the_msvc_zip_when_a_release_has_no_pgo_build(self):
-        eden = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}["eden"]
-        got = rc.pick_asset([asset("Eden-Windows-abc-amd64-gcc-standard.zip"), asset("Eden-Windows-abc-amd64-msvc-standard.zip")], eden, "windows", "x64")
-        self.assertEqual(got["name"], "Eden-Windows-abc-amd64-msvc-standard.zip")
-
     def test_a_release_with_no_file_for_this_os_is_skipped(self):
         e = emu()
         rels = [rel("v3", asset("pcsx2-v3-linux.AppImage")), rel("v2", asset("pcsx2-v2-windows-x64.7z"))]

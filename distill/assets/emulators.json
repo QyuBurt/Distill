@@ -238,15 +238,7 @@
     "eden"
    ],
    "portable": "user/",
-   "asset": {
-    "windows-x64": "-amd64-msvc-standard\\.zip$"
-   },
-   "channels": [
-    "stable"
-   ],
-   "channel_repos": {
-    "nightly": "eden-ci/nightly"
-   }
+   "channels": "stable"
   },
   {
    "id": "sudachi",
