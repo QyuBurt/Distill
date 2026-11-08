@@ -26,7 +26,23 @@ Grab a build from the [Releases](../../releases/latest) page:
 | `Distill-portable.zip` | Folder build. Starts fastest and trips antivirus the least. Unzip anywhere and run `Distill.exe`. |
 | `Distill.exe` | Single file. Slower to start, since it unpacks itself to a temp folder each time. |
 
-Settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+On Windows, settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+
+### Linux runtime files
+
+Linux uses per-user XDG locations: config in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`),
+installed tools and recomps in `$XDG_DATA_HOME/distill` (default `~/.local/share/distill`),
+state in `$XDG_STATE_HOME/distill` (default `~/.local/state/distill`), and caches in
+`$XDG_CACHE_HOME/distill` (default `~/.cache/distill`). Empty or non-absolute overrides use the defaults.
+Bundled assets stay with the application. This path layout does not imply complete Linux support.
+
+Set `DISTILL_PORTABLE=1` to keep runtime files beside the source launcher or frozen executable instead.
+An unwritable portable directory reports the existing write error; it never selects another location.
+At normal startup, missing XDG files are copied from legacy settings, emulator/recomp catalogs, forks,
+yt-dlp/torrent/soundtrack preferences, soundtrack saves, and known Organize undo histories. Existing XDG
+content wins and originals are preserved. Login-data files (API keys and logins), rules (which may contain
+passwords), queue sessions and torrent directories, logs, caches, tools/recomps trees and user libraries
+are **not automatically migrated**; deferred files stay beside the app and remain usable in portable mode.
 
 **Updates:** Distill checks GitHub for a newer release when it starts and asks whether to install it. You can update in one click, skip a version, or ignore it. Your settings and tools are kept.
 
@@ -148,6 +164,19 @@ tests/                                unittest suite
 
 Rules the tests enforce: nothing outside `ui/` and `app.py` may import Qt, and modules never import each other in a circle.
 
+## Linux
+
+Run `python Distill.pyw` with Python 3.10+ and the dependencies in `requirements.txt` (including PySide6).
+Linux uses the XDG config, data, state and cache directories under `distill/`; downloaded tools live in
+`$XDG_DATA_HOME/distill/tools` (default `~/.local/share/distill/tools`). `DISTILL_PORTABLE=1` uses the app folder.
+Native tool downloads, Flatpak emulators, Project64 through Wine and an ares source-build action are supported.
+See [LINUX-BUILD.md](LINUX-BUILD.md) for packaging, runtime paths and tool requirements.
+
+**AppImage (x86_64):** build it with `bash packaging/build-in-docker.sh` (or take the `Distill-x86_64.AppImage` artifact from the
+*Linux AppImage* workflow), then `chmod +x Distill-x86_64.AppImage && ./Distill-x86_64.AppImage`. Verify it with the
+`Distill-x86_64.AppImage.sha256` file next to it. On systems without FUSE run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+Wayland is used when available. Flatpak and Wine are only needed for the emulators that use them.
+
 ## Credits
 
-Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License.
+Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License. Linux support (native tool downloads, Flatpak/Wine/source-build emulator installs and the AppImage packaging) builds on a Linux port by Niko.

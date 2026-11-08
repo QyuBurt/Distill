@@ -1,7 +1,7 @@
 """yt-dlp for video and audio sites (YouTube, Vimeo, SoundCloud, Bandcamp, Twitch, and hundreds more).
 
 Distill doesn't reimplement any site: it lists a link with `yt-dlp --flat-playlist -J`, queues each video as a row,
-and downloads each one by running yt-dlp and reading its progress. yt-dlp is found on PATH or in ./tools/ytdlp, and
+and downloads each one by running yt-dlp and reading its progress. yt-dlp is found on PATH or in the runtime tools/ytdlp directory, and
 can be fetched from its official GitHub release from Settings. Merging separate video and audio streams needs
 ffmpeg beside yt-dlp (without it yt-dlp falls back to the best single file). No Qt in here."""
 from __future__ import annotations
@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Callable
 
 from .constants import APP_DIR, APP_NAME, SUBPROCESS_FLAGS, TOOLS_DIR_NAME
+from . import paths
 
 PREFIX = "ytdlp:"  # RemoteFile.url of a row this module handles
-SETTINGS_FILE = APP_DIR / "distill_ytdlp.json"
+SETTINGS_FILE = paths.config_dir() / "distill_ytdlp.json"
 PRESETS = {
     "Best quality": ["-f", "bv*+ba/b"],
     "Up to 1080p": ["-f", "bv*[height<=1080]+ba/b[height<=1080]"],
@@ -67,6 +68,7 @@ def load_settings() -> None:
 
 def save_settings() -> None:
     try:
+        paths.ensure_parent(SETTINGS_FILE)
         SETTINGS_FILE.write_text(json.dumps({"preset": SETTINGS.preset, "exe": SETTINGS.exe}), encoding="utf-8")
     except OSError:
         pass
@@ -142,6 +144,8 @@ def ffmpeg_found() -> bool:
 
 
 def tools_folder() -> Path:
+    if sys.platform.startswith("linux"):
+        return paths.data_dir() / TOOLS_DIR_NAME / "ytdlp"
     for base in (APP_DIR, Path(os.environ.get("LOCALAPPDATA", "")) / APP_NAME if os.environ.get("LOCALAPPDATA") else None):
         if base is None:
             continue

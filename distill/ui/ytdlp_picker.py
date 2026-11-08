@@ -7,6 +7,7 @@ scroll. `DlDelegate` draws the row's chevron and its choice, and the panel's hal
 from __future__ import annotations
 
 import threading
+import sys
 from dataclasses import dataclass
 from typing import Callable
 
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableView, QWidget,
 )
+from shiboken6 import isValid
 
 from .. import ytdlp
 from . import icons, motion
@@ -324,6 +326,8 @@ class FormatRows(QObject):
             entry.panel.raise_()
 
     def eventFilter(self, obj, event) -> bool:
+        if sys.platform.startswith("linux") and not isValid(self.table):
+            return False  # Qt 6.12 can deliver teardown events after the table's C++ object is gone.
         if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
             QTimer.singleShot(0, self.place)
         return False

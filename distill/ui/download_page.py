@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .. import magnet
+from .. import magnet, paths
 from ..clipwatch import links_in_text
 from ..folderwatch import FolderWatcher, WATCH_FOLDER
 from ..dlfiles import (
@@ -959,7 +959,7 @@ class DownloadMixin:
         self._dl_save_timer.start()  # restarts the 1.5 s countdown
 
     def _dl_save_session(self) -> None:
-        """Write the file list, ticks, filter and options next to the app so a restart can pick up where this left off."""
+        """Write the file list, ticks, filter and options to runtime state for the next restart."""
         self._dl_save_timer.stop()
         gone, files = self.dl_model.removed, self.dl_files
         if len(files) == len(gone):  # nothing left to remember
@@ -990,6 +990,7 @@ class DownloadMixin:
                 "files": [[f.name, f.url, f.size, f.group, f.md5, f.extra, f.preselect, f.source, f.fmt]
                           for i, f in enumerate(files) if i not in gone],
             }
+            paths.ensure_parent(SESSION_FILE)
             tmp = SESSION_FILE.with_name(SESSION_FILE.name + ".tmp")
             tmp.write_text(json.dumps(data), encoding="utf-8")
             os.replace(tmp, SESSION_FILE)

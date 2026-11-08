@@ -17,7 +17,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from .constants import APP_DIR, ILLEGAL_NAME_CHARS
+from . import paths
+from .constants import ILLEGAL_NAME_CHARS
 from . import bios as biosmod, cuebin, patcher
 from .datverify import load_dat, verify as dat_verify
 from .fingerprint import find_same_content
@@ -526,14 +527,14 @@ def _undo_ops(done: list[dict]) -> list[str]:
 
 
 def undo_file(tool: str) -> Path:
-    return APP_DIR / f"distill_undo_{tool}.json"
+    return paths.state_dir() / f"distill_undo_{tool}.json"
 
 
 UNDO_RUNS_KEPT = 20  # how many runs of each tool can be undone, newest first
 
 
 def run_log_file() -> Path:
-    return APP_DIR / "distill_organise_log.txt"
+    return paths.state_dir() / "distill_organise_log.txt"
 
 
 def _load_runs(tool: str) -> list[dict]:
@@ -574,6 +575,7 @@ def _save_undo(tool: str, items: list[dict], made: str) -> None:
     runs = [r for r in _load_runs(tool) if r.get("made") != made]
     runs.append({"made": made, "items": items})
     try:
+        paths.ensure_parent(undo_file(tool))
         undo_file(tool).write_text(json.dumps({"runs": runs[-UNDO_RUNS_KEPT:]}, indent=1), encoding="utf-8")
     except OSError:
         pass  # the undo record is a convenience; never fail the run because of it
@@ -606,7 +608,7 @@ def op_description(op: tuple) -> tuple[str, str, str]:
 
 
 def _append_run_log(title: str, made: str, done: list[Finding]) -> None:
-    """Keep a readable record of every run next to the app (what moved where), whatever happens to the undo files."""
+    """Keep a readable record in the state directory, whatever happens to the undo files."""
     if not done:
         return
     lines = [f"=== {made.replace('T', ' ')[:19]}  {title}: {len(done)} item(s) ==="]
@@ -616,6 +618,7 @@ def _append_run_log(title: str, made: str, done: list[Finding]) -> None:
             action, src, dst = op_description(op)
             lines.append(f"    {action.upper():<18} {src + '  ->  ' + dst if src and dst else src or dst}")
     try:
+        paths.ensure_parent(run_log_file())
         with run_log_file().open("a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n\n")
     except OSError:
@@ -702,6 +705,7 @@ def undo_last(tool: str) -> tuple[int, list[str]] | None:
         problems += _undo_ops(item.get("ops", []))
     if len(runs) > 1:
         with contextlib.suppress(OSError):
+            paths.ensure_parent(undo_file(tool))
             undo_file(tool).write_text(json.dumps({"runs": runs[:-1]}, indent=1), encoding="utf-8")
     else:
         undo_file(tool).unlink(missing_ok=True)

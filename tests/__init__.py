@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import atexit
 import importlib
+import ipaddress
+import os
 import pkgutil
 import shutil
 import sys
@@ -21,6 +23,80 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+SANDBOX = Path(tempfile.mkdtemp(prefix="distill_tests_app_"))
+atexit.register(shutil.rmtree, SANDBOX, True)
+if sys.platform != "win32":
+    for name, relative in (("HOME", "home"), ("XDG_CONFIG_HOME", "home/.config"),
+                           ("XDG_DATA_HOME", "home/.local/share"), ("XDG_STATE_HOME", "home/.local/state"),
+                           ("XDG_CACHE_HOME", "home/.cache")):
+        folder = SANDBOX / relative
+        folder.mkdir(parents=True, exist_ok=True)
+        os.environ[name] = str(folder)
+os.environ.pop("DISTILL_PORTABLE", None)
+
+try:
+    import keyring
+    from keyring.backend import KeyringBackend
+except ImportError:
+    pass
+else:
+    class MemoryKeyring(KeyringBackend):
+        """No Secret Service discovery or persistent secrets during tests."""
+        priority = 1
+
+        def __init__(self):
+            self.passwords = {}
+
+        def get_password(self, service, username):
+            return self.passwords.get((service, username))
+
+        def set_password(self, service, username, password):
+            self.passwords[service, username] = password
+
+        def delete_password(self, service, username):
+            self.passwords.pop((service, username), None)
+
+    keyring.set_keyring(MemoryKeyring())
+
+
+# This guards only Python getaddrinfo/connect; other DNS, UDP/native/subprocess calls bypass it, and callers may swallow errors.
+def restrict_network(event, args):
+    """Tests may use local HTTP fixtures, never external DNS or connections."""
+    if event == "socket.getaddrinfo":
+        host = args[0]
+    elif event == "socket.connect" and isinstance(args[1], tuple):
+        host = args[1][0]
+    else:
+        return  # includes Unix-domain sockets
+    if isinstance(host, bytes):
+        host = host.decode("ascii", errors="replace")
+    if host is None or str(host).lower() == "localhost":
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise AssertionError(f"tests cannot access non-loopback network: {host}")
+
+
+sys.addaudithook(restrict_network)
+
+
+# QGuiApplication.instance() also returns a QApplication. Keep the widget-capable
+# application alive before image-only tests can create the narrower singleton;
+# Qt cannot upgrade that singleton when discovery later reaches window tests.
+if not os.environ.get("DISTILL_SKIP_UI_TESTS"):
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        pass
+    else:
+        if sys.platform != "win32":
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QT_APP = QApplication.instance() or QApplication([])
 
 
 def app_modules():
@@ -52,8 +128,7 @@ def isolate_app_folder() -> Path:
     from distill import constants
 
     app_dir, package_dir = constants.APP_DIR, Path(constants.__file__).resolve().parent
-    sandbox = Path(tempfile.mkdtemp(prefix="distill_tests_app_"))
-    atexit.register(shutil.rmtree, sandbox, True)
+    sandbox = SANDBOX
     for module in app_modules():
         if module is constants:  # test_structure checks what APP_DIR is for a source checkout and a packaged build
             continue

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .. import emulators as em
 from .. import recomps as rc
+from .. import source_builds as builds
 from . import flight, icons, motion
 from .emu_images import normalize_icons
 from .emu_cards import (
@@ -42,7 +43,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self._em_by_id: dict[str, em.Emulator] = {}  # emulators and forks
         self._em_store: rc.Store | None = None
         self._em_latest: dict[str, object] = {}  # id -> (Release, asset) | error text
-        self._em_busy: dict[str, threading.Event] = {}  # installs in progress (the Event cancels)
+        self._em_busy: dict[str, threading.Event] = {}  # installs/removals in progress; the Event cancels installs
+        self._em_removing: set[str] = set()
         self._em_prog: dict[str, str] = {}  # id -> what its install is doing now
         self._em_counts: dict[str, int] = {}  # library system -> games, from the Library Report
         self._em_current = ""
@@ -238,6 +240,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_main.setMinimumHeight(40)
         self.emd_main.setMinimumWidth(112)
         self.emd_main.clicked.connect(self._em_main_action)
+        self.emd_build = QPushButton("Build from source")
+        self.emd_build.hide()
+        self.emd_build.setToolTip("Runs a script in a terminal: it installs your distribution's build tools, fetches the "
+                                  "source and compiles it. Only shown for projects that publish no Linux binary.")
+        self.emd_build.clicked.connect(self._em_build_from_source)
         self.emd_launch = QPushButton("Launch")
         self.emd_launch.clicked.connect(self._em_launch)
         self.emd_folder = QPushButton("Open folder")
@@ -254,11 +261,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_unfork.setToolTip("Take this fork off the list. An installed copy has to be uninstalled first.")
         self.emd_unfork.clicked.connect(self._em_remove_fork)
         danger = (f"QPushButton:hover {{ background: {T.btn_danger[0].name()}; border-color: {T.btn_danger[1].name()}; color: {T.bad.name()}; }}")
-        for w in (self.emd_launch, self.emd_folder, self.emd_locate, self.emd_remove, self.emd_unfork):
+        for w in (self.emd_launch, self.emd_folder, self.emd_locate, self.emd_remove, self.emd_unfork, self.emd_build):
             w.setMinimumHeight(40)
         for w in (self.emd_remove, self.emd_unfork):
             w.setStyleSheet(danger)  # only the hover is red: the destructive buttons sit apart and stay quiet until pointed at
-        for w in (self.emd_main, self.emd_launch, self.emd_folder, self.emd_locate):
+        for w in (self.emd_main, self.emd_build, self.emd_launch, self.emd_folder, self.emd_locate):
             row.addWidget(w)
         row.addStretch(1)
         row.addWidget(self.emd_remove)
@@ -874,9 +881,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             rows.append(("In your library", f"{games:,} games", None))
         self.emd_facts.set_facts(rows)
         can_get = isinstance(latest, tuple) and (inst is None or em.can_update(inst))  # nothing installed yet: always installable
+        if rc.platform_key() == "linux":
+            can_get = can_get and em.downloadable(e)
         self.emd_main.setText("Cancel" if busy else "Update" if state == "update" else "Install" if inst is None else
                               "Update to latest" if state == "unknown" and can_get else "Reinstall")
         self.emd_main.setEnabled(busy or can_get)
+        if rc.platform_key() == "linux" and e.id in self._em_removing:
+            self.emd_main.setText("Uninstalling...")
+            self.emd_main.setEnabled(False)
         self.emd_main.setToolTip("Distill won't update an install that shares its folder with other programs. Move it to a folder of its own and link it again."
                                  if inst and inst.linked == "file" else "")
         animate, self._em_snap = not self._em_snap, False  # buttons come and go smoothly when this emulator's state changes
@@ -885,8 +897,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             motion.set_visible(widget, on, axis=axis, animate=animate)
 
         self.emd_remove.setText("Unlink" if inst and inst.linked else "Uninstall")  # before it opens, so it opens to its size
+        # Projects with no Linux binary of their own are built from source instead of installed from a download.
+        buildable = bool(e.build) and rc.platform_key() == "linux" and em.downloadable(e)
+        show(self.emd_build, buildable and not busy)
+        if rc.platform_key() == "linux":
+            show(self.emd_main, not buildable)
         show(self.emd_launch, inst is not None)
-        self.emd_launch.setEnabled(inst is not None and not busy and code != "gone")
+        self.emd_launch.setEnabled(inst is not None and not busy and code != "gone"
+                                   and (rc.platform_key() != "linux" or e.available))
         show(self.emd_folder, inst is not None)
         show(self.emd_locate, inst is None or bool(inst.linked) or code == "gone")
         self.emd_locate.setEnabled(not busy)
@@ -959,8 +977,53 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         if e is not None:
             self._em_begin_install(e)
 
+    def _em_build_from_source(self) -> None:
+        """A project that publishes no Linux binary: write the build script and run it in a terminal of its own.
+
+        The terminal matters: installing packages has to ask for the administrator password, and a build takes long
+        enough that it must not look like a frozen window.
+        """
+        e = self._em_by_id.get(self._em_current)
+        if e is None or not e.build or rc.platform_key() != "linux":
+            return
+        if not em.downloadable(e):
+            QMessageBox.warning(self, f"Can't build {e.name}", e.notes or f"{e.name} has no build for this system.")
+            return
+        if em.emulators_root(self.em_store) is None:
+            QMessageBox.information(
+                self, "Choose an Emulators folder",
+                "Choose an Emulators folder on the Emulators page before building.\n\n"
+                "The build will go there so Find installed can discover it afterward.")
+            return
+        latest = self._em_latest.get(e.id)
+        version = latest[0].tag if isinstance(latest, tuple) else ""
+        if version == "source":
+            version = ""
+        try:
+            live = em.EmulatorInstaller(self.em_store, lambda *a: None, threading.Event()).live_for(e)
+            script = builds.start(e.build, live, version)
+        except Exception as exc:  # no terminal, no write permission, unknown recipe
+            QMessageBox.warning(self, f"Can't build {e.name}", str(exc))
+            return
+        QMessageBox.information(
+            self, f"Building {e.name}",
+            f"A terminal window is now building {e.name}{f' {version}' if version else ''}.\n\n"
+            "It installs your distribution's build tools, fetches the source and compiles it. That takes several "
+            "minutes, and asks for your password once.\n\n"
+            f"The script is saved at:\n{script}\n\n"
+            "When the terminal says it is done, click \"Find installed\" to pick the build up.")
+
     def _em_begin_install(self, e: em.Emulator) -> None:
         """Install, update or reinstall `e` (or cancel it when it is already running): from its own page, its card or its row."""
+        if rc.platform_key() == "linux" and e.id in self._em_removing:
+            return
+        if rc.platform_key() == "linux" and not em.downloadable(e):
+            QMessageBox.warning(self, f"Can't install {e.name}", e.notes or f"{e.name} has no download for this system.")
+            return
+        if rc.platform_key() == "linux" and e.build:
+            self._em_show_detail(e.id)
+            self._em_build_from_source()
+            return
         if e.id in self._em_busy:
             self._em_busy[e.id].set()
             self._em_say("Cancelling...")
@@ -1047,7 +1110,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         if inst is None:
             return
         try:
-            rc.launch(inst)
+            em.launch(self._em_by_id.get(rid), inst)
             self._em_say("Started.")
         except rc.RecompError as exc:
             self._em_say(str(exc))
@@ -1090,6 +1153,16 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         return f" {' and '.join(names)} was pointing at it and no longer is." if names else ""
         self._em_fetch_latest(e)
 
+    def _em_start_remove(self, e: em.Emulator) -> None:
+        """Remove an owned Flatpak in a worker; only the event handler updates widgets."""
+        try:
+            message = em.uninstall(self.em_store, e)
+            self.ui_q.put(("emu_removed", e.id, message, ""))
+        except rc.RecompError as exc:
+            self.ui_q.put(("emu_removed", e.id, "", str(exc)))
+        except Exception as exc:
+            self.ui_q.put(("emu_removed", e.id, "", f"{type(exc).__name__}: {exc}"))
+
     def _em_remove(self) -> None:
         e = self._em_by_id.get(self._em_current)
         inst = self.em_store.installed(self._em_current) if e else None
@@ -1102,6 +1175,16 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                    "(unless you moved them elsewhere). Your own game files are not touched.")
         if QMessageBox.question(self, "Unlink" if inst.linked else "Uninstall", ask) != QMessageBox.StandardButton.Yes:
             return
+        if rc.platform_key() == "linux":
+            flatpak = (self.em_store.data.get("flatpak_installs") or {}).get(e.id, {})
+            if not inst.linked and flatpak.get("owned") is True and flatpak.get("app"):
+                self._em_busy[e.id] = threading.Event()
+                self._em_removing.add(e.id)
+                self._em_prog[e.id] = "Uninstalling..."
+                self._em_say("Uninstalling...")
+                self._em_refresh_views()
+                threading.Thread(target=self._em_start_remove, args=(e,), daemon=True).start()
+                return
         self.emd_msg.setText(em.uninstall(self.em_store, e))
         self._em_refresh_detail()
 
@@ -1239,6 +1322,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                 self._em_fork_rows[rid].set_busy_text(text)
             elif self.em_views.currentIndex() == 0 and rid in self.em_cards:  # an install running with the cards showing
                 self.em_cards[rid].set_busy_text(text)
+        elif name == "emu_removed":
+            _n, rid, message, error = ev
+            self._em_busy.pop(rid, None)
+            self._em_removing.discard(rid)
+            self._em_prog.pop(rid, None)
+            self._em_refresh_views()
+            self._em_refresh_status()
+            self._em_say(error or message)
         elif name == "emu_done":
             _n, rid, inst, error = ev
             self._em_busy.pop(rid, None)

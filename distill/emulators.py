@@ -3,7 +3,7 @@
 Nothing here imports Qt. It sits on the PC Recomps engine (`distill.recomps`): the same Store, release picking, download +
 checksum, unpack and launch code, with four differences.
 
-    catalog (assets/emulators.json, plus an optional distill_emulators_catalog.json beside the app)
+    catalog (assets/emulators.json, plus an optional distill_emulators_catalog.json in the runtime config directory)
       -> Emulator                     one emulator: systems it plays, where its builds come from, how to find its exe
     fetch_releases()                  GitHub, GitLab, Forgejo, or a small adapter for sites that publish no release feed
     scan_folder() / link()            find installs the person already has (their Emulators folder, the usual places) and
@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -30,7 +33,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import recomps as rc
-from .constants import APP_DIR, ASSETS_DIR, ILLEGAL_NAME_CHARS
+from . import paths
+from .constants import ASSETS_DIR, ILLEGAL_NAME_CHARS, SUBPROCESS_FLAGS
 from .systems import system_of_name
 
 SIDECAR = ".distill.json"  # written beside an install so its version survives a lost state file
@@ -41,6 +45,7 @@ SCAN_SKIP = {"dev_hdd0", "dev_hdd1", "games", "game", "roms", "rom", "saves", "s
              "screenshots", "textures", "mods", "node_modules", ".git", "$recycle.bin", "system volume information"}
 SCAN_DEPTH = 2
 EXE_DEPTH = 3  # how far into an emulator's folder to look for its executable: portable folders can hold a whole game library
+EXE_DEPTH_EXPLICIT = 6  # when the catalog names the executable itself, its own path is trusted to be deeper (Xenia's lives in build/bin/Linux/Release)
 
 
 # ---- the catalog ----------------------------------------------------------------------------------------------
@@ -77,6 +82,10 @@ class Emulator:
     risk_accepted: bool = False  # a fork by anyone else: the person said they checked the author
     folder: str = ""  # a fork: its own folder name inside the Emulators folder
     logo: str = ""  # an image address to use instead of the owner's GitHub picture
+    hosts: tuple[str, ...] = ()  # catalog: sites its downloads may come from (a project that serves files off-site)
+    flatpak: str = ""  # catalog: a Flatpak app id (org.mamedev.MAME) — installed through flatpak instead of a download
+    wine: bool = False  # catalog: a Windows-only program that runs under Wine here
+    build: str = ""  # catalog: a "build from source" recipe key (ares)
 
 
 def _tuple(v) -> tuple:
@@ -90,6 +99,8 @@ def _emulator(d: dict, plat: str) -> Emulator:
     available, notes = d.get("active", True) is not False, d.get("notes", "")
     if owner and repo and d.get("source", "github") == "github" and repo.split("/")[0].lower() != owner.lower():
         available, notes = False, f"Refused: this entry points at {repo.split('/')[0]}, not {owner}. Copies of this project carry malware."
+    if plat == "linux" and owner and any(d.get(kind) for kind in ("flatpak", "build", "wine")):
+        available, notes = False, f"Refused: Flatpak, source builds and Wine cannot verify the trusted owner {owner}. Copies of this project carry malware."
     if not (repo or d.get("adapter")):
         available = False
     return Emulator(
@@ -100,7 +111,8 @@ def _emulator(d: dict, plat: str) -> Emulator:
         portable=d.get("portable", ""), portable_auto=d.get("portable_auto", True) is not False, trusted_owner=owner, channels=_tuple(d.get("channels")) or ("stable",),
         channel_repos={str(k): str(v) for k, v in (d.get("channel_repos") or {}).items()}, available=available,
         verify=bool(d.get("verify")), systems=_tuple(d.get("systems")), aliases=tuple(a for a in _tuple(d.get("aliases")) if a),
-        logo=str(d.get("logo") or ""))
+        logo=str(d.get("logo") or ""), hosts=_tuple(d.get("download_hosts")), flatpak=str(d.get("flatpak") or ""),
+        wine=bool(d.get("wine")), build=str(d.get("build") or ""))
 
 
 def bundled_manifest() -> Path:
@@ -129,7 +141,7 @@ def bundled_image(em: Emulator) -> Path | None:
 
 
 def user_manifest() -> Path:
-    return APP_DIR / "distill_emulators_catalog.json"  # the person's own additions and overrides, same format
+    return paths.config_dir() / "distill_emulators_catalog.json"  # the person's own additions and overrides, same format
 
 
 def load_catalog(paths: Iterable[Path] | None = None, plat: str = "") -> list[Emulator]:
@@ -146,6 +158,9 @@ def load_catalog(paths: Iterable[Path] | None = None, plat: str = "") -> list[Em
             try:
                 if not isinstance(d, dict):
                     continue
+                # Resolve Linux-only fields before enforcing the bundled trust policy below.
+                if plat == "linux":
+                    d = {**d, **d.get("linux", {})}
                 em = _emulator(d, plat)
             except (KeyError, TypeError, AttributeError):
                 continue
@@ -256,8 +271,9 @@ def parse_relation(emulators_data, platforms_data) -> Relation:
 
 
 def _relation_dir() -> Path:
-    d = rc.root() / "emurelation"
-    d.mkdir(parents=True, exist_ok=True)
+    d = rc.cache_root() / "emurelation"
+    if not sys.platform.startswith("linux"):
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -273,6 +289,7 @@ def load_relation(force: bool = False, fetch: Callable[[str], bytes] | None = No
             try:
                 data = fetch(RELATION_BASE + name)
                 json.loads(data)  # only a file that parses replaces the cached one
+                paths.ensure_parent(path)
                 path.write_bytes(data)
             except (urllib.error.URLError, OSError, ValueError):
                 pass
@@ -492,8 +509,31 @@ def _bluestacks(em: Emulator) -> list[dict]:
     raise rc.RecompError("Couldn't find a BlueStacks installer in the winget manifests.")
 
 
+def _pj64(em: Emulator) -> list[dict]:
+    """Project64's builds live on its own site, in three hops: a list of downloads, a page per file, then the file.
+    Only the portable zip is wanted (it unpacks to Project64.exe and runs under Wine as well as on Windows)."""
+    site = (em.website or "https://www.pj64-emu.com/").rstrip("/")
+    html = rc._get(f"{site}/public-releases").decode("utf-8", "replace")
+    slugs = re.findall(r'href="(/download/project64-[^"]*-zip)"', html)
+    for slug in slugs:  # newest first as the site lists them
+        m = re.search(r"project64-(\d+)-(\d+)-(\d+)-zip", slug)
+        if not m:
+            continue
+        version = ".".join(m.groups())
+        page = rc._get(f"{site}{slug}").decode("utf-8", "replace")
+        file_href = re.search(r'href="(/file/project64-[^"]+/)"', page)
+        if not file_href:
+            continue
+        stem = file_href.group(1).strip("/").rsplit("/", 1)[-1]  # project64-3-0-1-5664-2df3434
+        name = "Project64-" + version + "-" + stem.split("-")[-1] + ".zip"
+        return [{"tag_name": version, "name": f"Project64 {version}", "body": "", "published_at": "",
+                 "prerelease": False, "html_url": f"{site}{file_href.group(1)}",
+                 "assets": [{"name": name, "browser_download_url": f"{site}{file_href.group(1)}", "size": 0}]}]
+    raise rc.RecompError("No portable Project64 download was found on pj64-emu.com.")
+
+
 ADAPTERS = {"dolphin_update": _dolphin, "libretro_buildbot": _libretro, "blastem_site": _blastem, "bigpemu_site": _bigpemu,
-            "bluestacks_winget": _bluestacks, "scummvm_site": _scummvm}
+            "bluestacks_winget": _bluestacks, "scummvm_site": _scummvm, "pj64_site": _pj64}
 
 
 def _site(em: Emulator) -> str:
@@ -557,6 +597,10 @@ def latest_for(em: Emulator, store: rc.Store, force: bool = False) -> tuple[rc.R
         return em.notes or f"{em.name} has no download yet."
     if not for_this_os(em):
         return f"{em.name} has no build for {rc.platform_key()}."
+    if em.flatpak and rc.platform_key() == "linux":
+        return _flatpak_latest(em)
+    if em.build and rc.platform_key() == "linux":
+        return _build_latest(em)
     try:
         chan = channel_of(store, em)
         found = choose(em, fetch_releases(em, store, force, chan), chan)
@@ -565,8 +609,36 @@ def latest_for(em: Emulator, store: rc.Store, force: bool = False) -> tuple[rc.R
     return found if found else f"No download for {rc.platform_key()} in the recent releases. Use the website link."
 
 
+def _flatpak_latest(em: Emulator) -> tuple[rc.Release, dict] | str:
+    """A Flatpak has no release files: the version Flathub offers is the newest one, and installing it is flatpak's job."""
+    if not flatpak_available():
+        return (f"{em.name} is installed through Flatpak, which isn't on this system. Install Flatpak "
+                f"(flathub.org/setup), then check again.")
+    version, commit = _flatpak_remote_info(em.flatpak)
+    if not (version or commit):
+        version = "latest"  # Installation can add the user remote; this is not known update metadata.
+    version = version or flatpak_installed_version(em.flatpak) or "flathub"
+    asset = {"name": f"{em.flatpak} (Flatpak)", "url": "", "size": 0, "flatpak_commit": commit}
+    return rc.Release(version, em.name, "", "", False, em.website, (asset,)), asset
+
+
+def _build_latest(em: Emulator) -> tuple[rc.Release, dict] | str:
+    """A project with no Linux binary at all: the newest tag is the version to build, and building it is the install."""
+    tag = ""
+    try:
+        tags = json.loads(rc._get(f"https://api.github.com/repos/{em.repo}/tags?per_page=5",
+                                  accept="application/vnd.github+json"))
+        tag = next((t.get("name", "") for t in tags if isinstance(t, dict) and t.get("name")), "")
+    except (urllib.error.URLError, OSError, ValueError):
+        tag = ""  # offline: the build script checks out the newest tag itself
+    asset = {"name": f"{em.repo} (built from source)", "url": "", "size": 0}
+    return rc.Release(tag or "source", em.name, "", "", False, em.website, (asset,)), asset
+
+
 def stamp_of(em: Emulator, rel: rc.Release, asset: dict) -> str:
     """What tells this build from the one before it, for emulators whose tag never changes."""
+    if rc.platform_key() == "linux" and em.flatpak:
+        return asset.get("flatpak_commit", "")
     if em.version_from == "asset":
         return asset["name"]
     if em.version_from == "published_at":
@@ -587,9 +659,21 @@ def update_state(em: Emulator, inst: rc.Installed | None, latest) -> str:
     """'missing' | 'current' | 'update' | 'unknown' (installed, but its version isn't known or the latest couldn't be read)."""
     if inst is None:
         return "missing"
+    if rc.platform_key() == "linux" and em.build:
+        return "unknown"  # Source builds are updated through the build action, never a download.
     if not isinstance(latest, tuple):
         return "unknown"
     rel, asset = latest
+    if rc.platform_key() == "linux" and em.flatpak:
+        commit = stamp_of(em, rel, asset)
+        if inst.stamp and commit:
+            return "update" if inst.stamp != commit else "current"
+        if inst.version in ("", "latest", "flathub") or rel.tag in ("latest", "flathub"):
+            return "unknown"
+        # Earlier Linux installs incorrectly stored the commit as their display version.
+        if re.fullmatch(r"[0-9a-fA-F]{64}", inst.version):
+            return "update"
+        return "update" if rc.is_newer(inst.version, rel.tag) else "current"
     if em.version_from == "tag":
         if not inst.version:
             return "unknown"
@@ -643,6 +727,8 @@ def set_channel(store: rc.Store, em: Emulator, channel: str) -> None:
 
 def download_hosts(em: Emulator) -> frozenset[str]:
     """The only sites a download for this emulator may come from, when it isn't on GitHub (those are pinned by owner instead)."""
+    if rc.platform_key() == "linux" and em.hosts:
+        return frozenset(h.lower() for h in em.hosts)
     if em.source in ("gitlab", "forgejo") and em.host:
         return frozenset({em.host.lower()})
     return frozenset({"dolphin_update": ("dl.dolphin-emu.org",), "libretro_buildbot": ("buildbot.libretro.com",), "blastem_site": ("www.retrodev.com",),
@@ -770,6 +856,7 @@ def locate_exe(folder: Path, em: Emulator, plat: str = "", depth: int = EXE_DEPT
     a portable RPCS3 or Dolphin folder can contain a whole library."""
     plat = plat or rc.platform_key()
     rx = re.compile(em.exe, re.IGNORECASE) if em.exe else None
+    limit = max(depth, EXE_DEPTH_EXPLICIT) if rx and plat == "linux" else depth
     cands: list[Path] = []
     base = len(folder.parts)
     for dirpath, dirnames, filenames in os.walk(folder):
@@ -779,7 +866,7 @@ def locate_exe(folder: Path, em: Emulator, plat: str = "", depth: int = EXE_DEPT
             apps = [d for d in dirnames if d.lower().endswith(".app")]
             cands += [here / d for d in apps]
             dirnames[:] = [d for d in dirnames if not d.lower().endswith(".app")]
-        dirnames[:] = [d for d in dirnames if d.lower() not in SCAN_SKIP] if level < depth else []
+        dirnames[:] = [d for d in dirnames if d.lower() not in SCAN_SKIP] if level < limit else []
         for fn in filenames:
             p = here / fn
             rel = p.relative_to(folder).as_posix()
@@ -939,6 +1026,24 @@ def link(store: rc.Store, em: Emulator, path: Path, plat: str = "") -> Found:
     return f
 
 
+def launch(em: Emulator | None, inst: rc.Installed) -> None:
+    """Linked Windows executables need Wine too; installed shell launchers already provide it."""
+    if rc.platform_key() == "linux" and em is not None and not em.available:
+        raise rc.RecompError(em.notes or f"{em.name} is unavailable.")
+    exe = inst.exe_path()
+    if rc.platform_key() != "linux" or em is None or not em.wine or exe.suffix.lower() != ".exe":
+        rc.launch(inst)
+        return
+    if not exe.exists():
+        raise rc.RecompError("The emulator's files are missing. Find installed or link it again.")
+    EmulatorInstaller._need_wine(em)
+    try:
+        subprocess.Popen(["wine", str(exe)], cwd=str(exe.parent), close_fds=True, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise rc.RecompError(f"Couldn't start it: {exc}") from exc
+
+
 def unlink(store: rc.Store, em: Emulator) -> None:
     """Forget a linked install. Nothing on disk is touched."""
     store.set_installed(None, em.id)
@@ -950,6 +1055,12 @@ def uninstall(store: rc.Store, em: Emulator) -> str:
     inst = store.installed(em.id)
     if inst is None:
         return "Not installed."
+    if rc.platform_key() == "linux":
+        flatpak = (store.data.get("flatpak_installs") or {}).get(em.id, {})
+        if not inst.linked and flatpak.get("owned") is True and flatpak.get("app"):
+            # Run first: a failure must retain the record, launcher and ownership for a retry.
+            _run_flatpak(["uninstall", "--user", "-y", flatpak["app"]])
+        (store.data.get("flatpak_installs") or {}).pop(em.id, None)
     folder = Path(inst.folder)
     managed_roots = [r.resolve() for r in (emulators_root(store), rc.root()) if r]
     try:
@@ -989,6 +1100,110 @@ def make_portable(em: Emulator, exe: Path) -> bool:
     return True
 
 
+FLATPAK_REMOTE = "flathub"
+FLATPAK_REMOTE_URL = "https://flathub.org/repo/flathub.flatpakrepo"
+LAUNCHER = "run-here.sh"  # the file Distill starts for an emulator that isn't a plain program (Flatpak, Wine)
+
+
+def flatpak_available() -> bool:
+    return shutil.which("flatpak") is not None
+
+
+def _flatpak_out(args: list[str], timeout: int = 25) -> str | None:
+    """Stdout of a Flatpak query, or None on failure (an empty app list is a successful query)."""
+    if not flatpak_available():
+        return None
+    options = {}
+    if rc.platform_key() == "linux":
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+        env.pop("LANGUAGE", None)
+        options["env"] = env
+    try:
+        res = subprocess.run(["flatpak", *args], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                             creationflags=SUBPROCESS_FLAGS, **options)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout.decode(errors="replace") if res.returncode == 0 else None
+
+
+def flatpak_installed_apps() -> set[str] | None:
+    """User app IDs, or None if ownership cannot safely be determined."""
+    text = _flatpak_out(["list", "--user", "--app", "--columns=application"])
+    return {line.strip() for line in text.splitlines() if line.strip()} if text is not None else None
+
+
+def flatpak_installed_version(app: str) -> str:
+    """The version of this Flatpak that is already installed here ('' when it isn't)."""
+    for line in (_flatpak_out(["list", "--user", "--app", "--columns=application,version"]) or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip() == app:
+            return parts[1].strip()
+    return ""
+
+
+def flatpak_installed_commit(app: str) -> str:
+    return (_flatpak_out(["info", "--user", "--show-commit", app]) or "").strip()
+
+
+def _flatpak_remote_info(app: str) -> tuple[str, str]:
+    """Keep the display version and opaque commit identifier separate, even when the version is unchanged."""
+    text = _flatpak_out(["remote-info", "--user", FLATPAK_REMOTE, app]) or ""
+    fields = {}
+    for key in ("Version", "Commit"):
+        match = re.search(rf"^\s*{key}:\s*(\S.*)$", text, re.MULTILINE)
+        fields[key] = match.group(1).strip() if match else ""
+    return fields["Version"], fields["Commit"]
+
+
+def flatpak_remote_version(app: str, installed: str = "") -> str:
+    """The display version only; `installed` is retained for callers of the earlier helper."""
+    return _flatpak_remote_info(app)[0]
+
+
+def _run_flatpak(args: list[str], cancel=None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise rc.Cancelled
+    try:
+        command = ["flatpak", *args]
+        if cancel is None:
+            res = subprocess.run(command, capture_output=True, timeout=3600, stdin=subprocess.DEVNULL,
+                                 creationflags=SUBPROCESS_FLAGS)
+        else:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                  creationflags=SUBPROCESS_FLAGS) as child:
+                deadline = time.monotonic() + 3600
+                try:
+                    while True:
+                        if cancel.is_set():
+                            raise rc.Cancelled
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, 3600)
+                        try:
+                            stdout, stderr = child.communicate(timeout=min(0.2, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                except BaseException:
+                    child.terminate()
+                    try:
+                        child.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.communicate()
+                    raise
+                res = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+    except OSError as exc:
+        raise rc.RecompError(f"Flatpak could not run: {exc}") from exc
+    except subprocess.SubprocessError as exc:
+        raise rc.RecompError("Flatpak took too long and was stopped.") from exc
+    if cancel is not None and cancel.is_set():
+        raise rc.Cancelled
+    if res.returncode != 0:
+        tail = " ".join((res.stderr or res.stdout).decode(errors="replace").strip().splitlines()[-3:])
+        raise rc.RecompError(f"Flatpak could not {args[0]}: {tail or 'no reason given'}")
+
+
 class EmulatorInstaller(rc.Installer):
     """An install or update. Fresh installs go to <Emulators folder>/<Name> (or Distill's own folder when none is set); an update
     goes where the emulator already is, linked or not. Files are merged over what's there, never replaced wholesale."""
@@ -997,6 +1212,8 @@ class EmulatorInstaller(rc.Installer):
         return rc.root() / "emulators" / em.id
 
     def _guard(self, em) -> None:
+        if rc.platform_key() == "linux" and not em.available:
+            raise rc.RecompError(em.notes or f"{em.name} is unavailable.")
         cur = self.store.installed(em.id)
         if cur and cur.linked == "file":
             raise rc.RecompError(f"{em.name} sits in a folder shared with other programs, so Distill won't update it. Move it into a folder of its own, then link it again.")
@@ -1024,6 +1241,80 @@ class EmulatorInstaller(rc.Installer):
         if u.hostname not in ("github.com", "www.github.com") or owner != em.trusted_owner.lower():
             raise rc.RecompError(f"The download for {em.name} doesn't come from {em.trusted_owner}, so it was refused. "
                                  "Fake copies of this project are circulating with malware in them.")
+
+    def install(self, em, rel: rc.Release, asset: dict) -> rc.Installed:
+        """Flatpak apps and Wine-only Windows programs don't install like a plain download: both are routed here."""
+        if rc.platform_key() == "linux":
+            self._guard(em)
+        if rc.platform_key() == "linux" and em.build:
+            raise rc.RecompError(f"Use Build from source to install or update {em.name}.")
+        if rc.platform_key() == "linux" and em.flatpak:
+            return self._install_flatpak(em, rel)
+        if rc.platform_key() == "linux" and em.wine:
+            self._need_wine(em)  # refuse before a 20 MB download, not after it
+            return self._wrap_in_wine(em, super().install(em, rel, asset))
+        return super().install(em, rel, asset)
+
+    def _install_flatpak(self, em, rel: rc.Release) -> rc.Installed:
+        """A Flatpak isn't a folder of files: flatpak installs it for the user and `flatpak run` starts it. A launcher
+        script in the emulator's own folder keeps everything else (launching, uninstalling, the folder checks) working."""
+        self._guard(em)
+        if not flatpak_available():
+            raise rc.RecompError(f"{em.name} is installed through Flatpak, which isn't on this system. Install Flatpak "
+                                 f"(flathub.org/setup), or download {em.name} from {em.website or 'its website'}.")
+        app = em.flatpak
+        previous = self.store.installed(em.id)
+        apps = flatpak_installed_apps()
+        if apps is None:
+            raise rc.RecompError("Flatpak's installed apps could not be read. Nothing was installed.")
+        ownership = (self.store.data.get("flatpak_installs") or {}).get(em.id, {})
+        owned = (app not in apps or (previous is not None and ownership.get("app") == app and ownership.get("owned") is True))
+        linked = previous.linked if previous else ""
+        owned = owned and not linked
+        self.progress(f"Asking Flatpak for {app}...", 0, 0)
+        self._flatpak(["remote-add", "--user", "--if-not-exists", FLATPAK_REMOTE, FLATPAK_REMOTE_URL])
+        self.progress(f"Installing {em.name} from Flathub... (this can take a while)", 0, 0)
+        self._flatpak(["install", "--user", "-y", "--or-update", FLATPAK_REMOTE, app])
+        if self.cancel.is_set():
+            raise rc.Cancelled
+        live = self.live_for(em)
+        live.mkdir(parents=True, exist_ok=True)
+        launcher = live / LAUNCHER
+        launcher.write_text(f'#!/bin/sh\n# Start the Flatpak application.\nexec flatpak run {shlex.quote(app)} "$@"\n')
+        launcher.chmod(0o755)
+        version = flatpak_installed_version(app) or rel.tag
+        inst = rc.Installed(em.id, version, str(live), launcher.name, time.time(), linked, flatpak_installed_commit(app))
+        if self.cancel.is_set():
+            raise rc.Cancelled
+        self.store.data.setdefault("flatpak_installs", {})[em.id] = {"app": app, "owned": bool(owned)}
+        self.store.set_installed(inst)
+        self.progress("Installed.", 1, 1)
+        return inst
+
+    def _flatpak(self, args: list[str]) -> None:
+        if self.cancel.is_set():
+            raise rc.Cancelled
+        _run_flatpak(args, cancel=self.cancel)
+        if self.cancel.is_set():
+            raise rc.Cancelled
+
+    @staticmethod
+    def _need_wine(em) -> None:
+        if not shutil.which("wine"):
+            raise rc.RecompError(f"{em.name} is a Windows program and runs here through Wine, which isn't installed. "
+                                 f"Install Wine (winehq.org) and try again, or use {em.website or 'the project site'}.")
+
+    def _wrap_in_wine(self, em, inst: rc.Installed) -> rc.Installed:
+        """A Windows program installed on Linux: keep the files, and record a launcher that starts it with Wine."""
+        live = Path(inst.folder)
+        exe = inst.exe_path()
+        launcher = live / LAUNCHER
+        launcher.write_text('#!/bin/sh\n# Start the Windows program with Wine.\n'
+                            f'cd "$(dirname "$0")" || exit 1\nexec wine {shlex.quote(exe.relative_to(live).as_posix())} "$@"\n')
+        launcher.chmod(0o755)
+        wrapped = rc.Installed(em.id, inst.version, inst.folder, launcher.name, inst.when, inst.linked, inst.stamp)
+        self.store.set_installed(wrapped)
+        return wrapped
 
     def find_exe(self, live: Path, em) -> Path | None:
         return locate_exe(live, em)
@@ -1092,7 +1383,7 @@ def status_text(em: Emulator, inst: rc.Installed | None, latest) -> tuple[str, s
 
 # ---- forks: community builds the person adds under an emulator ---------------------------------------------------
 def forks_manifest() -> Path:
-    return APP_DIR / "distill_forks.json"  # written by the app (Add fork / Remove fork); kept apart from the hand-edited catalog
+    return paths.config_dir() / "distill_forks.json"  # written by the app (Add fork / Remove fork); kept apart from the hand-edited catalog
 
 
 def parse_repo(text: str) -> str:
@@ -1141,12 +1432,13 @@ def make_fork(parent: Emulator, repo: str, name: str = "", description: str = ""
     default = f"{parent.name} ({owner})" if norm(rname) == norm(parent.name) else f"{parent.name} - {owner}-{rname}"
     shown = (name or "").strip() or f"{parent.name} ({owner})"
     permitted = known or accepted
+    linux = dict(hosts=(), flatpak="", build="", wine=False) if rc.platform_key() == "linux" else {}
     return replace(
         parent, id=fork_id(parent.id, repo), name=shown, repo=repo, source="github", host="", adapter="", endpoint="", version_from="tag",
         asset=dict(asset or {}), exe=exe or parent.exe, website="", notes="" if permitted else "Confirm this author before installing.",
         trusted_owner=owner, channels=("stable", "nightly"), available=permitted, verify=False, aliases=(), also=(), parent=parent.id,
         description=(description or "").strip(), author_known=known, risk_accepted=accepted and not known,
-        folder=ILLEGAL_NAME_CHARS.sub("", default).strip(" ."))
+        folder=ILLEGAL_NAME_CHARS.sub("", default).strip(" ."), **linux)
 
 
 def load_forks(catalog: Iterable[Emulator], path: Path | None = None) -> list[Emulator]:
@@ -1186,7 +1478,7 @@ def _read_fork_entries(path: Path) -> list[dict]:
 
 
 def _write_fork_entries(path: Path, entries: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    paths.ensure_parent(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps({"forks": entries}, indent=2), encoding="utf-8")
     os.replace(tmp, path)
@@ -1215,6 +1507,8 @@ def remove_fork(fork: Emulator, path: Path | None = None) -> None:
 
 def auto_update_ok(em: Emulator) -> bool:
     """Whether 'Update all' may touch it. A fork by an author the person accepted by hand is only ever updated by a click."""
+    if rc.platform_key() == "linux" and em.build:
+        return False
     return not em.parent or em.author_known
 
 
@@ -1295,7 +1589,7 @@ def logo_url(em: Emulator) -> str:
 
 
 def logo_file(em: Emulator) -> Path:
-    return rc.root() / "logos" / (re.sub(r"[^a-z0-9._-]+", "-", em.id.lower()) + ".img")
+    return rc.cache_root() / "logos" / (re.sub(r"[^a-z0-9._-]+", "-", em.id.lower()) + ".img")
 
 
 def logo_source_file(em: Emulator) -> Path:
@@ -1313,7 +1607,7 @@ def logo_source(em: Emulator) -> str:
 
 def _set_logo_source(em: Emulator, source: str) -> None:
     try:
-        logo_source_file(em).parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(logo_source_file(em))
         logo_source_file(em).write_text(source)
     except OSError:
         pass
@@ -1378,7 +1672,7 @@ def fetch_logo_best(em: Emulator, sgdb_key: str = "", fetch: Callable[[str], byt
     if not data or len(data) > LOGO_MAX:
         return None
     try:
-        logo_file(em).parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(logo_file(em))
         logo_file(em).write_bytes(data)
     except OSError:
         return None
@@ -1403,7 +1697,7 @@ def fetch_logo(em: Emulator, fetch: Callable[[str], bytes] | None = None) -> Pat
     if not data or len(data) > LOGO_MAX or not (magic.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8")) or (magic[:4] == b"RIFF" and magic[8:12] == b"WEBP")):
         return None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_parent(path)
         path.write_bytes(data)
     except OSError:
         return None

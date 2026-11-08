@@ -52,7 +52,9 @@ class CrashLogTests(TempDirTest):
         self.assertNotIn("error number 0\n", text)
 
     def test_unwritable_folder_returns_none_instead_of_raising(self):
-        with mock.patch.object(crashlog, "CRASH_FILE", self.tmp / "no" / "such" / "dir" / "c.txt"):
+        blocker = self.tmp / "blocker"
+        blocker.write_text("not a directory")
+        with mock.patch.object(crashlog, "CRASH_FILE", blocker / "c.txt"):
             self.assertIsNone(crashlog.record(*boom()))
 
     def test_install_records_calls_back_and_survives_a_failing_callback(self):

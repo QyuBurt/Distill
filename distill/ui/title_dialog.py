@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
-from ..constants import APP_DIR
+from .. import paths
 from ..iconfinder import find_icon, IconHit, IconLookupError, sgdb_key
 from ..models import fmt_size
 from ..switchconv import clean_name, find_image, TitleEdit, TitleEntry
@@ -22,7 +22,7 @@ from .theme import T
 
 IMAGE_FILTER = "Pictures (*.png *.jpg *.jpeg *.dat);;All files (*)"
 ICON_SIDE = 240
-ICON_CACHE = APP_DIR / "icon_cache"  # pictures found online are kept here, so a run can use them later
+ICON_CACHE = paths.cache_dir() / "icon_cache"  # pictures found online are kept here, so a run can use them later
 
 
 class TitleDialog(QDialog):
@@ -209,7 +209,7 @@ class TitleDialog(QDialog):
 
     def _take_online_icon(self, data: bytes, hit: IconHit) -> None:
         try:
-            ICON_CACHE.mkdir(parents=True, exist_ok=True)
+            paths.ensure_dir(ICON_CACHE)
             ext = ".png" if data[:4] == b"\x89PNG" else ".jpg"
             path = ICON_CACHE / f"{hit.file_stem}{ext}"
             path.write_bytes(data)

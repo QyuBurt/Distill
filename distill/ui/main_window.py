@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..constants import APP_DIR, APP_NAME, APP_VERSION, RVZ_MAX_LEVEL
+from .. import paths
+from ..constants import APP_NAME, APP_VERSION, RVZ_MAX_LEVEL
 from ..downloads import DownloadRunner, load_logins, LOGINS
 from ..netrules import load_rules
 from ..ytdlp import load_settings as load_ytdlp_settings
@@ -176,7 +177,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._build_ui()
         self._apply_theme()
         self._dl_restore_session()
-        self._first_run = not persist.SETTINGS_FILE.exists() and not any(APP_DIR.glob("distill_*.json"))
+        self._first_run = not persist.SETTINGS_FILE.exists() and not any(
+            file for directory in (paths.config_dir(), paths.state_dir()) for file in directory.glob("distill_*.json"))
         self._settings_restore()
         QTimer.singleShot(600, self._maybe_whats_new)
         QTimer.singleShot(2500, self._update_check_start)  # asks GitHub in the background; prompts only if a newer release exists

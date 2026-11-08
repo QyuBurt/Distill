@@ -24,7 +24,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="distill_feat_")).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
-        patcher = mock.patch.object(organize, "APP_DIR", self.root / "_app")
+        patcher = mock.patch.object(organize.paths, "state_dir", return_value=self.root / "_app")
         (self.root / "_app").mkdir()
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -306,7 +306,7 @@ class OrgPageTests(unittest.TestCase):
         self.assertEqual(orgpages.scan_page(page, Path("."), True, {}, threading.Event()), ([], "note", "solo"))
 
     def test_one_undo_covers_the_whole_page(self):
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(organize, "APP_DIR", Path(td)):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(organize.paths, "state_dir", return_value=Path(td)):
             self.assertIsNone(orgpages.newest_undo_step(["tidy", "multi", "playlists"]))
             organize._save_undo("tidy", [{"name": "n", "ops": []}], "2026-01-01T10:00:00.000000")
             organize._save_undo("playlists", [{"name": "n", "ops": []}], "2026-01-02T10:00:00.000000")

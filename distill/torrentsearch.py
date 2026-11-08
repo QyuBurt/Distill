@@ -21,7 +21,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .constants import APP_DIR
+from . import paths
+from .constants import APP_DIR as APP_DIR  # retained for callers using the legacy app location
 from .downloads import describe_error, http_open, LOGINS, opener_for, USER_AGENT
 
 # Public sources. Tuples, so a mirror can be added without touching the code that uses them.
@@ -29,7 +30,7 @@ KNABEN_URLS = ("https://api.knaben.org/v1", "https://api.knaben.eu/v1")  # an ag
 TORRENTS_CSV_URLS = ("https://torrents-csv.com",)  # open-source torrent database (also a Prowlarr indexer)
 
 TRACKERS_URL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
-TRACKERS_FILE = APP_DIR / "distill_trackers.txt"  # the last copy of that list that was downloaded
+TRACKERS_FILE = paths.cache_dir() / "distill_trackers.txt"  # the last copy of that list that was downloaded
 TRACKERS_MAX_AGE = 7 * 24 * 3600  # seconds before it is fetched again
 MAGNET_TRACKERS = 8  # how many trackers a magnet we build carries (DHT does the rest)
 # Used until the list above has been fetched once (and whenever it can't be).
@@ -139,6 +140,7 @@ def refresh_trackers() -> None:
         with http_open(TRACKERS_URL, timeout=10) as resp:
             text = resp.read(256 * 1024).decode("utf-8", "replace")
         if len(parse_trackers(text)) >= 3:
+            paths.ensure_parent(TRACKERS_FILE)
             TRACKERS_FILE.write_text(text, encoding="utf-8")
 
 

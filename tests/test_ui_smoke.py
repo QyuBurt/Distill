@@ -15,12 +15,19 @@ except ImportError:  # pragma: no cover
 if sys.platform != "win32":  # Windows' offscreen plugin has no fonts and can crash; the normal one works without showing windows
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from distill import soundtracks as st
-from tests.helpers import IsolatedSoundtrackFiles
+from tests.helpers import IsolatedSoundtrackFiles, WindowTestCase
 from tests import helpers  # noqa: E402,F401
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class WindowSmokeTests(IsolatedSoundtrackFiles):
+class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
+    def setUp(self):
+        # Slots invoked after construction can also start cover/network workers.
+        workers = mock.patch("threading.Thread.start", lambda self: None)
+        workers.start()
+        self.addCleanup(workers.stop)
+        super().setUp()
+
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -34,6 +41,40 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         with mock.patch.object(tools.ToolManager, "run", lambda self: None, create=True), \
                 mock.patch("threading.Thread.start", lambda self: None):  # no network, no background workers
             return DistillWindow()
+
+    def test_close_keeps_production_hard_exit_local_to_the_window_module(self):
+        from distill.ui import main_window
+        real_exit = os._exit
+        win = self.make_window()
+        with mock.patch.object(main_window, "os", wraps=os) as local_os:
+            local_os._exit = mock.Mock()
+            win.close()
+            local_os._exit.assert_called_once_with(0)
+            self.assertIs(os._exit, real_exit)
+
+    def test_window_fixture_intercepts_exit_without_patching_global_os(self):
+        from distill.ui import main_window
+        self.assertIsNot(main_window.os, os)
+        self.assertIs(main_window.os._exit, self.window_exit)
+        self.make_window().close()
+        self.window_exit.assert_called_once_with(0)
+
+    def test_window_theme_bindings_return_to_baseline(self):
+        from distill.ui.theme import T
+        import shiboken6
+
+        baseline = sum(shiboken6.isValid(ref()) for ref, _ in T._bound.values() if ref() is not None)
+        bound_baseline = len(T._bound)
+        for _ in range(3):
+            win = self.make_window()
+            with mock.patch("distill.ui.main_window.os", wraps=os) as local_os:
+                local_os._exit = mock.Mock()
+                win.close()
+            # Exercise the same teardown the fixture uses between tests.
+            self.cleanup_widgets()
+            live = sum(shiboken6.isValid(ref()) for ref, _ in T._bound.values() if ref() is not None)
+            self.assertEqual(live, baseline)
+            self.assertEqual(len(T._bound), bound_baseline)
 
     def test_window_builds_with_every_page(self):
         win = self.make_window()
@@ -94,7 +135,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_rc_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             self.assertIn("recomps", win.pages)
@@ -129,7 +171,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_em_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             self.assertIn("emus", win.pages)
@@ -163,6 +206,253 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
                 self.assertEqual(win.emd_remove.text(), "Unlink")
                 self.assertIsNotNone(em)
 
+    def test_linux_source_build_requires_a_folder_and_the_result_is_discoverable(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_source_ui_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(root / "state.json")
+        e = em.Emulator("ares", "ares", "Multi", repo="ares-emulator/ares", build="ares", exe=r"(^|/)ares$")
+        win._em_by_id = {e.id: e}
+        win._em_current = e.id
+        win._em_latest[e.id] = (rc.Release("source", "ares", "", "", False, "", ()), {})
+
+        def completed_build(key, live, version):
+            exe = live / "bin/ares"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"\x7fELF" + b"\0" * 64)
+            exe.chmod(0o755)
+            return live / "build-from-source.sh"
+
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.builds, "start", side_effect=completed_build) as start, \
+                mock.patch.object(emulator_page.QMessageBox, "information") as info:
+            win._em_build_from_source()
+            start.assert_not_called()
+            self.assertIn("Choose an Emulators folder", info.call_args.args[2])
+            em.set_emulators_root(win.em_store, root / "Emulators")
+            win._em_build_from_source()
+            start.assert_called_once()
+            self.assertEqual(start.call_args.args[2], "")
+            self.assertIn("Find installed", info.call_args.args[2])
+            with mock.patch.object(em, "default_roots", return_value=[]):
+                found = em.scan_all(win.em_store, [e], "linux")
+            self.assertIn(e.id, found)
+            em.apply_scan(win.em_store, found)
+            self.assertEqual(win.em_store.installed(e.id).exe_path(), root / "Emulators/ares/bin/ares")
+
+    def test_refused_linux_source_build_cannot_start_from_detail_or_card(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_refused_build_")
+        self.addCleanup(td.cleanup)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(Path(td.name) / "state.json")
+        entry = em._emulator({"id": "kytyps5", "name": "KytyPS5", "repo": "KytyPS5/KytyPS5",
+                              "trusted_owner": "KytyPS5", "build": "ares"}, "linux")
+        self.assertFalse(entry.available)
+        win._em_catalog = [entry]
+        win._em_by_id = {entry.id: entry}
+        win._em_latest[entry.id] = (rc.Release("source", "source", "", "", False, "", ()),
+                                   {"name": "built from source", "url": "", "size": 0})
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.builds, "start") as start, \
+                mock.patch.object(em.EmulatorInstaller, "live_for") as live, \
+                mock.patch.object(emulator_page.QMessageBox, "warning") as warning, \
+                mock.patch.object(emulator_page.QMessageBox, "information") as info, \
+                mock.patch.object(win, "_em_start_install") as download:
+            win._em_show_detail(entry.id)
+            self.assertTrue(win.emd_build.isHidden())
+            self.assertFalse(win.emd_main.isEnabled())
+            win._em_build_from_source()
+            self.assertEqual(warning.call_args.args[2], entry.notes)
+            warning.reset_mock()
+            win._em_card_action(entry.id, "update")
+            self.assertEqual(warning.call_args.args[2], entry.notes)
+            start.assert_not_called()
+            live.assert_not_called()
+            download.assert_not_called()
+            info.assert_not_called()
+
+    def test_linux_source_builds_are_excluded_from_card_and_bulk_download_updates(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_source_updates_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(root / "state.json")
+        exe = root / "ares"
+        exe.write_bytes(b"\x7fELF")
+        e = em.Emulator("ares", "ares", "Multi", repo="ares-emulator/ares", build="ares")
+        win.em_store.set_installed(rc.Installed(e.id, "v1", str(root), exe.name))
+        win._em_catalog = [e]
+        win._em_by_id = {e.id: e}
+        win._em_latest = {e.id: (rc.Release("v2", "v2", "", "", False, "", ()), {"url": ""})}
+        card = mock.Mock()
+        win.em_cards = {e.id: card}
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.QMessageBox, "question") as question:
+            self.assertEqual(win._em_updatable(), [])
+            win._em_apply_card(e)
+            self.assertFalse(card.apply.call_args.kwargs["can_update"])
+            win._em_update_all()
+            question.assert_not_called()
+            with mock.patch.object(win, "_em_show_detail") as detail, \
+                    mock.patch.object(win, "_em_build_from_source") as build, \
+                    mock.patch.object(win, "_em_start_install") as download:
+                win._em_card_action(e.id, "update")
+            detail.assert_called_once_with(e.id)
+            build.assert_called_once()
+            download.assert_not_called()
+
+    def test_linux_linked_and_scanned_project64_launches_through_wine_without_changing_ownership(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_linked_wine_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name) / "Emulators"
+        root.mkdir()
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(Path(td.name) / "state.json")
+        em.set_emulators_root(win.em_store, root)
+        e = em.Emulator("project64", "Project64", "Nintendo 64", wine=True, exe=r"(^|/)Project64\.exe$")
+        win._em_by_id = {e.id: e}
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(em.shutil, "which", return_value="/usr/bin/wine"):
+            for source, linked in (("link", "file"), ("scan", "folder")):
+                with self.subTest(source=source):
+                    folder = root if source == "link" else root / "Project64"
+                    folder.mkdir(exist_ok=True)
+                    exe = folder / "Project64.exe"
+                    exe.write_bytes(b"MZ")
+                    save = folder / "keep.sav"
+                    save.write_bytes(b"user save")
+                    if source == "link":
+                        em.link(win.em_store, e, exe, "linux")
+                    else:
+                        with mock.patch.object(em, "default_roots", return_value=[]):
+                            em.apply_scan(win.em_store, em.scan_all(win.em_store, [e], "linux"))
+                    installed = win.em_store.installed(e.id)
+                    self.assertEqual(installed.linked, linked)
+                    before = sorted(folder.iterdir())
+                    with mock.patch.object(em.subprocess, "Popen") as process:
+                        win._em_launch_id(e.id)
+                    self.assertEqual(process.call_args.args[0], ["wine", str(exe)])
+                    self.assertEqual(process.call_args.kwargs["cwd"], str(folder))
+                    self.assertEqual(win.em_store.installed(e.id), installed)
+                    self.assertEqual(sorted(folder.iterdir()), before)
+                    self.assertFalse((folder / em.LAUNCHER).exists())
+                    em.uninstall(win.em_store, e)
+                    self.assertEqual(exe.read_bytes(), b"MZ")
+                    self.assertEqual(save.read_bytes(), b"user save")
+
+    def owned_flatpak_window(self):
+        import queue
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_remove_flatpak_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.ui_q = queue.Queue()
+        win._em_store = rc.Store(root / "state.json")
+        em.set_emulators_root(win.em_store, root / "Emulators")
+        e = em.Emulator("mame", "MAME", "Arcade", flatpak="org.mamedev.MAME")
+        live = root / "Emulators/MAME"
+        live.mkdir(parents=True)
+        (live / em.LAUNCHER).write_text("#!/bin/sh\n")
+        save = live / "keep.sav"
+        save.write_bytes(b"user save")
+        installed = rc.Installed(e.id, "0.289", str(live), em.LAUNCHER)
+        win.em_store.data["flatpak_installs"] = {e.id: {"app": e.flatpak, "owned": True}}
+        win.em_store.set_installed(installed)
+        win._em_catalog = [e]
+        win._em_by_id = {e.id: e}
+        win._em_current = e.id
+        win.em_views.setCurrentIndex(1)
+        return win, e, installed, save
+
+    def test_owned_flatpak_removal_uses_a_guarded_worker_and_delivers_success_or_failure(self):
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        for fail in (True, False):
+            with self.subTest(failure=fail):
+                win, e, installed, save = self.owned_flatpak_window()
+                result = mock.Mock(returncode=1 if fail else 0, stderr=b"locked" if fail else b"", stdout=b"")
+                with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                        mock.patch.object(emulator_page.QMessageBox, "question", return_value=emulator_page.QMessageBox.StandardButton.Yes) as question, \
+                        mock.patch.object(emulator_page.threading, "Thread") as worker, \
+                        mock.patch.object(em, "uninstall", wraps=em.uninstall) as uninstall, \
+                        mock.patch.object(em.subprocess, "run", return_value=result), \
+                        mock.patch.object(win, "_em_say", wraps=win._em_say) as say:
+                    win._em_remove()
+                    uninstall.assert_not_called()
+                    worker.assert_called_once_with(target=win._em_start_remove, args=(e,), daemon=True)
+                    worker.return_value.start.assert_called_once()
+                    self.assertFalse(win.emd_remove.isEnabled())
+                    self.assertFalse(win.emd_main.isEnabled())
+                    win._em_remove()
+                    win._em_begin_install(e)
+                    worker.assert_called_once()
+                    question.assert_called_once()
+                    self.assertFalse(win._em_busy[e.id].is_set())
+                    say.reset_mock()
+                    worker.call_args.kwargs["target"](*worker.call_args.kwargs["args"])
+                    say.assert_not_called()  # Workers queue results instead of touching Qt widgets.
+                    self.assertIn(e.id, win._em_busy)
+                    event = win.ui_q.get_nowait()
+                    self.assertEqual(event[0], "emu_removed")
+                    win._em_event(event)
+                    self.assertNotIn(e.id, win._em_busy)
+                    self.assertNotIn(e.id, win._em_removing)
+                    self.assertNotIn(e.id, win._em_prog)
+                    if fail:
+                        self.assertIn("locked", win.emd_msg.text())
+                        self.assertTrue(win.emd_remove.isEnabled())
+                        self.assertEqual(rc.Store(win.em_store.path).installed(e.id), installed)
+                        self.assertTrue(win.em_store.data["flatpak_installs"][e.id]["owned"])
+                        self.assertEqual(save.read_bytes(), b"user save")
+                    else:
+                        self.assertEqual(win.emd_msg.text(), "Uninstalled.")
+                        self.assertIsNone(rc.Store(win.em_store.path).installed(e.id))
+                        self.assertFalse(installed.exe_path().exists())
+
+    def test_windows_flatpak_removal_retains_the_existing_synchronous_path(self):
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        win, e, _installed, _save = self.owned_flatpak_window()
+        with mock.patch.object(rc, "platform_key", return_value="windows"), \
+                mock.patch.object(emulator_page.QMessageBox, "question", return_value=emulator_page.QMessageBox.StandardButton.Yes), \
+                mock.patch.object(emulator_page.threading, "Thread") as worker, \
+                mock.patch.object(em, "uninstall", wraps=em.uninstall) as uninstall:
+            win._em_remove()
+        uninstall.assert_called_once_with(win.em_store, e)
+        worker.assert_not_called()
+        self.assertEqual(win.emd_msg.text(), "Uninstalled.")
+
     def test_emulators_page_shows_compact_tiles_by_default_and_can_switch_to_cards(self):
         import tempfile
         from pathlib import Path
@@ -172,7 +462,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_em_view_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
             win = self.make_window()
             self.addCleanup(win.close)
             with mock.patch("threading.Thread.start", lambda self: None):
@@ -238,7 +529,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         td = tempfile.TemporaryDirectory(prefix="distill_fork_ui_")
         self.addCleanup(td.cleanup)
-        with mock.patch.object(rc, "ROOT", Path(td.name)), mock.patch.object(em, "forks_manifest", lambda: Path(td.name) / "forks.json"):
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)), \
+                mock.patch.object(em, "forks_manifest", lambda: Path(td.name) / "forks.json"):
             win = self.make_window()
             self.addCleanup(win.close)
             with mock.patch("threading.Thread.start", lambda self: None):
@@ -417,7 +710,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         from PySide6.QtCore import Qt
 
         self.assertEqual(dlg.list.item(0).data(Qt.ItemDataRole.UserRole), "sound")
-        self.assertIn("Ctrl+1", win.nav_items["chd"].toolTip())
+        from PySide6.QtGui import QShortcut
+        # CHD is no longer the first sidebar page; verify its actual shortcut.
+        shortcuts = {s.key().toString(): s for s in win.findChildren(QShortcut)}
+        self.assertIn("Ctrl+5", shortcuts)
+        self.assertIn("Ctrl+5", win.nav_items["chd"].toolTip())
 
     def test_title_shows_progress_while_running_and_settings_search_filters(self):
         win = self.make_window()
@@ -463,8 +760,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_start_button_drifts_only_while_running_and_holds_when_paused(self):
         win = self.make_window()
         self.addCleanup(win.close)
+        win._show_page("chd")  # the landing page hides the run panel
         win.show()
         btn = win.start_btn
+        btn.setEnabled(True)  # tool-check workers are stubbed by this fixture
+        self.assertTrue(btn.isVisible())
         btn.set_state(True, False)
         self.assertTrue(btn._tick_timer.isActive())
         before = btn._phase
@@ -899,6 +1199,21 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertFalse(hasattr(win, "dl_extras"))
         self.assertIn("2 archive.org extras left out", win.dl_status.text())
 
+    def test_linux_format_filter_ignores_events_after_its_table_is_deleted(self):
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QTableView
+        import shiboken6
+        from distill.ui.ytdlp_picker import FormatRows
+
+        # Invoke the actual filter on a surviving Python wrapper, as Qt does during teardown.
+        table = QTableView()
+        rows = FormatRows.__new__(FormatRows)
+        QObject.__init__(rows)
+        rows.table = table
+        shiboken6.delete(table)
+        with mock.patch("distill.ui.ytdlp_picker.sys.platform", "linux"):
+            self.assertFalse(rows.eventFilter(rows, QEvent(QEvent.Type.Resize)))
+
     def test_a_video_row_opens_to_a_format_and_quality_choice(self):
         from distill import ytdlp
         from distill.downloads import RemoteFile
@@ -992,7 +1307,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win = self.make_window()
         self.addCleanup(win.close)
         win.show()
+        win.now_playing.show()  # playback normally reveals the sidebar player
         slider = win.now_playing._slider
+        self.assertTrue(slider.isVisible())
         slider.setRange(0, 1000)
         slider.setValue(400)
         slider.set_moving(True)
@@ -1076,8 +1393,11 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
             for _ in range(3):  # a scrollbar appearing changes the width once more
                 self.app.processEvents()
             scroll = win.settings_stack.widget(index)
-            self.assertLessEqual(scroll.widget().width(), scroll.viewport().width(), f"page {index} runs off the window")
-            widths.add(scroll.widget().width())
+            self.assertEqual(scroll.widget().width(), scroll.viewport().width(), f"page {index} runs off the window")
+            # A visible scrollbar consumes content space; compare the content
+            # width plus its actual scrollbar geometry, not the stack's width.
+            bar = scroll.verticalScrollBar()
+            widths.add(scroll.widget().width() + (bar.width() if bar.isVisible() else 0))
         self.assertEqual(len(widths), 1, f"settings pages differ in width: {sorted(widths)}")
 
     def test_romm_switch_changes_mode_and_keeps_the_description(self):
@@ -1161,26 +1481,26 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win._st_player.position.return_value = 0
         return win, album, files
 
-    def test_clicking_a_track_previews_it_and_clicking_again_stops(self):
+    def test_playing_a_track_previews_it_and_playing_again_stops(self):
         from distill.ui import soundtrack_page
 
         win, _album, _files = self._win_with_three_tracks()
         top, player = win.st_tree.topLevelItem(0), win._st_player
         self.assertEqual(top.child(0).data(0, soundtrack_page.URL_ROLE), "https://x/1")
-        win._st_item_clicked(top, 0)  # a game row is not a track: nothing plays
+        win._st_play_child(top)  # a game row is not a track: nothing plays
         player.play.assert_not_called()
-        win._st_item_clicked(top.child(1), 0)
+        win._st_play_child(top.child(1))
         self.assertEqual(player.setSource.call_args[0][0].toString(), "https://x/2")
         self.assertEqual((win._st_index, len(win._st_queue)), (1, 3))  # the whole album is the queue
         self.assertTrue(win.now_playing.isVisibleTo(win))
-        win._st_item_clicked(top.child(1), 0)  # the same track again stops
+        win._st_play_child(top.child(1))  # the same track again stops
         self.assertEqual(win._st_index, -1)
         self.assertFalse(win.now_playing.isVisibleTo(win))
 
     def test_sidebar_player_steps_through_the_album(self):
         win, _album, _files = self._win_with_three_tracks()
         top, player = win.st_tree.topLevelItem(0), win._st_player
-        win._st_item_clicked(top.child(0), 0)
+        win._st_play_child(top.child(0))
         win.now_playing.skipForward.emit()
         self.assertEqual(win._st_index, 1)
         self.assertEqual(player.setSource.call_args[0][0].toString(), "https://x/2")
@@ -1202,7 +1522,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         win, _album, _files = self._win_with_three_tracks()
         player = win._st_player
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(0), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(0))
         player.playbackState.return_value = QMediaPlayer.PlaybackState.PlayingState
         win.now_playing.togglePlay.emit()
         player.pause.assert_called_once()
@@ -1215,16 +1535,24 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(win._st_index, -1)
 
     def test_playback_carries_on_when_the_tracklist_is_rebuilt_or_searched_again(self):
-        from distill.ui import soundtrack_page
-
         win, album, files = self._win_with_three_tracks()
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(0), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(0))
         with mock.patch("threading.Thread.start", lambda self: None):
             win._st_search()  # clears the tree, but the queue is plain data
         self.assertEqual(win._st_index, 0)
         win._st_on_found(0, __import__("distill.soundtracks", fromlist=["x"]).GameResult(win._st_rows[0].result.request, [album]))
         win._st_on_tracks(0, album, files, "")
-        self.assertIs(win.st_tree.topLevelItem(0).child(0).icon(0).isNull(), False)
+        win._show_page("sound")
+        win.show()
+        top = win.st_tree.topLevelItem(0)
+        win.st_tree.expandItem(top)  # itemExpanded attaches and synchronises the lazy track rows
+        self.app.processEvents()
+        child = top.child(0)
+        row = win.st_tree.itemWidget(child, 0)
+        self.assertIsNotNone(row)
+        self.assertTrue(row._current)
+        row.play._anim.setCurrentTime(row.play._anim.duration())
+        self.assertTrue(row.play.playing)  # the embedded play button now carries this state
         self.assertEqual(win._st_url_playing(), "https://x/1")
 
     def test_cover_art_is_fetched_cached_and_shown_on_the_card(self):
@@ -1234,14 +1562,14 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         win, album, files = self._win_with_three_tracks()
         album.art = "https://archive.org/services/img/p5"
-        win._st_on_tracks(0, album, files, "")  # rebuild so the rows carry the cover address
-        top = win.st_tree.topLevelItem(0)
-        self.assertEqual(top.child(0).data(0, soundtrack_page.ART_ROLE), album.art)
         started = []
         with mock.patch("threading.Thread.start", lambda self: started.append(self._args)):
-            win._st_item_clicked(top.child(0), 0)
-            win._st_item_clicked(top.child(0), 0)  # stops
-            win._st_item_clicked(top.child(1), 0)  # same album again: still one fetch in flight
+            win._st_on_tracks(0, album, files, "")  # rebuilding also requests the album cover
+            top = win.st_tree.topLevelItem(0)
+            self.assertEqual(top.child(0).data(0, soundtrack_page.ART_ROLE), album.art)
+            win._st_play_child(top.child(0))
+            win._st_play_child(top.child(0))  # stops
+            win._st_play_child(top.child(1))  # same album again: still one fetch in flight
         self.assertEqual(started, [(album.art,)])
         self.assertTrue(win.now_playing._art.isVisibleTo(win.now_playing))  # the placeholder while it loads
         pix = QPixmap(40, 20)
@@ -1254,22 +1582,23 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertIn(album.art, win._st_art_cache)
         self.assertFalse(win.now_playing._art.pixmap().isNull())
         with mock.patch("threading.Thread.start", lambda self: started.append("again")):
-            win._st_item_clicked(top.child(2), 0)  # cached: shown at once, nothing fetched
+            win._st_play_child(top.child(2))  # cached: shown at once, nothing fetched
         self.assertEqual(len(started), 1)
         self.assertFalse(win.now_playing._art.pixmap().isNull())
 
     def test_failed_cover_fetch_hides_the_placeholder_and_tracks_without_art_show_none(self):
         win, album, files = self._win_with_three_tracks()
         album.art = "https://archive.org/services/img/gone"
-        win._st_on_tracks(0, album, files, "")
-        top = win.st_tree.topLevelItem(0)
         with mock.patch("threading.Thread.start", lambda self: None):
-            win._st_item_clicked(top.child(0), 0)
+            # Rebuilding the album requests its cover before playback begins.
+            win._st_on_tracks(0, album, files, "")
+            top = win.st_tree.topLevelItem(0)
+            win._st_play_child(top.child(0))
         win._st_on_art(album.art, b"")  # the fetch came back empty
         self.assertFalse(win.now_playing._art.isVisibleTo(win.now_playing))
         album.art = ""
         win._st_on_tracks(0, album, files, "")
-        win._st_item_clicked(win.st_tree.topLevelItem(0).child(1), 0)
+        win._st_play_child(win.st_tree.topLevelItem(0).child(1))
         self.assertFalse(win.now_playing._art.isVisibleTo(win.now_playing))
 
     def test_now_playing_widget_reports_clicks_and_shows_state(self):
@@ -1304,7 +1633,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.addCleanup(win.close)
         win._show_page("sound")
         self.assertEqual(win._current_mode(), "dl")
-        self.assertEqual(win.start_btn.text(), "Start Download")
+        self.assertEqual(win.start_btn.text(), "Save Selected Soundtracks")
 
     def test_fixed_height_text_boxes_do_not_make_their_cards_grow(self):
         """A fixed-height text box that still has an expanding size policy makes its card claim the page's spare
@@ -1381,9 +1710,12 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_run_buttons_start_in_the_right_state(self):
         win = self.make_window()
         self.addCleanup(win.close)
-        self.assertTrue(win.start_btn.isEnabled())
+        self.assertFalse(win.start_btn.isEnabled())  # waiting for the stubbed tool checks
         self.assertFalse(win.pause_btn.isEnabled())
         self.assertFalse(win.stop_btn.isEnabled())
+        for key in tuple(win._pending_tools):
+            win._tool_ready(key)
+        self.assertTrue(win.start_btn.isEnabled())
 
     def test_converter_pages_are_compact_and_list_pages_are_not(self):
         win = self.make_window()
@@ -1665,6 +1997,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
 
         host = QWidget()
         host.resize(300, 200)
+        host.show()  # the real app's host is visible before UpdateScreen grabs it
+        self.app.processEvents()
         self.addCleanup(host.close)
         self.addCleanup(setattr, veil_mod.motion.Motion, "reduce", veil_mod.motion.Motion.reduce)
         veil_mod.motion.Motion.reduce = True  # no fades: the veil is there and gone at once
