@@ -14,7 +14,13 @@ docker run --platform linux/amd64 --rm -v "${here}:/src" -w /src "${image}" bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip file curl ca-certificates libegl1 libopengl0 libxkbcommon0 libdbus-1-3 >/dev/null
+glib=libglib2.0-0t64
+apt-cache show "$glib" >/dev/null 2>&1 || glib=libglib2.0-0
+apt-get install -y -qq python3 python3-venv python3-pip file curl ca-certificates \
+    libegl1 libopengl0 libxkbcommon0 libdbus-1-3 "$glib" libfontconfig1 libfreetype6 libpulse0 libgl1 \
+    libx11-6 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+    libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 \
+    libwayland-client0 libwayland-cursor0 libwayland-egl1 >/dev/null
 python3 -m venv /venv
 /venv/bin/pip install -q --upgrade pip
 /venv/bin/pip install -q -r requirements.txt "pyinstaller>=6.6"
@@ -22,6 +28,10 @@ echo "== tests =="
 QT_QPA_PLATFORM=offscreen /venv/bin/python tests/ci_unittest.py --timeout 180 -- /venv/bin/python -m unittest discover -s tests -t .
 echo "== PyInstaller =="
 /venv/bin/pyinstaller --noconfirm distill-linux.spec >/tmp/pyi.log 2>&1 || { tail -30 /tmp/pyi.log; exit 1; }
+if [[ ! -f dist/Distill/_internal/PySide6/Qt/plugins/platforms/libqoffscreen.so ]]; then
+    echo "ERROR: Qt platform plugins are missing; check build dependencies and /tmp/pyi.log for failed to obtain Qt library info." >&2
+    exit 1
+fi
 echo "== AppImage =="
 curl -sL -o /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 chmod +x /tmp/appimagetool

@@ -71,8 +71,16 @@ bash packaging/build-in-docker.sh
 The container installs its own dependencies and leaves the AppImage and checksum sidecar in the repository root.
 It always targets `linux/amd64`. ARM hosts, including Apple Silicon Macs, require Docker's amd64 emulation.
 Tests must pass before it builds. Set `DISTILL_BUILD_IMAGE` to select a different Ubuntu-compatible base image.
+The script automatically selects the GLib package available in that image.
 
-To build manually, install the requirements and PyInstaller in your build environment, then run:
+To build manually, install the requirements, PyInstaller and the Qt shared libraries listed in
+`packaging/build-in-docker.sh` (including GLib/libgthread, Fontconfig, FreeType, PulseAudio, OpenGL, X11/XCB
+and Wayland). Manual builds use `libglib2.0-0t64` on Ubuntu 24.04 and `libglib2.0-0` on older Ubuntu releases.
+Without these libraries, PyInstaller's PySide6 hook can silently
+produce a bundle with no Qt platform plugins. Its warning `failed to obtain Qt library info` means the hook
+could not load Qt; install the missing libraries and rebuild before packaging the AppImage.
+
+Then run:
 
 ```bash
 pyinstaller --noconfirm distill-linux.spec
