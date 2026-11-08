@@ -15,6 +15,8 @@ Run `python -m distill.recomps hash <file>` to print the checksums a catalog ent
 """
 from __future__ import annotations
 
+import html as html_lib
+
 import hashlib
 import json
 import os
@@ -175,6 +177,221 @@ def load_catalog(paths: Iterable[Path] | None = None) -> list[Recomp]:
                 continue
             out[rc.id] = rc
     return sorted(out.values(), key=lambda r: (r.game.casefold(), r.name.casefold()))
+
+
+# ---- the player's own projects ----------------------------------------------------------------------------------
+CUSTOM_SOURCE = "Your own list"  # what the page says in "Listed by" for an entry from the player's own file
+CUSTOM_KINDS = {"Static recompilation": "Recomp", "Decompilation": "Decomp", "Source port": "Source port", "Engine remake": "Engine remake"}
+PLATFORM_NAMES = {"windows": "Windows", "linux": "Linux", "macos": "macOS"}
+
+
+def parse_repo(text: str) -> str:
+    """'owner/name' from a GitHub address or the short form. Anything else is an error in plain words."""
+    t = (text or "").strip()
+    t = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", t, flags=re.IGNORECASE)
+    parts = [p for p in t.split("?")[0].split("#")[0].split("/") if p]
+    if len(parts) < 2:
+        raise RecompError("Enter a GitHub address like github.com/owner/name, or owner/name.")
+    owner, name = parts[0], re.sub(r"\.git$", "", parts[1])
+    if not re.fullmatch(r"[\w.-]+", owner) or not re.fullmatch(r"[\w.-]+", name):
+        raise RecompError("That doesn't look like a GitHub repository.")
+    return f"{owner}/{name}"
+
+
+def is_custom(r: Recomp) -> bool:
+    return r.source == CUSTOM_SOURCE
+
+
+def custom_id(repo: str) -> str:
+    return "custom-" + _slug(repo.replace("/", "-"))
+
+
+def read_user_entries() -> list[dict]:
+    """The raw entries of the player's own file (hand-written overrides included), or [] when there is none or it is unreadable."""
+    try:
+        data = json.loads(user_catalog().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get("recomps", data) if isinstance(data, dict) else data
+    return [d for d in items if isinstance(d, dict)] if isinstance(items, list) else []
+
+
+def _write_user_entries(entries: list[dict]) -> None:
+    path = user_catalog()
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"recomps": entries}, indent=1, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        raise RecompError(f"Couldn't save your list: {exc}") from exc
+
+
+def save_user_entry(entry: dict) -> None:
+    """Add an entry to the player's own file, or replace the one with the same id. Everything else in the file is kept as it was."""
+    entries = read_user_entries()
+    for i, d in enumerate(entries):
+        if d.get("id") == entry["id"]:
+            entries[i] = entry
+            break
+    else:
+        entries.append(entry)
+    _write_user_entries(entries)
+
+
+def remove_user_entry(rid: str) -> bool:
+    entries = read_user_entries()
+    kept = [d for d in entries if d.get("id") != rid]
+    if len(kept) == len(entries):
+        return False
+    _write_user_entries(kept)
+    return True
+
+
+def _phrases(text: str) -> list[str]:
+    return [t for t in re.split(r"[;,\n]+", text or "") if t.strip()]
+
+
+def custom_entry(repo: str, name: str, game: str, system: str, *, kind: str = "Static recompilation", description: str = "", website: str = "",
+                 discord: str = "", platforms: Iterable[str] = (), setup: str = "", cover: str = "", asset: dict | None = None, exe: str = "",
+                 rom_names: str = "", rom_exts: str = "", rom_sha1: str = "", rom_note: str = "", rid: str = "") -> dict:
+    """One entry for the player's own file, checked. Raises RecompError in plain words for anything that would make a broken entry.
+    `rom_names` is phrases separated by ';' or newlines (each phrase's words must all appear in a dump's name); `rom_exts` and
+    `rom_sha1` are lists separated by spaces or commas."""
+    repo = parse_repo(repo)
+    name, game, system = name.strip(), game.strip(), system.strip()
+    if not name:
+        raise RecompError("Give the project a name.")
+    if not game:
+        raise RecompError("Say which game it plays.")
+    if not system:
+        raise RecompError("Say which console the game is for.")
+    for label, url in (("website", website), ("Discord", discord), ("cover image", cover)):
+        if url.strip() and not re.match(r"https?://\S+$", url.strip()):
+            raise RecompError(f"The {label} address must start with http:// or https://.")
+    plats = tuple(p for p in platforms if p in PLATFORM_NAMES) or tuple(PLATFORM_NAMES)
+    patterns = {p: v.strip() for p, v in (asset or {}).items() if p in PLATFORM_NAMES and v.strip()}
+    for label, pattern in [*((f"{PLATFORM_NAMES[p]} file", v) for p, v in patterns.items()), ("program", exe.strip())]:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise RecompError(f"The {label} pattern isn't valid: {exc}.") from exc
+    sha1 = [s.lower() for s in re.split(r"[\s,;]+", rom_sha1.strip()) if s]
+    if bad := [s for s in sha1 if not re.fullmatch(r"[0-9a-f]{40}", s)]:
+        raise RecompError(f"'{bad[0]}' isn't a SHA-1 (40 letters and digits, 0-9 and a-f).")
+    exts = [("." + e.lstrip(".")).lower() for e in re.split(r"[\s,;]+", rom_exts.strip()) if e.strip(".")]
+    rom = {k: v for k, v in (("names", [n.split() for n in _phrases(rom_names) if n.split()]), ("exts", exts), ("sha1", sha1),
+                             ("note", rom_note.strip())) if v}
+    entry = {"id": rid or custom_id(repo), "name": name, "game": game, "system": system, "repo": repo,
+             "description": description.strip(), "tags": [CUSTOM_KINDS[kind]] if kind in CUSTOM_KINDS else [],
+             "website": website.strip(), "discord": discord.strip(), "cover": cover.strip(),
+             "platforms": list(plats) if set(plats) != set(PLATFORM_NAMES) else [], "setup": setup.strip(),
+             "asset": patterns, "exe": exe.strip(), "rom": rom}
+    return {k: v for k, v in entry.items() if v or k in ("id", "name", "game", "system", "repo")}
+
+
+_KIND_WORDS = (("Static recompilation", ("static-recompilation", "static recompilation", "recompilation", "recomp", "recompiled")),
+               ("Decompilation", ("decompilation", "decomp", "decompiled")),
+               ("Source port", ("source-port", "source port")),
+               ("Engine remake", ("engine-remake", "engine remake", "reimplementation", "re-implementation")))
+_SYSTEM_WORDS = {"n64": "Nintendo 64", "nintendo-64": "Nintendo 64", "gamecube": "GameCube", "gc": "GameCube", "wii": "Wii", "snes": "SNES",
+                 "nes": "NES", "gba": "Game Boy Advance", "nds": "Nintendo DS", "3ds": "Nintendo 3DS", "psx": "PlayStation", "ps1": "PlayStation",
+                 "ps2": "PlayStation 2", "psp": "PSP", "dreamcast": "Dreamcast", "saturn": "Sega Saturn", "genesis": "Mega Drive",
+                 "megadrive": "Mega Drive", "xbox": "Xbox", "xbox360": "Xbox 360", "xbox-360": "Xbox 360"}
+
+
+def guess_kind(topics: Iterable[str], description: str) -> str:
+    """The kind of project a repository's topics (then its description) say it is, or ''."""
+    for text in ([t.lower() for t in topics], [description.lower()]):
+        for label, words in _KIND_WORDS:
+            if any(w in t for t in text for w in words):
+                return label
+    return ""
+
+
+def guess_system(topics: Iterable[str], description: str) -> str:
+    for t in topics:
+        t = t.lower()
+        if t in _SYSTEM_WORDS:
+            return _SYSTEM_WORDS[t]
+        if s := system_of_name(t.replace("-", " ")):
+            return s
+    for w in re.findall(r"[a-z0-9]+", description.lower()):
+        if w in _SYSTEM_WORDS:
+            return _SYSTEM_WORDS[w]
+    return ""
+
+
+@dataclass(slots=True)
+class RepoReport:
+    """What Distill could see about a repository before it is added to the player's own list."""
+    repo: str
+    error: str = ""
+    name: str = ""
+    game: str = ""
+    system: str = ""
+    kind: str = ""
+    description: str = ""
+    website: str = ""
+    stars: int = 0
+    archived: bool = False
+    pushed: str = ""
+    release: str = ""
+    released: str = ""
+    downloads: dict = field(default_factory=dict)  # platform -> (file name, size, release tag)
+    prerelease_only: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+
+def _pretty_name(repo_name: str) -> str:
+    words = re.sub(r"[-_.]+", " ", repo_name).strip()
+    return words if any(c.isupper() for c in words) else words.title()
+
+
+def inspect_repo(text: str, store: Store | None = None) -> RepoReport:
+    """Look at a repository for the Add recomp window: what it says it is, how active it is, and which of this app's platforms it
+    publishes a download for. Never raises: a problem comes back in `error`. Nothing is saved or downloaded."""
+    try:
+        repo = parse_repo(text)
+    except RecompError as exc:
+        return RepoReport(repo=str(text), error=str(exc))
+    rep = RepoReport(repo=repo)
+    try:
+        facts = json.loads(_get(f"https://api.github.com/repos/{repo}", store.token() if store else "", "application/vnd.github+json"))
+    except urllib.error.HTTPError as exc:
+        rep.error = ("That repository doesn't exist, or it is private." if exc.code == 404 else
+                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys."
+                     if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
+        return rep
+    except (urllib.error.URLError, OSError, ValueError):
+        rep.error = "Couldn't reach GitHub."
+        return rep
+    if isinstance(facts, dict):
+        rep.repo = str(facts.get("full_name") or repo)  # GitHub's own capitalisation
+        rep.description = str(facts.get("description") or "").strip()
+        rep.website = str(facts.get("homepage") or "").strip() if re.match(r"https?://", str(facts.get("homepage") or "")) else ""
+        rep.stars, rep.archived, rep.pushed = int(facts.get("stargazers_count") or 0), bool(facts.get("archived")), str(facts.get("pushed_at") or "")[:10]
+        topics = [str(t) for t in facts.get("topics") or []]
+        rep.name = _pretty_name(str(facts.get("name") or repo.split("/")[1]))
+        rep.kind, rep.system = guess_kind(topics, rep.description), guess_system(topics, rep.description)
+        rep.game = tidy_game(resolve_game(rep.name, rep.description, always=True))
+    try:
+        rels = releases(rep.repo, store, force=True)
+    except RecompError as exc:
+        rep.error = str(exc) if "rate-limiting" in str(exc) or "reach" in str(exc) else ""
+        return rep  # no releases yet is not an error: a new project can be added before its first build
+    probe = Recomp("probe", rep.name or repo, rep.game, rep.system, rep.repo)
+    for plat in PLATFORM_NAMES:
+        found = choose_release(rels, probe, plat, "arm64" if plat == "macos" else "x64")
+        if found:
+            rel, asset = found
+            rep.downloads[plat] = (asset["name"], int(asset.get("size") or 0), rel.tag)
+    if rels:
+        rep.release, rep.released = rels[0].tag, rels[0].published
+        rep.prerelease_only = all(r.prerelease for r in rels)
+    return rep
 
 
 # ---- extra catalogs: community lists and GitHub topic search ---------------------------------------------------
@@ -579,7 +796,7 @@ def build_catalog(sources: Iterable[str] = (), find_new: bool = False, force: bo
         if rid in base and more:
             base[rid] = replace(base[rid], others=base[rid].others + tuple(more))
     for r in load_catalog([user_catalog()]):
-        base[r.id] = r
+        base[r.id] = replace(r, source=r.source or CUSTOM_SOURCE)  # the player's own entries say so on their page, and can be edited there
     return sorted(base.values(), key=lambda r: (r.game.casefold(), r.name.casefold()))
 
 
@@ -1476,6 +1693,81 @@ def launchbox_covers(rc: Recomp) -> list[str]:
     return []
 
 
+_META_DESC = re.compile(r'<meta[^>]+(?:name|property)=["\'](?:og:)?description["\'][^>]*content=["\']([^"\']*)["\']'
+                        r'|<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:name|property)=["\'](?:og:)?description["\']', re.IGNORECASE)
+_LB_OVERVIEW_END = ("Developers", "Publishers", "Platform", "Genre", "Alternate Names", "Wikipedia", "Video", "Advertisement", "Media")
+OVERVIEW_TTL = 7 * 24 * 3600
+
+
+def _lb_overview(page: str) -> str:
+    """The Overview text on a LaunchBox game page, or ''. The page's description tag only holds the start of a long one, so the text
+    under the Overview heading is read first (up to the next labelled block); the description tag is the fallback."""
+    full = ""
+    if m := re.search(r"<h[1-6][^>]*>\s*Overview\b.*?</h[1-6]>(.*)", page, re.IGNORECASE | re.DOTALL):
+        section = m[1]
+        if cut := re.search(r"(?i)>\s*(?:Developers?|Publishers?|Genres?|Alternate Names|Also Known As|Wikipedia)\s*:?\s*<", section):
+            section = section[:max(0, section.rfind("<", 0, cut.start() + 1))]  # the facts table after the Overview (who made it, genre...) is not part of it
+        body = re.sub(r"(?i)<li\b[^>]*>", "\n\u2022 ", section)
+        body = re.sub(r"(?i)</?(?:p|br|li|ul|ol|div|section|h[1-6]|tr|td)\b[^>]*>", "\n", body)  # block tags end a line; inline ones don't
+        body = html_lib.unescape(re.sub(r"<[^>]+>", "", body))
+        kept: list[str] = []
+        for ln in (x.strip() for x in body.splitlines()):
+            if not ln or ln == "Edit":
+                continue
+            if ln.rstrip(":").strip() in _LB_OVERVIEW_END or re.match(r"(?i)(?:developers?|publishers?|genres?|alternate names|also known as)\b\s*:?\s*$", ln) \
+                    or (len(ln) < 120 and re.match(r"(?:Developers|Publishers)\s+\S", ln)):
+                break
+            kept.append(re.sub(r"^[*\u2022-]\s+", "\u2022 ", ln))
+        full = "\n\n".join(kept)
+    short = ""
+    if m := _META_DESC.search(page):
+        short = html_lib.unescape(m[1] or m[2] or "").strip()
+        short = re.sub(r"[ \t]*\*[ \t]+", "\n\n\u2022 ", short)  # the description tag runs bullets together as ' * item'
+    text = max((full.strip(), short), key=len)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text if len(text) >= 20 else ""
+
+
+def launchbox_overview(rc: Recomp, store: Store | None = None, force: bool = False) -> str:
+    """The LaunchBox Games Database Overview of the game a project plays, or '' when it has none (an engine remake of a
+    game nobody listed, say). Found the way covers are: the catalog's id, else a search checked for title and console.
+    Cached for a week, a miss too."""
+    key = f"lbov2:{rc.id}"
+    if store and not force and (hit := store.cache_get(key, OVERVIEW_TTL)) is not None:
+        return str(hit)
+
+    def read(ids: list[str]) -> str:
+        for gid in ids[:3]:
+            try:
+                page = _get(_LB_DETAIL + gid, timeout=15).decode("utf-8", "replace")
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            if text := _lb_overview(page):
+                return text
+        return ""
+    text, reached = "", False
+    if rc.launchbox_id:
+        text = read([rc.launchbox_id])
+    else:
+        platform = LB_PLATFORMS.get(rc.system, rc.system if rc.system != UNKNOWN_SYSTEM else "")
+        for title in _title_fallbacks(rc.game):
+            for q in _search_queries(title):
+                try:
+                    page = _get(_LB_SEARCH + urllib.parse.quote(q), timeout=15).decode("utf-8", "replace")
+                    reached = True
+                except (urllib.error.URLError, OSError, ValueError):
+                    continue
+                if ids := _lb_game_ids(page, title, platform):
+                    if text := read(ids):
+                        break
+                    break
+            if text:
+                break
+    if store and (text or reached or rc.launchbox_id):  # a miss is only remembered when the site answered
+        store.cache_put(key, text)
+    return text or (str(store.cache_stale(key) or "") if store else "")
+
+
 def image_size(data: bytes) -> tuple[int, int] | None:
     """(width, height) of a PNG, JPEG or GIF from its header, or None (WebP and anything odd)."""
     try:
@@ -1588,8 +1880,12 @@ def cover_source(rc: Recomp) -> str:
 
 def cover_settled(rc: Recomp, sgdb_key: str = "") -> bool:
     """True when the cached poster is as good as it will get: any poster with no SteamGridDB key, or one that came from
-    SteamGridDB (or that SteamGridDB has been asked about and has nothing for)."""
-    return cached_cover(rc) is not None and (not sgdb_key or cover_source(rc) in ("steamgriddb", "steamgriddb-miss"))
+    SteamGridDB (or that SteamGridDB has been asked about and has nothing for). A cover the person picked is final, and so
+    is the choice to have none: neither is ever looked up again."""
+    source = cover_source(rc)
+    if source == REMOVED_SRC:
+        return True
+    return cached_cover(rc) is not None and (not sgdb_key or source in ("steamgriddb", "steamgriddb-miss", CUSTOM_SRC))
 
 
 def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str = "") -> Path | None:
@@ -1600,6 +1896,8 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
     old = cached_cover(rc)
     if old and cover_settled(rc, sgdb_key):
         return old
+    if not old and not retry and cover_source(rc) == REMOVED_SRC:
+        return None  # the person took the cover off on purpose: not searched for again
     miss = art_dir() / f"{rc.id}.none"
     if not old and not retry and miss.exists() and time.time() - miss.stat().st_mtime < ART_RETRY:
         try:
@@ -1650,6 +1948,79 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
     if sgdb_key:
         _src_file(rc).write_text("steamgriddb-miss")
     return None
+
+
+# ---- a cover the person chooses ---------------------------------------------------------------------------------
+CUSTOM_SRC = "custom"  # the cached poster was picked in the Add / Edit window (SteamGridDB search or a file of their own)
+REMOVED_SRC = "removed"  # the person took the cover off: there is none, and none is looked for
+POSTER_SIZE = (600, 900)  # SteamGridDB's standard poster, 2:3. The Add / Edit window's empty poster has this shape
+
+
+def sgdb_games(term: str, key: str) -> list[dict]:
+    """Games on SteamGridDB that match a search, as {"id", "name", "verified"}, best first. [] for a blank search.
+    Raises SgdbBusy when SteamGridDB keeps saying 'too many requests', and urllib errors when it can't be reached."""
+    term = (term or "").strip()
+    if not term:
+        return []
+    found = _sgdb("/search/autocomplete/" + urllib.parse.quote(term, safe=""), key)
+    return [{"id": int(g["id"]), "name": str(g.get("name") or ""), "verified": bool(g.get("verified"))}
+            for g in found if isinstance(g.get("id"), int)][:12]
+
+
+def sgdb_grids(game_id: int, key: str) -> list[dict]:
+    """The portrait posters SteamGridDB has for one game, highest scored first: {"url", "thumb", "score", "author"}."""
+    grids = _sgdb(f"/grids/game/{int(game_id)}?dimensions={SGDB_DIMS}&types=static&nsfw=false&humor=false", key)
+    out = []
+    for g in sorted(grids, key=lambda x: -(x.get("score") or 0)):
+        url = g.get("url")
+        if isinstance(url, str) and url.startswith("http"):
+            thumb = g.get("thumb") if isinstance(g.get("thumb"), str) and str(g.get("thumb")).startswith("http") else url
+            author = g.get("author") if isinstance(g.get("author"), dict) else {}
+            out.append({"url": url, "thumb": thumb, "score": g.get("score") or 0, "author": str(author.get("name") or "")})
+    return out
+
+
+def fetch_image(url: str) -> bytes | None:
+    """A picture from the web, if it is one this app can show and is not too big. None otherwise."""
+    return _image(url)
+
+
+def check_cover_bytes(data: bytes) -> bytes:
+    """`data` when it is a picture the posters can use (PNG, JPEG, GIF or WebP, under the size limit); else a RecompError in
+    plain words."""
+    if not data.startswith(_IMG_MAGIC) or (data.startswith(b"RIFF") and data[8:12] != b"WEBP"):
+        raise RecompError("That isn't a picture Distill can use. Pick a PNG, JPEG, WebP or GIF.")
+    if len(data) > MAX_ART_BYTES:
+        raise RecompError(f"That picture is too big ({len(data) / (1 << 20):.1f} MB). Pick one under {MAX_ART_BYTES >> 20} MB.")
+    return data
+
+
+def set_cover(rid: str, data: bytes, source: str = CUSTOM_SRC) -> Path:
+    """Make `data` the poster of the project `rid`, replacing whatever was cached. The choice is final: neither the page nor a
+    SteamGridDB key will swap it for another poster later."""
+    check_cover_bytes(data)
+    folder = art_dir()
+    for f in folder.glob(f"{rid}.*"):
+        f.unlink(missing_ok=True)
+    dest = folder / f"{rid}{_ext_of(data)}"
+    try:
+        dest.write_bytes(data)
+        (folder / f"{rid}.src").write_text(source, encoding="utf-8")
+    except OSError as exc:
+        raise RecompError(f"Couldn't save the cover: {exc}") from exc
+    return dest
+
+
+def clear_cover(rid: str) -> None:
+    """Take the poster of the project `rid` away, and leave a note that it is to stay away (no new search, no placeholder
+    fetch), until a cover is chosen again."""
+    folder = art_dir()
+    for f in folder.glob(f"{rid}.*"):
+        f.unlink(missing_ok=True)
+    try:
+        (folder / f"{rid}.src").write_text(REMOVED_SRC, encoding="utf-8")
+    except OSError as exc:
+        raise RecompError(f"Couldn't remove the cover: {exc}") from exc
 
 
 if __name__ == "__main__":  # python -m distill.recomps hash <file> ...

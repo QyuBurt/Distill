@@ -1,10 +1,12 @@
-"""Download rules: a global speed limit, a weekly schedule, and per-site limits (files at once, speed, retries).
+"""Download rules: a global speed limit, a weekly schedule, and per-site limits (files at once, speed, retries) and
+request headers (Referer, User-Agent, anything else a site insists on).
 
 No Qt in here. The runner asks `GATE.try_acquire(host)` before it starts a file and calls `THROTTLE.consume(...)` after
 every chunk it reads. Rules live in distill_rules.json next to the app and take effect on running downloads at once."""
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -20,6 +22,28 @@ UNLIMITED, PAUSED = 0, -1  # values of a speed limit in KB/s; anything above is 
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
+# Headers the app must keep for itself: they decide how the request is framed, and a wrong one breaks or smuggles it
+_FORBIDDEN_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "range", "if-range", "te", "upgrade",
+                      "expect", "proxy-authorization", "user-agent", "referer"}  # the last two have their own boxes
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+ALWAYS_SITE_ONLY = ("Authorization", "Cookie")  # never follow a redirect to another site
+
+
+def parse_headers(text: str) -> dict[str, str]:
+    """'Name: value' lines -> {name: value}. Lines that aren't a valid header, or that name one the app controls, are dropped."""
+    out: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        name, sep, value = line.partition(":")
+        name, value = name.strip(), value.strip()
+        if sep and value and _HEADER_NAME.match(name) and name.lower() not in _FORBIDDEN_HEADERS and len(value) <= 4000:
+            out[name] = value
+    return out
+
+
+def clean_one_line(text: str, limit: int = 500) -> str:
+    return " ".join(str(text or "").split())[:limit]
+
+
 @dataclass(slots=True)
 class HostRule:
     host: str  # 'example.com' also covers 'cdn.example.com'
@@ -28,6 +52,9 @@ class HostRule:
     attempts: int = 0  # tries per file; 0 = the app default
     segments: int = 0  # connections per file for this site; 0 = the overall setting
     proxy: str = ""  # '' = the overall proxy, 'direct' = no proxy for this site, else an http(s) proxy address
+    referer: str = ""  # sent as the Referer header; 'auto' = the site's own front page (what many hosts check for)
+    user_agent: str = ""  # replaces the app's own User-Agent for this site
+    headers: str = ""  # more headers, one 'Name: value' per line
 
 
 @dataclass(slots=True)
@@ -72,6 +99,27 @@ class Rules:
         rule = self.host_rule(host)
         return min(MAX_SEGMENTS, max(1, (rule.segments if rule and rule.segments else self.segments)))
 
+    def headers_for(self, url: str) -> dict[str, str]:
+        """The headers a rule adds to a request for this address (Referer, User-Agent, the extra lines)."""
+        parts = urlsplit(url)
+        rule = self.host_rule((parts.hostname or "").lower())
+        if not rule:
+            return {}
+        out = parse_headers(rule.headers)
+        if rule.user_agent.strip():
+            out["User-Agent"] = clean_one_line(rule.user_agent)
+        referer = clean_one_line(rule.referer)
+        if referer.lower() == "auto" and parts.scheme in ("http", "https") and parts.netloc:
+            out["Referer"] = f"{parts.scheme}://{parts.netloc}/"
+        elif referer.lower().startswith(("http://", "https://")):
+            out["Referer"] = referer
+        return out
+
+    def private_header_names(self, url: str) -> list[str]:
+        """Headers a rule adds that belong to its site alone (everything custom): dropped on a redirect to another site."""
+        rule = self.host_rule((urlsplit(url).hostname or "").lower())
+        return list(parse_headers(rule.headers)) if rule else []
+
     def host_rule(self, host: str) -> HostRule | None:
         """The most specific rule whose site is this host or a parent of it."""
         best = None
@@ -110,7 +158,9 @@ class Rules:
                 rules.hosts.append(HostRule(str(r["host"]).strip().lower(), max(0, num(r.get("max_files"), 0, 64)),
                                             max(0, num(r.get("kbps"))), max(0, num(r.get("attempts"), 0, 20)),
                                             max(0, num(r.get("segments"), 0, MAX_SEGMENTS)),
-                                            normalize_proxy(str(r.get("proxy", "")), allow_direct=True)[0]))
+                                            normalize_proxy(str(r.get("proxy", "")), allow_direct=True)[0],
+                                            clean_one_line(r.get("referer", "")), clean_one_line(r.get("user_agent", "")),
+                                            "\n".join(f"{k}: {v}" for k, v in parse_headers(str(r.get("headers", ""))).items())))
         return rules
 
 

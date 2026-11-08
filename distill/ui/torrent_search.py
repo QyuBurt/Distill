@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from .. import torrentsearch as ts
 from ..models import fmt_size
 from ..torbox import torbox_cached, torbox_key
+from .frameless import FramelessDialog
 from .theme import T
 from .widgets import accent_button, AnimCheckBox, fit_columns, hint
 
@@ -67,7 +68,7 @@ class ResultItem(QTreeWidgetItem):
             return str(a) < str(b)
 
 
-class TorrentSearchDialog(QDialog):
+class TorrentSearchDialog(FramelessDialog):
     """Modeless, so the download list stays visible behind it while rows are added."""
 
     addLinks = Signal(list)  # magnet links for the download list
@@ -76,18 +77,14 @@ class TorrentSearchDialog(QDialog):
     _resolved = Signal(object, object)  # magnets, error notes
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("Search torrents")
+        super().__init__(parent, "Search torrents", "search", (920, 560), (700, 420))
         self.setModal(False)
-        self.resize(920, 560)
         self._token = 0
         self._busy_adding = False
         self._found.connect(self._show_results)
         self._cached.connect(self._show_cached)
         self._resolved.connect(self._added)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(10)
+        lay = self.body((20, 18, 20, 16))
 
         row = QHBoxLayout()
         self.query = QLineEdit()

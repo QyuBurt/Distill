@@ -3,10 +3,10 @@ downloads pick the new rules up straight away."""
 from __future__ import annotations
 
 from PySide6.QtCore import QTime, QTimer, Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
+from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox,
                                QTimeEdit, QVBoxLayout, QWidget)
 
-from ..netrules import DAYS, MAX_SEGMENTS, PAUSED, normalize_proxy, RULES, HostRule, Rules, ScheduleRule, describe_schedule, save_rules, set_rules
+from ..netrules import DAYS, MAX_SEGMENTS, PAUSED, clean_one_line, normalize_proxy, parse_headers, RULES, HostRule, Rules, ScheduleRule, describe_schedule, save_rules, set_rules
 from .state import LABEL_W
 from .widgets import Card, hint, StepSwitch
 
@@ -85,7 +85,7 @@ class _HostRow(QWidget):
 
     def __init__(self, rule: HostRule):
         super().__init__()
-        grid = QGridLayout(self)  # site and proxy on the first line, the limits on the second
+        grid = QGridLayout(self)  # site and proxy on the first line, the limits on the second, request headers below
         grid.setContentsMargins(0, 0, 0, 6)
         grid.setHorizontalSpacing(8)
         self.host = QLineEdit(rule.host)
@@ -113,8 +113,23 @@ class _HostRow(QWidget):
         self.proxy.setPlaceholderText("proxy: overall")
         self.proxy.setToolTip("Blank = the overall proxy. 'direct' = no proxy for this site. Or http://host:port.")
         self.proxy.setMinimumWidth(130)
+        self.referer = QLineEdit(rule.referer)
+        self.referer.setPlaceholderText("Referer: none")
+        self.referer.setToolTip("Sent as the Referer header. 'auto' = this site's own front page, which many file hosts insist on. "
+                                "Or a full address such as https://example.com/page.")
+        self.agent = QLineEdit(rule.user_agent)
+        self.agent.setPlaceholderText("User-Agent: Distill's own")
+        self.agent.setToolTip("Replaces Distill's User-Agent for this site (some hosts only serve browsers).")
+        self.extra = QPlainTextEdit(rule.headers)
+        self.extra.setPlaceholderText("More headers, one per line:\nX-Token: abc123")
+        self.extra.setToolTip("Any other request headers this site needs, as 'Name: value' lines. They are only ever sent to this "
+                              "site, never on a redirect to another one.")
+        self.extra.setFixedHeight(54)
         gone = QPushButton("Remove")
         gone.clicked.connect(lambda _c=False: self.removed.emit(self))
+        grid.addWidget(self.referer, 2, 0, 1, 2)
+        grid.addWidget(self.agent, 2, 2, 1, 3)
+        grid.addWidget(self.extra, 3, 0, 1, 5)
         grid.addWidget(self.host, 0, 0, 1, 2)
         grid.addWidget(self.proxy, 0, 2, 1, 2)
         grid.addWidget(gone, 0, 4)
@@ -122,7 +137,8 @@ class _HostRow(QWidget):
             grid.addWidget(w, 1, col)
         grid.setColumnStretch(5, 1)
         for sig in (self.host.textChanged, self.proxy.textChanged, self.files.valueChanged, self.speed.valueChanged,
-                    self.tries.valueChanged, self.conns.valueChanged):
+                    self.tries.valueChanged, self.conns.valueChanged, self.referer.textChanged, self.agent.textChanged,
+                    self.extra.textChanged):
             sig.connect(lambda *_: self.changed.emit())
 
     def rule(self) -> HostRule | None:
@@ -131,8 +147,10 @@ class _HostRow(QWidget):
             from urllib.parse import urlsplit
             host = urlsplit(host).hostname or ""
         host = host.strip("/ ")
+        extra = "\n".join(f"{k}: {v}" for k, v in parse_headers(self.extra.toPlainText()).items())
         return HostRule(host, self.files.value(), self.speed.value(), self.tries.value(), self.conns.value(),
-                        normalize_proxy(self.proxy.text(), True)[0]) if host else None
+                        normalize_proxy(self.proxy.text(), True)[0], clean_one_line(self.referer.text()),
+                        clean_one_line(self.agent.text()), extra) if host else None
 
 
 class RulesPanel(QWidget):

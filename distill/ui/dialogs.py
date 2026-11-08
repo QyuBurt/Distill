@@ -25,6 +25,8 @@ from ..downloads import CUSTOM_KINDS, LinkError, login_for, LOGIN_SITES, LOGINS,
 from ..models import BatchSummary, fmt_size, STAGE_TITLES
 from ..torbox import account_remote_files, AccountFile, AccountItem, torbox_account
 from ..torrents import list_adapters, load_torrent_settings, save_torrent_settings
+from . import msgbox
+from .frameless import FramelessDialog
 from .state import LABEL_W
 from .theme import T
 from .widgets import (accent_button, AnimCheckBox, Card, fit_columns, hint, PlaceholderTree)
@@ -50,19 +52,18 @@ def _embed(panel: QDialog) -> None:
     panel.setObjectName("embeddedPanel")
 
 
-class LoginsDialog(QDialog):
+class LoginsDialog(FramelessDialog):
     """Sign-in details for archive.org, 1fichier and any other host. `needed` = sites in this job that have no
     login yet: it then also offers 'Continue without logging in'. `ok` is False only when the person cancels."""
 
     saved = Signal()  # embedded in Settings: the details were saved (nothing closes)
 
     def __init__(self, parent: QWidget, needed: list[str] | None, remember: bool, embedded: bool = False):
-        super().__init__(parent)
+        super().__init__(parent, "Logins", "link", None, (460, 0), chrome=not embedded)
         self._embedded = embedded  # True when it sits inside the Settings window as the Accounts tab
         if embedded:
             _embed(self)
         else:
-            self.setWindowTitle("Logins")
             self.setModal(True)
         self.needed = needed or []
         self.ok = False
@@ -71,8 +72,7 @@ class LoginsDialog(QDialog):
         self._timer.setSingleShot(True)
         self._timer.setInterval(800)
         self._timer.timeout.connect(self._save)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(*((0, 0, 0, 0) if embedded else (20, 18, 20, 16)))
+        lay = self.body((0, 0, 0, 0) if embedded else (20, 18, 20, 16))
         lay.setSpacing(10)
         if needed:
             names = " and ".join(LOGIN_SITES[k][0] for k in needed)
@@ -258,26 +258,26 @@ class LoginsDialog(QDialog):
             try:
                 found = cookiemod.parse_netscape(Path(path).read_text(encoding="utf-8", errors="replace"))
             except OSError as exc:
-                QMessageBox.warning(self, "Import cookies", f"Can't read that file: {exc}")
+                msgbox.warning(self, "Import cookies", f"Can't read that file: {exc}")
                 return
             self._pick_cookies(found, "That file has no usable cookies (is it a Netscape-format cookies.txt?).")
 
     def _import_firefox(self) -> None:
         profiles = cookiemod.firefox_profiles()
         if not profiles:
-            QMessageBox.information(self, "Import cookies", "No Firefox profile was found on this computer.")
+            msgbox.information(self, "Import cookies", "No Firefox profile was found on this computer.")
             return
         try:
             found = cookiemod.read_firefox(profiles[0])
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Import cookies", str(exc))
+            msgbox.warning(self, "Import cookies", str(exc))
             return
         self._pick_cookies(found, "Firefox has no cookies stored.")
 
     def _pick_cookies(self, found: list, empty_message: str) -> None:
         groups = cookiemod.group_by_domain(found)
         if not groups:
-            QMessageBox.information(self, "Import cookies", empty_message)
+            msgbox.information(self, "Import cookies", empty_message)
             return
         dlg = CookiePickDialog(self, groups)
         if dlg.exec() and dlg.chosen:
@@ -312,16 +312,14 @@ class LoginsDialog(QDialog):
         self.accept()
 
 
-class CookiePickDialog(QDialog):
+class CookiePickDialog(FramelessDialog):
     """Choose which sites' cookies to bring in: a browser holds hundreds of tracking domains you don't want."""
 
     def __init__(self, parent: QWidget, groups: dict):
-        super().__init__(parent)
-        self.setWindowTitle("Import Cookies")
+        super().__init__(parent, "Import Cookies", "file", (460, 480), (380, 360))
         self.setModal(True)
-        self.resize(460, 480)
         self.chosen: set[str] = set()
-        lay = QVBoxLayout(self)
+        lay = self.body()
         lay.addWidget(hint("Tick the sites you want to stay signed in to. Only those are kept."))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter sites")
@@ -366,17 +364,16 @@ class CookiePickDialog(QDialog):
         self.accept()
 
 
-class WebLoginDialog(QDialog):
+class WebLoginDialog(FramelessDialog):
     """Sign in through a site's plain login form and keep the session cookies as a login for that site."""
 
     done = Signal(object, str)  # (host, cookie header) on success, '' + message on failure
 
     def __init__(self, parent: QWidget):
-        super().__init__(parent)
-        self.setWindowTitle("Sign In With a Web Form")
+        super().__init__(parent, "Sign In With a Web Form", "link", None, (520, 0))
         self.setModal(True)
         self.result_entry: dict | None = None
-        lay = QVBoxLayout(self)
+        lay = self.body()
         lay.addWidget(hint("Works for sites with an ordinary username-and-password form. Sites with captchas, "
                            "one-time codes or JavaScript logins won't: sign in with your browser and import its "
                            "cookies instead."))
@@ -433,27 +430,25 @@ class WebLoginDialog(QDialog):
         self.accept()
 
 
-class TorrentDialog(QDialog):
+class TorrentDialog(FramelessDialog):
     """Pick the VPN adapter torrent traffic is bound to."""
 
     saved = Signal()
 
     def __init__(self, parent: QWidget, embedded: bool = False):
-        super().__init__(parent)
+        super().__init__(parent, "Torrent Privacy", "shield-check", None, (520, 0), chrome=not embedded)
         self._embedded = embedded  # True when it sits inside the Settings window (Downloads tab)
         self._first_show = True
         if embedded:
             _embed(self)
         else:
-            self.setWindowTitle("Torrent Privacy")
             self.setModal(True)
         self.ok = False
         self.cfg = load_torrent_settings()
         self.adapters: list[dict] = []
         self._scanning = False
         self._box: queue.Queue = queue.Queue(maxsize=1)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(*((0, 0, 0, 0) if embedded else (20, 18, 20, 16)))
+        lay = self.body((0, 0, 0, 0) if embedded else (20, 18, 20, 16))
         lay.setSpacing(10)
         intro_text = ("Everyone in a torrent swarm can see the IP address you connect from. To keep yours private, "
                       "torrent traffic is tied to your VPN's network adapter: if the VPN drops, torrenting stops "
@@ -576,13 +571,13 @@ class TorrentDialog(QDialog):
         yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
         if self.require.isChecked():
             if not chosen:
-                QMessageBox.critical(self, "Choose an Adapter", "Connect your VPN, press Refresh and pick its adapter.")
+                msgbox.critical(self, "Choose an Adapter", "Connect your VPN, press Refresh and pick its adapter.")
                 return
-            if not chosen["vpn"] and QMessageBox.warning(
+            if not chosen["vpn"] and msgbox.warning(
                     self, "Not a VPN?", f"'{chosen['name']}' doesn't look like a VPN adapter. If it's your normal "
                     "connection, peers will see your real IP address.\n\nUse it anyway?", yes | no, no) != yes:
                 return
-        elif QMessageBox.warning(
+        elif msgbox.warning(
                 self, "No VPN Protection", "Without the VPN requirement, peers in the swarm can see your real IP "
                 "address.\n\nContinue without it?", yes | no, no) != yes:
             return
@@ -595,20 +590,16 @@ class TorrentDialog(QDialog):
             self.accept()
 
 
-class SummaryDialog(QDialog):
+class SummaryDialog(FramelessDialog):
     """End-of-batch report when something failed: what went wrong, per stage, with a one-click retry."""
 
     def __init__(self, parent: QWidget, summary: BatchSummary, report: str, on_retry: Callable[[frozenset], None]):
-        super().__init__(parent)
-        self.setWindowTitle("Batch Complete - Some Items Failed")
+        super().__init__(parent, "Batch Complete - Some Items Failed", "alert", (700, 540), (520, 400))
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.resize(700, 540)
         failures = summary.failures
         failed_sources = {f.source for f in failures}
         retry_paths = frozenset(f.source for f in failures if f.retryable)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(10)
+        lay = self.body((20, 18, 20, 16))
         head = QLabel(f"Batch complete: {summary.total - len(failed_sources)} of {summary.total} item(s) succeeded, "
                       f"{len(failed_sources)} failed.")
         head.setObjectName("phase")
@@ -655,7 +646,7 @@ class SummaryDialog(QDialog):
         lay.addLayout(_button_row(retry, close))
 
 
-class TorBoxDownloadsDialog(QDialog):
+class TorBoxDownloadsDialog(FramelessDialog):
     """What is on the person's TorBox account right now: torrents, usenet and web downloads, each opening to its files.
     Tick what you want and add it to the Files & Torrents list; it then downloads from TorBox over HTTPS. Read-only
     on the account itself: nothing is changed or deleted there."""
@@ -667,18 +658,14 @@ class TorBoxDownloadsDialog(QDialog):
     _DATA = Qt.ItemDataRole.UserRole
 
     def __init__(self, parent: QWidget):
-        super().__init__(parent)
-        self.setWindowTitle("TorBox Downloads")
+        super().__init__(parent, "TorBox Downloads", "download", (820, 580), (600, 420))
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.resize(820, 580)
         self._items: list[AccountItem] = []
         self._notes: list[str] = []
         self._ticked: dict[tuple[str, int], set[int]] = {}  # (kind, id) -> ids of its ticked files; survives the filter
         self._token = 0
         self._busy = False  # set while ticks are being copied between a row and its files
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(10)
+        lay = self.body((20, 18, 20, 16))
         self.head = QLabel("TorBox downloads")
         self.head.setObjectName("phase")
         lay.addWidget(self.head)

@@ -23,7 +23,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
-from . import debrid, secretstore, ytdlp
+from . import debrid, ftpclient, secretstore, ytdlp
 from .constants import APP_DIR, APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
 from .models import fmt_size
 from .netrules import GATE, PAUSED, RULES, THROTTLE, host_of
@@ -169,6 +169,14 @@ def auth_headers(url: str) -> dict[str, str]:
     return {}  # 1fichier: the API key is only used against its own API, never on file downloads
 
 
+def ftp_creds(url: str) -> tuple[str, str] | None:
+    """A saved login (Logins... > custom site, user name and password) for this FTP address; None = the address's own, or anonymous."""
+    cred = login_for(url)
+    if cred and cred.get("user") and site_for(url).startswith("custom:") and cred.get("kind") not in CUSTOM_KINDS[1:]:
+        return cred["user"], cred["secret"]
+    return None
+
+
 def load_logins() -> bool:
     """Read remembered logins. True if anything was remembered."""
     global LOGIN_PROBLEM
@@ -229,8 +237,10 @@ class _KeepKeysOnSite(urllib.request.HTTPRedirectHandler):
             def where(u: str) -> str:
                 return site_for(u) or (urllib.parse.urlsplit(u).hostname or "").lower()
             if where(newurl) != where(req.full_url):
-                for name in ("Authorization", "Cookie"):
-                    new.remove_header(name)
+                for name in ("Authorization", "Cookie", *RULES.private_header_names(req.full_url)):
+                    new.remove_header(name.capitalize())  # urllib stores header names capitalised
+            for name, value in RULES.headers_for(newurl).items():  # the site it lands on may have rules of its own
+                new.add_header(name, value)
         return new
 
 
@@ -251,7 +261,7 @@ def opener_for(url: str) -> urllib.request.OpenerDirector:
 
 
 def http_open(url: str, headers: dict[str, str] | None = None, method: str = "GET", timeout: float = 30):
-    hdrs = {"User-Agent": USER_AGENT, **(headers or {}), **auth_headers(url)}
+    hdrs = {"User-Agent": USER_AGENT, **RULES.headers_for(url), **(headers or {}), **auth_headers(url)}
     return opener_for(url).open(urllib.request.Request(url, headers=hdrs, method=method), timeout=timeout)
 
 
@@ -548,6 +558,7 @@ class DownloadSummary:
     bytes_received: int
     seconds: float
     stopped: int = 0  # files the person stopped one by one during the run
+    finished: tuple[Path, ...] = ()  # where the files that finished (or were already there) are, for the after-run actions
 
 
 class DownloadRunner:
@@ -846,6 +857,8 @@ class DownloadRunner:
 
     @staticmethod
     def _retryable(exc: BaseException) -> bool:
+        if isinstance(exc, ftpclient.FtpError):
+            return not exc.permanent  # a wrong login or a missing file will not get better on the second try
         if isinstance(exc, urllib.error.HTTPError):
             return exc.code in (408, 425, 429) or exc.code >= 500
         return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException,
@@ -916,7 +929,10 @@ class DownloadRunner:
 
         resp = None
         try:
-            resp = http_open(direct_url(rf.url), {"Range": f"bytes={have}-"} if have else None)
+            if ftpclient.is_ftp(rf.url):  # FTP: one connection, resumed with REST; the stream reads like an HTTP response
+                resp = ftpclient.FtpStream(rf.url, have, ftp_creds(rf.url))
+            else:
+                resp = http_open(direct_url(rf.url), {"Range": f"bytes={have}-"} if have else None)
         except urllib.error.HTTPError as exc:
             if exc.code != 416 or not have:
                 raise
@@ -1298,7 +1314,8 @@ class DownloadRunner:
             if self.post_action:
                 self._post_process()
             summary = DownloadSummary(len(self.jobs), self.done, self.skipped, tuple(self.failures),
-                                      self.bytes_received, took, self.stopped)
+                                      self.bytes_received, took, self.stopped,
+                                      tuple(p for p in self.completed_paths if p.exists()))  # (an unpacked-and-deleted archive is gone)
             speed = f", {fmt_size(int(self.bytes_received / took))}/s average" if took > 1 and self.bytes_received else ""
             lost = f", {self.stopped} stopped" if self.stopped else ""
             self._emit(("log", f"--- Download complete: {self.done} downloaded ({fmt_size(self.bytes_received)}"

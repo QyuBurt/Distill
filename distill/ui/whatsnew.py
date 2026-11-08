@@ -1,9 +1,10 @@
 """A one-time 'What's new' note the first time a new version starts."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialogButtonBox, QLabel, QTextBrowser, QWidget
 
 from ..constants import APP_VERSION
+from .frameless import FramelessDialog
 
 # Release notes shown once after an update, as (heading, items). Empty for 1.0: a first install has nothing to compare to.
 NOTES: tuple[tuple[str, tuple[str, ...]], ...] = ()
@@ -16,12 +17,10 @@ def notes_html() -> str:
     return "".join(parts)
 
 
-class WhatsNewDialog(QDialog):
+class WhatsNewDialog(FramelessDialog):
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle(f"What's new in {APP_VERSION}")
-        self.resize(560, 520)
-        lay = QVBoxLayout(self)
+        super().__init__(parent, f"What's new in {APP_VERSION}", "star", (560, 520), (420, 320))
+        lay = self.body()
         lay.addWidget(QLabel(f"<b>Distill {APP_VERSION}</b>"))
         view = QTextBrowser()
         view.setOpenExternalLinks(False)

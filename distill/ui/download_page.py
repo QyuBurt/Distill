@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QModelIndex, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .. import magnet
+from .. import afteractions, magnet
 from ..clipwatch import links_in_text
 from ..folderwatch import FolderWatcher, WATCH_FOLDER
 from ..dlfiles import (
@@ -28,7 +28,9 @@ from ..dlfiles import (
 from ..downloads import DL_MAX_PARALLEL, DownloadRunner, DownloadSummary, logins_missing, RemoteFile, SESSION_FILE
 from ..links import probe_sizes, resolve_links
 from ..models import fmt_duration, fmt_size
+from . import msgbox
 from .models import FINISHED
+from .power_countdown import PowerCountdown
 from .theme import T
 from ..torbox import torbox_key
 from .. import debrid
@@ -110,6 +112,7 @@ class DownloadMixin:
         # -- right: where it goes, and what happens when it is done
         self.dl_dest = PathRow("Save to", label_width=LABEL_W)
         self.dl_dest.edit.setAcceptDrops(False)
+        self.dl_dest.edit.setPlaceholderText(f"{self._dl_default_dir()}  (your Downloads folder)")  # what an empty box means
         self.dl_dest.edit.textChanged.connect(lambda *_: self._dl_save_soon())
         self.dl_post = QComboBox()
         self.dl_post.addItems(["Nothing more", "Unpack archives", "Unpack archives, then delete them"])
@@ -120,6 +123,25 @@ class DownloadMixin:
         self.dl_organize.setToolTip("When everything finished without errors, open the Organize page on the "
                                     "download folder so you can scan and sort it.")
         self.dl_organize.toggled.connect(lambda *_: self._dl_save_soon())
+        self.dl_command = QLineEdit()
+        self.dl_command.setPlaceholderText('"C:\\Tools\\sync.bat" {folder}')
+        self.dl_command.setToolTip(
+            "A program to run when the downloads are done (not when you stopped them). Put a path with spaces in \"quotes\". "
+            "{folder} = the download folder, {list} = a text file listing the finished files, {count} = how many "
+            "finished, {failed} = how many failed. It runs in the download folder, and the Computer step below waits for it "
+            "and is skipped if it fails.")
+        self.dl_power = QComboBox()
+        self.dl_power.addItems(afteractions.POWER_LABELS)
+        self.dl_power.setToolTip(
+            "Put this computer to sleep, hibernate it or shut it down when the downloads end. You get 60 seconds to "
+            "cancel. It does nothing if you stopped the downloads yourself, and it is switched off again each time "
+            "Distill starts, so it can never surprise you later.")
+        self._dl_cmd_proc = None
+        self._dl_cmd_power = ""
+        self._dl_cmd_ticks = 0
+        self._dl_cmd_timer = QTimer(self)
+        self._dl_cmd_timer.setInterval(1000)
+        self._dl_cmd_timer.timeout.connect(self._dl_cmd_poll)
         self.dl_autoresume = AnimCheckBox("Resume on startup")
         self.dl_autoresume.setToolTip("If Distill is closed (or crashes) mid-download, carry on automatically next time it "
                                       "starts. Finished files are skipped and partial ones resume.")
@@ -131,6 +153,8 @@ class DownloadMixin:
         dest.add(hairline())
         dest.add(labelled("When finished", self.dl_post))
         dest.add(self.dl_organize)
+        dest.add(labelled("Run a command when finished", self.dl_command))
+        dest.add(labelled("Computer, when finished", self.dl_power))
         dest.add(self.dl_autoresume)
 
         main = QWidget()
@@ -414,8 +438,8 @@ class DownloadMixin:
             self._dl_add_links(links)
 
     def _dl_hand_to_organize(self) -> None:
-        folder = self._clean(self.dl_dest.text())
-        if folder and self._org_sources and "bysystem" in self.pages:
+        folder = str(self._dl_dest_path())
+        if self._org_sources and "bysystem" in self.pages:
             self._org_sources[0].setText(folder)
             self._show_page("bysystem")
             self._toast("The download folder is ready in Sort by System. Press Scan to see what's there.", "ok", 8000)
@@ -531,9 +555,16 @@ class DownloadMixin:
         picked = sorted(self.dl_table.selectionModel().selectedRows(), key=lambda ix: ix.row())
         return [self.dl_proxy.mapToSource(ix).row() for ix in picked]
 
-    def _dl_dest_path(self) -> Path | None:
+    @staticmethod
+    def _dl_default_dir() -> Path:
+        """Where downloads go when no Save to folder is set: the person's own Downloads folder (wherever the system keeps it)."""
+        loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        return Path(loc) if loc else Path.home() / "Downloads"
+
+    def _dl_dest_path(self) -> Path:
+        """The Save to folder, or the Downloads folder when it has been left empty (so there is never nothing to save to)."""
         raw = self._clean(self.dl_dest.text())
-        return Path(raw) if raw else None
+        return Path(raw) if raw else self._dl_default_dir()
 
     def _dl_per_item(self, rf: RemoteFile) -> bool:
         return per_item_for(rf, self.dl_folders.isChecked())
@@ -608,9 +639,6 @@ class DownloadMixin:
 
     def _dl_open_folder(self, rows: list[int]) -> None:
         dest = self._dl_dest_path()
-        if dest is None:
-            self.dl_status.setText("Choose a Save to folder first.")
-            return
         for i in rows:  # the first selected file that exists is shown in its folder, highlighted where Explorer allows
             rf = self.dl_files[i]
             if found := files_on_disk(rf, dest, self._dl_per_item(rf)):
@@ -729,20 +757,12 @@ class DownloadMixin:
             return
         dest = self._dl_dest_path()
         on_disk: list[Path] | None = None  # None = too many rows to look at, so assume there may be something
-        if dest is not None and len(rows) <= 500:
+        if len(rows) <= 500:
             on_disk = [p for i in rows for p in files_on_disk(self.dl_files[i], dest, self._dl_per_item(self.dl_files[i]))]
-        elif dest is None:
-            on_disk = []
         live = any(self._dl_is_live(i) for i in rows)
 
         name = self.dl_files[rows[0]].name.rsplit("/", 1)[-1]
         what = f'"{name}"' if len(rows) == 1 else f"{len(rows)} files"
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Delete Downloads")
-        box.setText(f"Remove {what} from the list?")
-        remove_btn = box.addButton("Remove from list", QMessageBox.ButtonRole.AcceptRole)
-        delete_btn = None
         if on_disk is None:
             detail = "'Delete files too' also deletes anything already downloaded of them from disk."
         elif on_disk:
@@ -754,19 +774,18 @@ class DownloadMixin:
                       "'Delete files too' removes them permanently (not to the Recycle Bin).")
         else:
             detail = "None of them have anything on disk yet."
-        if on_disk is None or on_disk:
-            delete_btn = box.addButton("Delete files too", QMessageBox.ButtonRole.DestructiveRole)
+        choices = [("Remove from list", "accept")]  # the safe choice is the one Enter picks
+        can_delete = on_disk is None or bool(on_disk)
+        if can_delete:
+            choices.append(("Delete files too", "destructive"))
+        choices.append(("Cancel", "reject"))
         if live:
             detail += "\n\nDownloads in progress are stopped first."
-        box.setInformativeText(detail)
-        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(remove_btn)  # the safe choice is the one Enter picks
-        box.setEscapeButton(cancel_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is None or clicked is cancel_btn:
+        picked, _tick = msgbox.ask(self, "question", "Delete Downloads", f"Remove {what} from the list?", choices, default=0,
+                                   escape=len(choices) - 1, informative=detail)
+        if picked < 0 or picked == len(choices) - 1:
             return
-        self._dl_remove(rows, delete_from_disk=clicked is delete_btn)
+        self._dl_remove(rows, delete_from_disk=can_delete and picked == 1)
 
     def _dl_flash(self, idx: int, text: str) -> None:
         """A row that has just finished (green) or failed (red) washes in its colour and fades, so you can see which."""
@@ -804,7 +823,7 @@ class DownloadMixin:
         self.dl_checked = self.dl_checked - set(rows)
         self._dl_next = [i for i in self._dl_next if i not in self.dl_model.removed]
         self._dl_cleared = len(self.dl_files) == len(self.dl_model.removed)
-        if delete_from_disk and dest is not None:
+        if delete_from_disk:
             # A download that is only now letting go of its file can't be deleted until it has: the worker waits for that.
             busy = (lambda: any(runner.is_busy(i) for i in live)) if runner is not None and live else None
             threading.Thread(target=self._dl_delete_worker, args=(doomed, dest, busy), daemon=True).start()
@@ -840,11 +859,7 @@ class DownloadMixin:
         if not picks:
             self._toast("Fetch a file list and tick at least one file first.", "warn", 6000)
             return
-        dest_raw = self._clean(self.dl_dest.text())
-        if not dest_raw:
-            self._error("Error", "Choose a folder to save the downloads in.")
-            return
-        dest = Path(dest_raw)
+        dest = self._dl_dest_path()  # an empty Save to box means the Downloads folder
         try:
             dest.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -944,16 +959,77 @@ class DownloadMixin:
             self._toast(f"Downloads complete: {', '.join(parts)} in {took}.", "ok", 15000)
             if self.dl_organize.isChecked() and (sm.done or sm.skipped) and not sm.stopped:
                 self._dl_hand_to_organize()
+            self._dl_after_run(sm)
             return
         lines = [f"  - {name}: {reason}" for _i, name, reason in sm.failures[:12]]
         if len(sm.failures) > 12:
             lines.append(f"  ...and {len(sm.failures) - 12} more (see the Status column)")
+        if self.dl_power.currentIndex() > 0 and not sm.stopped:  # left to run on its own: no question to wait on
+            self._toast(f"Downloads finished: {', '.join(parts)}, {len(sm.failures)} failed (see the Status column).", "warn", 15000)
+            self._dl_after_run(sm)
+            return
         text = (f"{', '.join(parts)}, {len(sm.failures)} failed, in {took}.\n\nFailed:\n" + "\n".join(lines)
                 + "\n\nPartial downloads are kept, so a retry resumes where each one stopped.\n\n"
                   "Retry the failed files now?")
         retry, cancel = QMessageBox.StandardButton.Retry, QMessageBox.StandardButton.Cancel
-        if QMessageBox.warning(self, "Downloads Finished with Errors", text, retry | cancel, retry) == retry:
+        if msgbox.warning(self, "Downloads Finished with Errors", text, retry | cancel, retry) == retry:
             self._start_download(only=[i for i, _name, _why in sm.failures])
+        else:
+            self._dl_after_run(sm)
+
+    def _dl_after_run(self, sm: DownloadSummary) -> None:
+        """The run is over: run the person's command (if any), then (if it worked) sleep / hibernate / shut down. Nothing
+        happens after a stop by hand."""
+        command, power = self.dl_command.text().strip(), afteractions.POWER[self.dl_power.currentIndex()]
+        if sm.stopped or not (command or power):
+            return
+        if not command:
+            self._dl_after_power(power)
+            return
+        proc, problem = afteractions.start_command(command, self._dl_dest_path(), list(sm.finished), len(sm.failures))
+        if proc is None:
+            self._toast(f"Couldn't run your command: {problem}." + (" The computer was left as it is." if power else ""), "warn", 10000)
+            return
+        self._dl_cmd_proc, self._dl_cmd_power, self._dl_cmd_ticks = proc, power, 0
+        self._toast("Running your command...", "ok", 4000)
+        self._dl_cmd_timer.start()
+
+    def _dl_cmd_poll(self) -> None:
+        proc = self._dl_cmd_proc
+        if proc is None:
+            self._dl_cmd_timer.stop()
+            return
+        code = proc.poll()
+        if code is None:
+            self._dl_cmd_ticks += 1
+            if self._dl_cmd_ticks < afteractions.COMMAND_TIMEOUT:
+                return
+            with contextlib.suppress(OSError):
+                proc.kill()
+            code = -1
+        self._dl_cmd_timer.stop()
+        self._dl_cmd_proc = None
+        power, self._dl_cmd_power = self._dl_cmd_power, ""
+        if code != 0:
+            self._toast(f"Your command ended with code {code}." + (" The computer was left as it is." if power else ""), "warn", 10000)
+            return
+        self._toast("Your command finished.", "ok", 4000)
+        self._dl_after_power(power)
+
+    def _dl_after_power(self, power: str) -> None:
+        if not power:
+            return
+        dialog = PowerCountdown(self, afteractions.POWER_PHRASES[power])
+        dialog.go.connect(lambda: self._dl_do_power(power))
+        dialog.called_off.connect(lambda: self._toast("Cancelled: the computer was left as it is.", "ok", 5000))
+        self._dl_power_dialog = dialog  # kept alive until it is closed
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _dl_do_power(self, power: str) -> None:
+        if problem := afteractions.perform_power(power):
+            self._toast(f"Couldn't {afteractions.POWER_PHRASES[power]}: {problem}", "warn", 10000)
 
     def _dl_save_soon(self) -> None:
         self._dl_save_timer.start()  # restarts the 1.5 s countdown
@@ -1035,9 +1111,9 @@ class DownloadMixin:
         if data.get("interrupted") and self.dl_autoresume.isChecked() and self.dl_checked:
             self.dl_status.setText(self.dl_status.text() + "  Resuming the interrupted downloads...")
             QTimer.singleShot(2000, lambda: None if self.is_processing else self._start_download())
-        dest, per_item = self._clean(self.dl_dest.text()), self.dl_folders.isChecked()
-        if dest and (picks := sorted(self.dl_checked)):
-            threading.Thread(target=self._dl_scan_disk, args=(files, picks, Path(dest), per_item, self._dl_epoch),
+        dest, per_item = self._dl_dest_path(), self.dl_folders.isChecked()
+        if picks := sorted(self.dl_checked):
+            threading.Thread(target=self._dl_scan_disk, args=(files, picks, dest, per_item, self._dl_epoch),
                              daemon=True).start()
 
     def _dl_scan_disk(self, files: list[RemoteFile], picks: list[int], dest: Path, per_item: bool, epoch: int) -> None:

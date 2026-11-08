@@ -1028,5 +1028,18 @@ class SourceRobustnessTests(Isolated):
         self.assertIn("dolphin-emu.org (HTTP 503)", str(cm.exception))
 
 
+class DisplayPlatformsTests(unittest.TestCase):
+    def test_one_entry_per_system_without_the_maker_in_front(self):
+        got = em.display_platforms(["Gamecube", "Wii", "Nintendo Gamecube", "Nintendo Wii", "Microsoft Xbox", "Xbox",
+                                    "Super Nintendo Entertainment System", "Nintendo Super Nintendo Entertainment System", "SNES"])
+        self.assertEqual(got, ["GameCube", "SNES", "Wii", "Xbox"])
+
+    def test_a_bracket_that_only_repeats_the_name_is_dropped(self):
+        self.assertEqual(em.display_platforms(["Nintendo Wii U (Wii U)", "Wii U"]), ["Wii U"])
+
+    def test_names_distill_does_not_know_are_kept(self):
+        self.assertEqual(em.display_platforms(["Arcade", "Windows", "Nintendo 64"]), ["Arcade", "Nintendo 64", "Windows"])
+
+
 if __name__ == "__main__":
     unittest.main()

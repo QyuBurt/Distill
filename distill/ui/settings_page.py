@@ -26,6 +26,7 @@ from . import motion
 from .state import LABEL_W, TOOL_GROUPS, TOOLS
 from .apikeys_card import ApiKeysCard
 from .dialogs import LoginsDialog, TorrentDialog
+from .frameless import FramelessDialog
 from .motion import Motion
 from .rules_panel import RulesPanel
 from .ytdlp_card import YtdlpCard
@@ -203,13 +204,11 @@ class SettingsMixin:
         self._open_settings(0)
 
     def _build_settings_dialog(self) -> None:
-        dlg = self.settings_dlg = QDialog(self)  # created once and kept, so its fields hold their values
-        dlg.setWindowTitle("Settings")
-        dlg.resize(940, 680)
-        dlg.setMinimumSize(760, 480)
-        root = QHBoxLayout(dlg)
+        dlg = self.settings_dlg = FramelessDialog(self, "Settings", "settings", (940, 680), (760, 480))  # created once and kept, so its fields hold their values
+        root = QHBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        dlg.content.addLayout(root, 1)
         nav = self.settings_list = QListWidget()
         nav.setFrameShape(QFrame.Shape.NoFrame)
         nav.setSpacing(2)

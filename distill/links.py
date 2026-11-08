@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-from . import crawl, debrid, hosters, ytdlp
+from . import crawl, debrid, ftpclient, hosters, ytdlp
 from .downloads import (
+    ftp_creds,
     http_open, LINKS_NEED_DEBRID, LinkError, list_1fichier, list_archive_item,
     list_open_directory, LOGINS, parse_archive_url, RemoteFile, site_for,
 )
@@ -67,8 +68,21 @@ def _scan_page(request: crawl.ScanRequest) -> tuple[list[RemoteFile], list[str]]
     return files, problems
 
 
+def _list_ftp(url: str) -> list[RemoteFile]:
+    """The files at an ftp:// or ftps:// address: one file, or everything under a folder (sub-folders included)."""
+    try:
+        group, found = ftpclient.list_files(url, ftp_creds(url))
+    except ftpclient.FtpError as exc:
+        raise LinkError(f"{url}: {exc}") from None
+    if not found:
+        raise LinkError(f"{url}: no files found at that address")
+    return [RemoteFile(name, address, size, group) for name, address, size in found]
+
+
 def _resolve_token(token: str) -> list[RemoteFile]:
     """The files one pasted link stands for. Raises LinkError with a plain reason."""
+    if ftpclient.is_ftp(token):  # before the torrent check: ftp://host/a.torrent is a file on a server, not a local torrent
+        return _list_ftp(token)
     if is_torrent_token(token):
         return list_torrent(token)
     if ytdlp.is_video_url(token) or token.lower().startswith(ytdlp.FORCE_PREFIXES):

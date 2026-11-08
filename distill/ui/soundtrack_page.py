@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QStandardPaths, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QDesktopServices, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
@@ -29,7 +29,7 @@ from .state import LABEL_W
 from .theme import T
 from .trackrow import TrackRow
 from .treeslide import TreeSlide
-from . import motion
+from . import motion, msgbox
 from .widgets import (accent_button, AnimCheckBox, Card, Expander, fit_columns, hint, link_expanders, PathRow, PlaceholderTree,
                       RevealDelegate,
                       StageSwitch, SwitchToggle)
@@ -732,8 +732,7 @@ class SoundtrackMixin:
         return st.SAVE_ROMM if self.st_mode.isChecked() else st.SAVE_STANDARD
 
     def _st_default_dir(self) -> Path:
-        loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
-        return Path(loc) if loc else Path.home() / "Downloads"
+        return self._dl_default_dir()
 
     def _st_mode_changed(self, save: bool = True) -> None:
         romm = self._st_mode() == st.SAVE_ROMM
@@ -834,13 +833,13 @@ class SoundtrackMixin:
         if len(items) == 1 and plan.ambiguous:  # one game, several matches: ask which
             game, hits = next(iter(plan.ambiguous.items()))
             labels = [str(e.folder.relative_to(dest)) for e in hits]
-            label, ok = QInputDialog.getItem(self, "Which Game?", f"'{game}' matches more than one game:", labels, 0, False)
+            label, ok = msgbox.get_item(self, "Which Game?", f"'{game}' matches more than one game:", labels, 0, False)
             if not ok:
                 return
             plan = st.plan_save(items, mode, dest, scan, {**picks, game: hits[labels.index(label)]})
         if not plan.files and mode == st.SAVE_ROMM and len(items) == 1:  # nothing to put it beside
             why = plan.skipped[0][1] if plan.skipped else "no match"
-            ask = QMessageBox.question(self, "Game Not Found",
+            ask = msgbox.question(self, "Game Not Found",
                                        f"'{items[0][0]}': {why}.\n\nSave it to your Downloads folder instead?")
             if ask != QMessageBox.StandardButton.Yes:
                 return
@@ -1011,11 +1010,9 @@ class SoundtrackMixin:
             detail += ["Games moved into their own folder:"] + [f"  {g}" for g in moved] + [""]
         if plan.skipped:
             detail += ["Skipped:"] + [f"  {g}: {why}" for g, why in plan.skipped]
-        box = QMessageBox(QMessageBox.Icon.Question, "Save soundtracks beside games", "\n\n".join(lines),
-                          QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel, self)
-        if detail:
-            box.setDetailedText("\n".join(detail))
-        return box.exec() == QMessageBox.StandardButton.Ok
+        choice, _tick = msgbox.ask(self, "question", "Save soundtracks beside games", "\n\n".join(lines),
+                                   [("OK", "accept"), ("Cancel", "reject")], default=0, escape=1, details="\n".join(detail))
+        return choice == 0
 
     def _st_apply_moves(self, plan: st.SavePlan) -> list[tuple[str, str]]:
         """Move loose games into their folders. A game whose move fails is dropped from the plan. Returns those."""
@@ -1124,7 +1121,7 @@ class SoundtrackMixin:
             rel = str(e.folder.relative_to(self._st_games_dir)) + ("" if e.is_dir else "  (loose file)")
             labels[rel] = e
         current = next((i for i, e in enumerate(labels.values()) if e.folder == r.match_folder), 0)
-        label, ok = QInputDialog.getItem(self, "Match to Game", f"Which game is '{r.item.text(0)}' the soundtrack of?",
+        label, ok = msgbox.get_item(self, "Match to Game", f"Which game is '{r.item.text(0)}' the soundtrack of?",
                                          list(labels), current, False)
         if ok and label in labels:
             r.match_folder = labels[label].folder

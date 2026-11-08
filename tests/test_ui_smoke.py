@@ -113,10 +113,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
                 win.org["report"].findings = [SimpleNamespace(data=[entry])]
                 found = rc.match_library(win._rc_catalog, [entry])
                 win._apply_events([("recomp_owned", found, "")])
-                self.assertTrue(win.rc_owned_only.isChecked())
-                from distill.ui.recomp_page import ID_ROLE
-                shown = {win.rc_list.item(i).data(ID_ROLE) for i in range(win.rc_list.count())}
-                self.assertEqual(shown, {"ship-of-harkinian"})
+                self.assertEqual(win._rc_owned["ship-of-harkinian"].status, "likely")  # the grid still lists everything; owned games get a badge
+                self.assertGreater(win.rc_list.count(), 3)
                 win._rc_back()
                 self.assertEqual(win.rc_views.currentIndex(), 0)
 
@@ -1457,6 +1455,159 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win._rc_back()  # already on the grid: nothing to fly back from
         self.assertEqual(win._rc_hold_id, "")
 
+    def test_add_recomp_window_builds_a_checked_entry_and_explains_a_missing_field(self):
+        from distill.ui.recomp_dialog import AddRecompDialog
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        dlg = AddRecompDialog(win, win.rc_store, ["Nintendo 64", "GameCube"])
+        dlg.repo.setText("github.com/Someone/Cool-Recomp")
+        dlg.name.setText("Cool Recomp")
+        dlg._accept()  # no game or console yet
+        self.assertIsNone(dlg.entry)
+        self.assertFalse(dlg.problem.isHidden())
+        dlg.game.setText("Cool Game")
+        dlg.system.setCurrentText("Nintendo 64")
+        dlg.kind.setCurrentText("Decompilation")
+        dlg._accept()
+        self.assertEqual((dlg.entry["repo"], dlg.entry["tags"], dlg.entry["system"]), ("Someone/Cool-Recomp", ["Decomp"], "Nintendo 64"))
+
+    def test_editing_a_recomp_fills_the_window_and_saves_the_same_id(self):
+        from distill import recomps as rcmod
+        from distill.ui.recomp_dialog import AddRecompDialog
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        original = rcmod.custom_entry("a/b", "Thing", "Some Game", "GameCube", kind="Source port", platforms=["windows"], setup="Needs a ROM.",
+                                      asset={"windows": r".*win.*\.zip"}, rom_names="some game", rom_exts=".iso", rid="custom-keep")
+        dlg = AddRecompDialog(win, win.rc_store, ["GameCube"], rcmod._recomp(original))
+        self.assertEqual((dlg.name.text(), dlg.game.text(), dlg.system.currentText(), dlg.kind.currentText()), ("Thing", "Some Game", "GameCube", "Source port"))
+        self.assertFalse(dlg.platforms["linux"].isChecked())
+        dlg.name.setText("Thing 2")
+        dlg._accept()
+        self.assertEqual((dlg.entry["id"], dlg.entry["name"]), ("custom-keep", "Thing 2"))
+        self.assertEqual({k: v for k, v in dlg.entry.items() if k != "name"}, {k: v for k, v in original.items() if k != "name"})  # nothing else changed
+
+    def test_the_recomp_page_offers_add_and_only_lets_you_edit_your_own(self):
+        from distill import recomps as rcmod
+        from distill.ui import motion
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.addCleanup(setattr, motion.Motion, "reduce", motion.Motion.reduce)
+        motion.Motion.reduce = True  # buttons appear and go at once, so they can be checked
+        self.assertEqual(win.rc_add_btn.text(), "Add recomp...")
+        mine = rcmod.replace(rcmod._recomp(rcmod.custom_entry("a/b", "Thing", "Game", "GameCube")), source=rcmod.CUSTOM_SOURCE)
+        theirs = rcmod.replace(mine, id="other", source="")
+        win._rc_apply_catalog([mine, theirs])
+        win._rc_current = mine.id
+        win._rc_refresh_detail()
+        self.assertFalse(win.rcd_edit.isHidden())
+        self.assertFalse(win.rcd_unlist.isHidden())
+        win._rc_current = theirs.id
+        win._rc_refresh_detail()
+        self.assertTrue(win.rcd_edit.isHidden())
+        self.assertTrue(win.rcd_unlist.isHidden())
+
+    def test_frameless_dialogs_have_a_close_button_and_msgbox_answers_like_qmessagebox(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+
+        from distill.ui import msgbox
+        from distill.ui.frameless import FramelessDialog
+        from distill.ui.msgbox import MessageDialog
+
+        dlg = FramelessDialog(None, "Hello", "info", None, (300, 0))
+        self.addCleanup(dlg.close)
+        self.assertTrue(dlg.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        self.assertIsNotNone(dlg.close_btn)
+        plain = FramelessDialog(None, "Embedded", chrome=False)  # built into another window: no frame, no title row
+        self.assertIsNone(plain.close_btn)
+        box = MessageDialog(None, "question", "Sure?", "Do it?", [("Yes", "accept"), ("No", "normal")], default=1, escape=1, check="Never ask")
+        self.addCleanup(box.close)
+        self.assertEqual(len(box.buttons), 2)
+        self.assertTrue(box.buttons[1].isDefault())
+        box.tick.setChecked(True)
+        box.buttons[0].click()
+        self.assertEqual((box.chosen, box.checked), (0, True))
+        closed = MessageDialog(None, "info", "Notice", "Hi", [("OK", "accept")], escape=0)
+        self.addCleanup(closed.close)
+        closed.reject()  # Esc or the X
+        self.assertEqual(closed.chosen, 0)
+        # the QMessageBox-shaped helpers pick the same buttons QMessageBox would
+        with mock.patch.object(MessageDialog, "exec", lambda self: self._pick(0)):
+            self.assertEqual(msgbox.question(None, "t", "x"), QMessageBox.StandardButton.Yes)
+            self.assertEqual(msgbox.warning(None, "t", "x"), QMessageBox.StandardButton.Ok)
+        with mock.patch.object(MessageDialog, "exec", lambda self: self.reject()):
+            self.assertEqual(msgbox.question(None, "t", "x"), QMessageBox.StandardButton.No)  # closing a Yes / No box answers No
+
+    def test_a_projects_page_poster_has_a_hover_edit_button_that_changes_the_cover(self):
+        import tempfile
+        from pathlib import Path
+
+        from PySide6.QtCore import QBuffer, QEvent, QIODevice
+        from PySide6.QtGui import QColor, QImage
+
+        from distill import recomps as rcmod
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        mine = rcmod.replace(rcmod._recomp(rcmod.custom_entry("a/b", "Thing", "Game", "GameCube")), source=rcmod.CUSTOM_SOURCE)
+        win._rc_apply_catalog([mine])
+        win._rc_show_detail(mine.id)
+        cover = win.rcd_cover
+        self.assertTrue(cover.edit_btn.isHidden())  # out of sight until the pointer is over the poster
+        cover.enterEvent(QEvent(QEvent.Type.Enter))
+        self.assertFalse(cover.edit_btn.isHidden())
+        self.assertGreater(cover.edit_btn.x(), cover.width() // 2)  # bottom right
+        self.assertGreater(cover.edit_btn.y(), cover.height() // 2)
+        image = QImage(60, 90, QImage.Format.Format_RGB32)
+        image.fill(QColor("#336699"))
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(rcmod, "art_dir", lambda: Path(tmp)):
+            win._rc_apply_cover(mine, bytes(buffer.data()))
+            self.assertIsNotNone(rcmod.cached_cover(mine))
+            self.assertEqual(rcmod.cover_source(mine), "custom")
+            self.assertIn(mine.id, win._rc_art)
+            win._rc_apply_cover(mine, None)
+            self.assertIsNone(rcmod.cached_cover(mine))
+            self.assertNotIn(mine.id, win._rc_art)
+
+    def test_update_notes_are_drawn_as_markdown_and_start_open(self):
+        from distill.ui.msgbox import MessageDialog
+
+        notes = "## Recomps\n- New **Add recomp** window\n\n## Pop-ups\n- Frameless"
+        box = MessageDialog(None, "info", "Update available", "Distill is available.", [("Update now", "accept")],
+                            details=notes, markdown=True, details_open=True, details_label="release notes")
+        self.addCleanup(box.close)
+        shown = box.details.toPlainText()
+        self.assertIn("Add recomp window", shown)
+        self.assertNotIn("##", shown)  # headings are drawn, not printed
+        self.assertNotIn("**", shown)
+        self.assertFalse(box.details.isHidden())
+        self.assertEqual(box.details_btn.text(), "Hide release notes")
+        box.details_btn.click()
+        self.assertEqual(box.details_btn.text(), "Show release notes")
+
+    def test_my_recomps_toggle_shows_only_what_the_person_added(self):
+        from distill import recomps as rcmod
+        from distill.ui.recomp_page import ID_ROLE
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        mine = rcmod.replace(rcmod._recomp(rcmod.custom_entry("a/b", "Thing", "Game", "GameCube")), source=rcmod.CUSTOM_SOURCE)
+        theirs = rcmod.replace(mine, id="other", name="Other", source="")
+        win._rc_apply_catalog([mine, theirs])
+        self.assertFalse(hasattr(win, "rc_owned_only") or hasattr(win, "rc_sources_btn"))  # both options are gone
+        ids = lambda: {win.rc_list.item(i).data(ID_ROLE) for i in range(win.rc_list.count())}  # noqa: E731
+        self.assertEqual(ids(), {mine.id, "other"})
+        win.rc_mine.setChecked(True)
+        self.assertEqual(ids(), {mine.id})
+        win.rc_mine.setChecked(False)  # a radio that can be switched off again
+        self.assertEqual(ids(), {mine.id, "other"})
+
     def test_stack_pins_compact_pages_to_their_content(self):
         from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -1719,6 +1870,52 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(spec["w"], spec["h"])  # the window is the logo, so it is square
         self.assertTrue(Path(spec["logo"]).is_file())
         self.assertNotIn("status_text", spec)  # no text to carry over
+
+    def test_power_countdown_runs_out_or_is_called_off(self):
+        from distill.ui.power_countdown import PowerCountdown
+
+        events = []
+        box = PowerCountdown(None, "shut down", 3)
+        self.addCleanup(box.deleteLater)
+        box.go.connect(lambda: events.append("go"))
+        box.called_off.connect(lambda: events.append("off"))
+        self.assertIn("shut down in 3 seconds", box.label.text())
+        box._tick()
+        self.assertEqual(box.seconds_left(), 2)
+        box._tick()
+        self.assertIn("1 second.", box.label.text())  # singular at the end
+        box._tick()
+        self.assertEqual(events, ["go"])
+        again = PowerCountdown(None, "hibernate", 30)
+        self.addCleanup(again.deleteLater)
+        again.go.connect(lambda: events.append("go2"))
+        again.called_off.connect(lambda: events.append("off2"))
+        again.reject()
+        self.assertEqual(events, ["go", "off2"])
+        self.assertFalse(again._timer.isActive())
+
+    def test_download_page_finish_options(self):
+        from distill import afteractions
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertEqual([win.dl_power.itemText(i) for i in range(win.dl_power.count())], list(afteractions.POWER_LABELS))
+        self.assertEqual(win.dl_power.currentIndex(), 0)  # never armed by default
+        self.assertEqual(win.dl_command.text(), "")
+
+    def test_save_to_defaults_to_the_downloads_folder(self):
+        from pathlib import Path
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        default = win._dl_default_dir()
+        self.assertTrue(default.name)  # some real folder name, never an empty path
+        for blank in ("", "   "):
+            win.dl_dest.setText(blank)
+            self.assertEqual(win._dl_dest_path(), default)  # empty means Downloads: nothing to warn about
+        self.assertIn(str(default), win.dl_dest.edit.placeholderText())  # and the box says so
+        win.dl_dest.setText(str(Path.home() / "Elsewhere"))
+        self.assertEqual(win._dl_dest_path(), Path.home() / "Elsewhere")
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ from .organize_page import OrganizeMixin
 from .patch_view import PatchViewMixin
 from .emulator_page import EmulatorMixin
 from .recomp_page import RecompMixin
-from . import persist
+from . import persist, msgbox
 from .persist import PersistMixin
 from .soundtrack_page import SoundtrackMixin
 from .switch_page import SwitchMixin
@@ -323,17 +323,17 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         super().changeEvent(event)
 
     def _info(self, title: str, text: str) -> None:
-        QMessageBox.information(self, title, text)
+        msgbox.information(self, title, text)
 
     def _warn(self, title: str, text: str) -> None:
-        QMessageBox.warning(self, title, text)
+        msgbox.warning(self, title, text)
 
     def _error(self, title: str, text: str) -> None:
-        QMessageBox.critical(self, title, text)
+        msgbox.critical(self, title, text)
 
     def _ask(self, title: str, text: str) -> bool:
         yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
-        return QMessageBox.question(self, title, text, yes | no, yes) == yes
+        return msgbox.question(self, title, text, yes | no, yes) == yes
 
     @staticmethod
     def _clean(text: str) -> str:

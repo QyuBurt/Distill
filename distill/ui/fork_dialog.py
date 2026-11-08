@@ -5,28 +5,23 @@ from __future__ import annotations
 import threading
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QWidget
 
 from .. import emulators as em
 from .. import recomps as rc
+from .frameless import FramelessDialog
 from .theme import T
 from .widgets import accent_button, AnimCheckBox, hint, PathRow
 
 
-class AddForkDialog(QDialog):
+class AddForkDialog(FramelessDialog):
     _looked = Signal(object)  # an em.ForkReport, sent from the worker thread
 
     def __init__(self, parent: QWidget, emulator: em.Emulator, store: rc.Store, catalog: list[em.Emulator]):
-        super().__init__(parent)
+        super().__init__(parent, f"Add a fork of {emulator.name}", "branch", None, (560, 0))
         self.emulator, self.store, self.catalog = emulator, store, catalog
         self.report: em.ForkReport | None = None
-        self.setWindowTitle(f"Add a fork of {emulator.name}")
-        self.setMinimumWidth(520)
-        lay = QVBoxLayout(self)
-        lay.setSpacing(10)
-        head = QLabel(f"Add a fork of {emulator.name}")
-        head.setObjectName("dialogHead")
-        lay.addWidget(head)
+        lay = self.body()
         lay.addWidget(hint("A fork is someone else's build of this emulator, often made for particular games. It installs into a folder of its own, "
                            "so your normal copy is never touched."))
         row = QHBoxLayout()

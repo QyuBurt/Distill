@@ -206,6 +206,34 @@ def _names_of(entry: dict) -> list[str]:
     return [n for n in dict.fromkeys(names) if n]
 
 
+_COMPANIES = ("Nintendo", "Sony", "Microsoft", "Sega", "NEC", "SNK", "Bandai", "Panasonic", "Philips", "Mattel", "Commodore", "Sinclair", "Amstrad")
+
+
+def display_platforms(names: Iterable[str]) -> list[str]:
+    """Platform names as the emulator's page lists them: one entry per system, named the way the rest of Distill names it and without
+    the maker in front ('Xbox', not 'Microsoft Xbox'). emurelation spells one system several ways ('Gamecube', 'Nintendo Gamecube'),
+    and they all come out as one."""
+    out: dict[str, str] = {}
+    for raw in names:
+        name = " ".join(str(raw).split())
+        if not name:
+            continue
+        m = re.match(r"^(.*?)\s*\(([^()]*)\)$", name)  # 'Nintendo Wii U (Wii U)': the bracket only repeats the name
+        if m and m[2].casefold() in m[1].casefold():
+            name = m[1]
+        label = system_of_name(name)
+        if not label:
+            for company in _COMPANIES:
+                if name.casefold().startswith(company.casefold() + " "):
+                    rest = name[len(company) + 1:].strip()
+                    if len(rest) > 2 and not rest[0].isdigit():
+                        label = system_of_name(rest) or rest
+                    break
+        label = label or name
+        out.setdefault(re.sub(r"[^a-z0-9]+", "", label.casefold()), label)
+    return sorted(out.values(), key=str.casefold)
+
+
 @dataclass(slots=True)
 class Relation:
     """Which names mean the same emulator, and which platforms each one plays, across the sources emurelation maps."""
@@ -1097,15 +1125,7 @@ def forks_manifest() -> Path:
 
 def parse_repo(text: str) -> str:
     """'owner/name' from a GitHub address or the short form. Anything else is an error in plain words."""
-    t = (text or "").strip()
-    t = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", t, flags=re.IGNORECASE)
-    parts = [p for p in t.split("?")[0].split("#")[0].split("/") if p]
-    if len(parts) < 2:
-        raise rc.RecompError("Enter a GitHub address like github.com/owner/name, or owner/name.")
-    owner, name = parts[0], re.sub(r"\.git$", "", parts[1])
-    if not re.fullmatch(r"[\w.-]+", owner) or not re.fullmatch(r"[\w.-]+", name):
-        raise rc.RecompError("That doesn't look like a GitHub repository.")
-    return f"{owner}/{name}"
+    return rc.parse_repo(text)
 
 
 def parse_repo_or_empty(text: str) -> str:

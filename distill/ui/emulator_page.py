@@ -16,11 +16,11 @@ from PySide6.QtWidgets import (
 
 from .. import emulators as em
 from .. import recomps as rc
-from . import flight, icons, motion
+from . import flight, icons, motion, msgbox
 from .emu_images import normalize_icons
 from .emu_cards import (
     caps_label, CardGrid, Callout, chip_css, clear_layout, break_path, EmulatorCard, EmulatorTile, FactList, ForkRow, group_chip, group_colour, LogoTile,
-    pill_css, section_header, segment_css, StatTile, tint, TwoColumn,
+    pill_css, section_header, segment_css, SourceChip, StatTile, tint, TwoColumn,
 )
 from .fork_dialog import AddForkDialog
 from .retroarch_cores import CoresMixin
@@ -282,7 +282,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_about_card = Card()
         self.emd_about_card.lay.setContentsMargins(20, 16, 20, 18)
         self.emd_about_card.lay.setSpacing(12)
-        self.emd_about_card.add(section_header("About", "info"))
+        about_head = section_header("About", "info")
+        self.emd_relation_chip = SourceChip("emurelation", "Platforms from the emurelation database", "#3CB56E")
+        about_head.addWidget(self.emd_relation_chip)
+        self.emd_about_card.add(about_head)
         self.emd_about = QLabel()
         self.emd_about.setWordWrap(True)
         self.emd_about.setTextFormat(Qt.TextFormat.RichText)
@@ -515,6 +518,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                     card.set_logo(str(cached))
                 card.clicked.connect(self._em_show_detail)
                 card.action.connect(self._em_card_action)
+                card.context.connect(self._em_card_menu)
                 self.em_cards[e.id] = card
                 self._em_apply_card(e)
                 cards.append(card)
@@ -557,6 +561,53 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             self._em_launch_id(rid)
         elif (e := self._em_by_id.get(rid)) is not None:
             self._em_begin_install(e)
+
+    def _em_card_menu(self, rid: str, pos) -> None:
+        """Right-click on a card or tile: install, update, cancel, launch or remove, without opening its page."""
+        e = self._em_by_id.get(rid)
+        if e is None:
+            return
+        inst = self.em_store.installed(rid)
+        latest = self._em_latest.get(rid)
+        busy = rid in self._em_busy
+        state = em.update_state(e, inst, latest) if inst is not None else ""
+        can_get = isinstance(latest, tuple) and (inst is None or em.can_update(inst))
+        menu = QMenu(self)
+        checking = latest is None and not busy and em.downloadable(e)
+        if checking:  # no answer from the source yet: ask now, so Install isn't grey just because the page was never opened
+            self._em_fetch_latest(e)
+        if busy:
+            menu.addAction("Cancel").triggered.connect(lambda: self._em_begin_install(e))
+        else:
+            if inst is not None and self._em_row(e)["code"] != "gone":
+                menu.addAction("Launch").triggered.connect(lambda: self._em_launch_id(rid))
+            label = "Update" if state == "update" else "Install" if inst is None else "Reinstall"
+            act = menu.addAction(f"{label} (checking...)" if checking else label)
+            act.setEnabled(can_get)
+            act.triggered.connect(lambda: self._em_begin_install(e))
+            if checking:
+                timer = QTimer(menu)
+
+                def poll() -> None:
+                    got = self._em_latest.get(rid)
+                    if got is None:
+                        return
+                    timer.stop()
+                    now_inst = self.em_store.installed(rid)
+                    ok = isinstance(got, tuple) and (now_inst is None or em.can_update(now_inst))
+                    word = "Update" if now_inst is not None and em.update_state(e, now_inst, got) == "update" else \
+                        "Install" if now_inst is None else "Reinstall"
+                    act.setText(word if ok else f"{word} (couldn't check GitHub)")
+                    act.setEnabled(ok)
+                timer.timeout.connect(poll)
+                timer.start(150)
+            if inst is not None:
+                menu.addSeparator()
+                menu.addAction("Stop managing" if inst.linked else "Uninstall").triggered.connect(lambda: self._em_remove_id(rid))
+        menu.addSeparator()
+        menu.addAction("Open page").triggered.connect(lambda: self._em_show_detail(rid))
+        menu.exec(pos)
+        menu.deleteLater()
 
     def _em_everything(self) -> list[em.Emulator]:
         return [*self._em_catalog, *self._em_forks]
@@ -721,8 +772,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         clear_layout(self.emd_notices)
         for kind, text in sorted(notices, key=lambda n: ("warn", "ok", "info").index(n[0])):  # what needs care comes first
             self.emd_notices.addWidget(Callout(kind, text))
-        self.emd_also.setText("Also listed for: " + ", ".join(e.also[:12]) + (" ..." if len(e.also) > 12 else "") + "  (from emurelation)" if e.also else "")
-        self.emd_also.setVisible(bool(e.also))
+        platforms = em.display_platforms(e.also)
+        self.emd_also.setText(", ".join(platforms[:12]) + (f" and {len(platforms) - 12} more" if len(platforms) > 12 else ""))
+        self.emd_also.setVisible(bool(platforms))
+        self.emd_relation_chip.setVisible(bool(platforms))
         links = []
         if e.website:
             links.append(("Website", e.website))
@@ -970,10 +1023,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             return
         inst = self.em_store.installed(e.id)
         if why := em.update_blocked(e, inst):  # a protected folder (Program Files): nothing is started, so nothing can hang
-            QMessageBox.information(self, "Can't update here", why)
+            msgbox.information(self, "Can't update here", why)
             return
         if inst is None and em.emulators_root(self.em_store) is None:
-            answer = QMessageBox.question(
+            answer = msgbox.question(
                 self, "Where should it go?",
                 "You haven't chosen an Emulators folder.\n\nChoose one now to keep all your emulators together (and have Distill find the ones "
                 "you already have there)? Otherwise it is installed inside Distill's own folder.",
@@ -985,15 +1038,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                 if em.emulators_root(self.em_store) is None:
                     return
         if inst is not None and inst.linked and not self._p_data.get("skip_own_install_confirm"):
-            box = QMessageBox(QMessageBox.Icon.Question, "Update your own install?",
-                              f"{e.name} is your own install in:\n{inst.folder}\n\nThe new files are copied over it. Your saves, settings and "
-                              "anything else in that folder are kept.\n\nContinue?",
-                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
-            again = QCheckBox("Do not show this again")
-            box.setCheckBox(again)
-            if box.exec() != QMessageBox.StandardButton.Yes:
+            choice, again = msgbox.ask(
+                self, "question", "Update your own install?",
+                f"{e.name} is your own install in:\n{inst.folder}\n\nThe new files are copied over it. Your saves, settings and "
+                "anything else in that folder are kept.\n\nContinue?",
+                [("Yes", "accept"), ("No", "normal")], default=1, escape=1, check="Do not show this again")
+            if choice != 0:
                 return  # a No is never remembered: only a Yes with the box ticked skips the question next time
-            if again.isChecked():
+            if again:
                 self._p_data["skip_own_install_confirm"] = True
                 self._settings_save()
         rel, asset = latest
@@ -1017,10 +1069,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             left_out = (f"\n\nNot updated, because they are in protected folders: {', '.join(e.name for e in protected)}. Move them to a folder "
                         "you can write to and link them again to update them.")
         if not todo:
-            QMessageBox.information(self, "Can't update here", left_out.strip())
+            msgbox.information(self, "Can't update here", left_out.strip())
             return
         names = ", ".join(e.name for e in todo)
-        if QMessageBox.question(self, "Update all", f"Update {len(todo)} emulator{'s' if len(todo) != 1 else ''}?\n\n{names}\n\n"
+        if msgbox.question(self, "Update all", f"Update {len(todo)} emulator{'s' if len(todo) != 1 else ''}?\n\n{names}\n\n"
                                 f"Each is updated where it already is. Saves and settings are kept.{left_out}") != QMessageBox.StandardButton.Yes:
             return
         cancel = threading.Event()
@@ -1091,8 +1143,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self._em_fetch_latest(e)
 
     def _em_remove(self) -> None:
-        e = self._em_by_id.get(self._em_current)
-        inst = self.em_store.installed(self._em_current) if e else None
+        self._em_remove_id(self._em_current)
+
+    def _em_remove_id(self, rid: str) -> None:
+        e = self._em_by_id.get(rid)
+        inst = self.em_store.installed(rid) if e else None
         if e is None or inst is None or e.id in self._em_busy:
             return
         if inst.linked:
@@ -1100,10 +1155,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         else:
             ask = (f"Remove {e.name} from this PC?\n\nIts folder is deleted, including any saves or settings it keeps there "
                    "(unless you moved them elsewhere). Your own game files are not touched.")
-        if QMessageBox.question(self, "Unlink" if inst.linked else "Uninstall", ask) != QMessageBox.StandardButton.Yes:
+        if msgbox.question(self, "Unlink" if inst.linked else "Uninstall", ask) != QMessageBox.StandardButton.Yes:
             return
-        self.emd_msg.setText(em.uninstall(self.em_store, e))
-        self._em_refresh_detail()
+        self._em_say(em.uninstall(self.em_store, e))
+        self._em_refresh_views()
+        self._em_refresh_status()
 
     # ---- forks ------------------------------------------------------------------------------------------------
     def _em_refresh_forks(self, e: em.Emulator) -> None:
@@ -1201,9 +1257,9 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         if f is None or not f.parent:
             return
         if self.em_store.installed(f.id):
-            QMessageBox.information(self, "Remove fork", f"{f.name} is installed. Uninstall (or unlink) it first, then remove it from the list.")
+            msgbox.information(self, "Remove fork", f"{f.name} is installed. Uninstall (or unlink) it first, then remove it from the list.")
             return
-        if QMessageBox.question(self, "Remove fork", f"Take {f.name} off the list?") != QMessageBox.StandardButton.Yes:
+        if msgbox.question(self, "Remove fork", f"Take {f.name} off the list?") != QMessageBox.StandardButton.Yes:
             return
         parent = f.parent
         em.remove_fork(f)
@@ -1239,6 +1295,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                 self._em_fork_rows[rid].set_busy_text(text)
             elif self.em_views.currentIndex() == 0 and rid in self.em_cards:  # an install running with the cards showing
                 self.em_cards[rid].set_busy_text(text)
+            if self.em_views.currentIndex() == 0 and rid in self.em_cards:
+                try:
+                    self.em_cards[rid].set_install_progress(done, total)  # the card's colour fills back in as the download arrives
+                except RuntimeError:  # the card was rebuilt while this event was queued
+                    pass
         elif name == "emu_done":
             _n, rid, inst, error = ev
             self._em_busy.pop(rid, None)

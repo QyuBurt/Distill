@@ -96,7 +96,7 @@ class PersistMixin:
         for i, box in enumerate(self._org_recursive):
             self._persist_bind(f"org.recursive.{i}", box)
         for name in ("chd_compression", "cso_speed", "rvz_scrub", "rvz_level", "thread_budget", "io_mode", "temp_dir",
-                     "ps3_output", "pkg_layout", "pkg_merge", "pkg_zar", "ps5_kyty", "notify_check", "reduce_motion", "em_view_cards", "dl_watch", *SW_PERSIST):
+                     "ps3_output", "pkg_layout", "pkg_merge", "pkg_zar", "ps5_kyty", "notify_check", "reduce_motion", "em_view_cards", "dl_watch", "dl_command", *SW_PERSIST):
             if (widget := getattr(self, name, None)) is not None:
                 self._persist_bind(name, widget)
         for key in TOOLS:

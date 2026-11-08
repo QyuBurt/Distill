@@ -718,6 +718,45 @@ class SteamGridDBTests(Isolated):
         self.assertEqual(rc.Store(self.tmp / "s.json").sgdb_key(), "abc")
 
 
+class ChosenCoverTests(Isolated):
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000
+
+    def test_a_picture_is_checked_before_it_is_kept(self):
+        self.assertEqual(rc.check_cover_bytes(self.PNG), self.PNG)
+        for bad in (b"not a picture" * 200, b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 2000, self.PNG + b"\x00" * rc.MAX_ART_BYTES):
+            with self.assertRaises(rc.RecompError):
+                rc.check_cover_bytes(bad)
+
+    def test_a_chosen_cover_is_final_and_a_removed_one_stays_away(self):
+        r = recomp(id="mine")
+        path = rc.set_cover("mine", self.PNG)
+        self.assertEqual(rc.cached_cover(r), path)
+        self.assertEqual(rc.cover_source(r), "custom")
+        self.assertTrue(rc.cover_settled(r, "KEY"))  # a SteamGridDB key does not swap it for another poster
+        with mock.patch.object(rc, "_image", side_effect=AssertionError("must not look anything up")):
+            self.assertEqual(rc.fetch_cover(r, sgdb_key="KEY"), path)
+        rc.clear_cover("mine")
+        self.assertIsNone(rc.cached_cover(r))
+        self.assertTrue(rc.cover_settled(r, "KEY"))
+        with mock.patch.object(rc, "_image", side_effect=AssertionError("must not look anything up")):
+            self.assertIsNone(rc.fetch_cover(r, sgdb_key="KEY"))
+        rc.set_cover("mine", self.PNG)  # choosing again brings it back
+        self.assertIsNotNone(rc.cached_cover(r))
+
+    def test_sgdb_search_lists_games_and_posters_best_first(self):
+        def fake(path, key):
+            if path.startswith("/search/autocomplete/"):
+                return [{"id": 7, "name": "Zelda", "verified": True}, {"id": "x", "name": "odd"}]
+            return [{"url": "https://cdn/low.png", "thumb": "https://cdn/low_t.png", "score": 1}, {"url": "https://cdn/top.png", "score": 9, "author": {"name": "Ann"}}]
+
+        with mock.patch.object(rc, "_sgdb", fake):
+            self.assertEqual(rc.sgdb_games("zelda", "K"), [{"id": 7, "name": "Zelda", "verified": True}])
+            self.assertEqual(rc.sgdb_games("  ", "K"), [])
+            grids = rc.sgdb_grids(7, "K")
+        self.assertEqual([g["url"] for g in grids], ["https://cdn/top.png", "https://cdn/low.png"])
+        self.assertEqual((grids[0]["thumb"], grids[0]["author"], grids[1]["thumb"]), ("https://cdn/top.png", "Ann", "https://cdn/low_t.png"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -895,6 +934,121 @@ class PortedDescriptionTests(unittest.TestCase):
     def test_things_that_are_not_games_are_not_taken_for_one(self):
         for text in ("Tools ported to Windows", "Fast native renderer written in Rust"):
             self.assertEqual(rc.game_from_description(text), "", text)
+
+
+class CustomRecompTests(unittest.TestCase):
+    """The player's own projects: checked, saved beside the app, listed with the rest, and editable."""
+
+    def setUp(self) -> None:
+        td = tempfile.TemporaryDirectory(prefix="distill_custom_")
+        self.addCleanup(td.cleanup)
+        self.file = Path(td.name) / "mine.json"
+        p = mock.patch.object(rc, "user_catalog", lambda: self.file)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def entry(self, **kw) -> dict:
+        args = dict(repo="https://github.com/Someone/Cool-Recomp.git", name="Cool Recomp", game="Cool Game", system="Nintendo 64")
+        return rc.custom_entry(**{**args, **kw})
+
+    def test_a_minimal_entry_is_valid_and_loads_as_a_recomp(self):
+        e = self.entry()
+        self.assertEqual((e["id"], e["repo"], e["tags"]), ("custom-someone-cool-recomp", "Someone/Cool-Recomp", ["Recomp"]))
+        self.assertNotIn("platforms", e)  # all three is the default: nothing written
+        rc.save_user_entry(e)
+        (got,) = rc.load_catalog([self.file])
+        self.assertEqual((got.name, got.game, got.system, got.repo), ("Cool Recomp", "Cool Game", "Nintendo 64", "Someone/Cool-Recomp"))
+        self.assertEqual(rc.kinds_of(got), ("Static recompilation",))
+
+    def test_every_field_survives_the_round_trip(self):
+        e = self.entry(kind="Source port", description="A port.", website="https://x.example", platforms=["windows", "linux"], setup="Needs a ROM.",
+                       asset={"windows": r".*win.*\.zip", "macos": ""}, exe=r"Cool\.exe$", rom_names="cool game; cool game usa", rom_exts="z64 .N64",
+                       rom_sha1="A" * 40, rom_note="Any region.", cover="https://x.example/c.png", rid="custom-keep")
+        rc.save_user_entry(e)
+        (got,) = rc.load_catalog([self.file])
+        self.assertEqual((got.id, got.platforms, got.setup, got.exe), ("custom-keep", ("windows", "linux"), "Needs a ROM.", r"Cool\.exe$"))
+        self.assertEqual(got.asset, {"windows": r".*win.*\.zip"})
+        self.assertEqual((got.rom.names, got.rom.exts, got.rom.sha1), ((("cool", "game"), ("cool", "game", "usa")), (".z64", ".n64"), ("a" * 40,)))
+        self.assertEqual(rc.kinds_of(got), ("Source port",))
+
+    def test_bad_input_is_refused_in_plain_words(self):
+        for kw, word in ((dict(repo="not a repo"), "GitHub"), (dict(name=" "), "name"), (dict(game=""), "game"), (dict(system=""), "console"),
+                         (dict(website="ftp://x"), "website"), (dict(exe="("), "program"), (dict(asset={"windows": "["}), "Windows"),
+                         (dict(rom_sha1="123"), "SHA-1")):
+            with self.assertRaises(rc.RecompError, msg=kw) as cm:
+                self.entry(**kw)
+            self.assertIn(word, str(cm.exception))
+
+    def test_saving_replaces_the_same_id_and_keeps_everything_else(self):
+        self.file.write_text(json.dumps({"recomps": [{"id": "ship-of-harkinian", "name": "My override", "system": "Nintendo 64", "repo": "a/b"}]}))
+        rc.save_user_entry(self.entry())
+        rc.save_user_entry(self.entry(name="Renamed"))
+        ids = {d["id"]: d["name"] for d in rc.read_user_entries()}
+        self.assertEqual(ids, {"ship-of-harkinian": "My override", "custom-someone-cool-recomp": "Renamed"})
+
+    def test_removing_only_removes_that_entry(self):
+        rc.save_user_entry(self.entry())
+        rc.save_user_entry(self.entry(repo="Other/Thing", name="Thing"))
+        self.assertTrue(rc.remove_user_entry("custom-someone-cool-recomp"))
+        self.assertFalse(rc.remove_user_entry("custom-someone-cool-recomp"))
+        self.assertEqual([d["id"] for d in rc.read_user_entries()], ["custom-other-thing"])
+
+    def test_the_page_catalog_lists_it_and_says_whose_it_is(self):
+        rc.save_user_entry(self.entry())
+        with mock.patch.object(rc, "fetch_source", return_value=[]):
+            built = rc.build_catalog(builtin=False)
+        mine = next(r for r in built if r.id == "custom-someone-cool-recomp")
+        self.assertTrue(rc.is_custom(mine))
+        self.assertEqual(mine.source, rc.CUSTOM_SOURCE)
+        self.assertFalse(any(rc.is_custom(r) for r in built if r.id != mine.id))
+
+    def test_a_broken_user_file_is_survivable(self):
+        self.file.write_text("{not json")
+        self.assertEqual(rc.read_user_entries(), [])
+        rc.save_user_entry(self.entry())  # replaces it with a good one
+        self.assertEqual(len(rc.read_user_entries()), 1)
+
+    def facts(self, **kw) -> bytes:
+        base = {"full_name": "Someone/Cool-Recomp", "name": "Cool-Recomp", "description": "Static recompilation of Cool Game for N64",
+                "homepage": "https://cool.example", "stargazers_count": 321, "archived": False, "pushed_at": "2026-10-01T00:00:00Z",
+                "topics": ["n64", "static-recompilation"]}
+        return json.dumps({**base, **kw}).encode()
+
+    def release(self, tag: str, *names: str, pre: bool = False) -> rc.Release:
+        return rc.Release(tag, tag, "", "2026-10-02", pre, "https://x", tuple({"name": n, "size": 10, "url": f"https://x/{n}", "digest": ""} for n in names))
+
+    def test_checking_a_repository_suggests_the_details_and_shows_the_downloads(self):
+        rels = [self.release("v1.0", "CoolRecomp-windows-x64.zip", "CoolRecomp-linux-x64.tar.gz")]
+        with mock.patch.object(rc, "_get", return_value=self.facts()), mock.patch.object(rc, "releases", return_value=rels):
+            rep = rc.inspect_repo("github.com/someone/cool-recomp")
+        self.assertTrue(rep.ok)
+        self.assertEqual((rep.repo, rep.name, rep.kind, rep.system, rep.stars), ("Someone/Cool-Recomp", "Cool Recomp", "Static recompilation", "Nintendo 64", 321))
+        self.assertEqual(set(rep.downloads), {"windows", "linux"})  # nothing for macOS: said, not hidden
+        self.assertEqual(rep.release, "v1.0")
+
+    def test_a_project_with_no_release_yet_can_still_be_added(self):
+        with mock.patch.object(rc, "_get", return_value=self.facts()), \
+                mock.patch.object(rc, "releases", side_effect=rc.RecompError("someone/cool-recomp has no public releases.")):
+            rep = rc.inspect_repo("someone/cool-recomp")
+        self.assertTrue(rep.ok)
+        self.assertEqual(rep.downloads, {})
+
+    def test_repository_problems_come_back_as_sentences(self):
+        import urllib.error
+        for err, word in ((urllib.error.HTTPError("u", 404, "x", {}, None), "doesn't exist"), (urllib.error.HTTPError("u", 403, "x", {}, None), "rate-limiting"),
+                          (urllib.error.URLError("down"), "reach")):
+            with mock.patch.object(rc, "_get", side_effect=err):
+                rep = rc.inspect_repo("a/b")
+            self.assertFalse(rep.ok)
+            self.assertIn(word, rep.error)
+        self.assertIn("GitHub", rc.inspect_repo("nonsense").error)
+
+    def test_kind_and_system_are_read_from_topics_then_the_description(self):
+        self.assertEqual(rc.guess_kind(["decompilation"], ""), "Decompilation")
+        self.assertEqual(rc.guess_kind([], "A source port of X"), "Source port")
+        self.assertEqual(rc.guess_kind(["lua"], "something"), "")
+        self.assertEqual(rc.guess_system(["gamecube"], ""), "GameCube")
+        self.assertEqual(rc.guess_system([], "Recompilation of a PSP game"), "PSP")
 
 
 def fake_pe(subsystem: int, plus: bool = True) -> bytes:

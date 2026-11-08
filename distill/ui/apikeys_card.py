@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QGridLayout, QLabel, QLineEdit, QMessageBox, QPushButton
 
 from .. import apikeys
+from . import msgbox
 from .state import LABEL_W
 from .widgets import Card, hint
 
@@ -68,7 +69,7 @@ class ApiKeysCard(Card):
         text = self.edits[name].text().strip()
         title = dict((k[0], k[1]) for k in KEYS)[name]
         if not text:
-            QMessageBox.information(self, title, "Enter a key first.")
+            msgbox.information(self, title, "Enter a key first.")
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -76,4 +77,4 @@ class ApiKeysCard(Card):
             problem = recomps.sgdb_test(text) if name == "sgdb" else apikeys.test_github(text)
         finally:
             QApplication.restoreOverrideCursor()
-        QMessageBox.information(self, title, problem or "The key works.")
+        msgbox.information(self, title, problem or "The key works.")

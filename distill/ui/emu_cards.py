@@ -4,13 +4,14 @@ fork, and the small count tiles at the top. Pure layout and painting: what to sh
 from __future__ import annotations
 
 import html
+import math
 import re
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
-from . import icons
+from . import fillmath, icons, motion
 from .icons import pixmap
 from .theme import T
 
@@ -142,14 +143,163 @@ def _shrinkable(label: QLabel) -> QLabel:
     return label
 
 
+class _FillVeil(QWidget):
+    """Lies over a card while it installs. It shows a true greyscale copy of the card, which fades in and then drains left to right as the
+    download comes in, so the card looks like it fills back up with colour. Clicks pass straight through it.
+
+    It is a plain child widget showing a cached picture, not a graphics effect: the list page is faded and its pictures held with effects
+    of their own (motion.reveal, flight.hold), and effects stacked inside effects are what crashed when an install was started and the
+    page left at once."""
+
+    def __init__(self, card: QWidget, radius: int):
+        super().__init__(card)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._card = card
+        self._radius = radius
+        self._grey = 0.0  # 0 = full colour, 1 = fully grey
+        self._fill = 0.0  # 0..1: the part on the left that has its colour back
+        self._busy = False
+        self._shot: QPixmap | None = None  # the card in greyscale
+        self._grabbing = False
+        self._stale = False
+        self._grey_anim = QVariantAnimation(self, easingCurve=QEasingCurve.Type.OutCubic)
+        self._grey_anim.valueChanged.connect(self._on_grey)
+        self._grey_anim.finished.connect(self._maybe_hide)
+        self._fill_anim = QVariantAnimation(self, easingCurve=QEasingCurve.Type.OutCubic)
+        self._fill_anim.valueChanged.connect(self._on_fill)
+        self._out_timer = QTimer(self)  # owned by the veil, so it dies with the card instead of firing at a deleted one
+        self._out_timer.setSingleShot(True)
+        self._out_timer.timeout.connect(self._fade_out)
+        self._phase = 0.0
+        self._ripple_timer = QTimer(self)  # the water's ripple, the same as on the update screen's filling logo
+        self._ripple_timer.setInterval(33)
+        self._ripple_timer.timeout.connect(self._ripple)
+        self._regrab_timer = QTimer(self)
+        self._regrab_timer.setSingleShot(True)
+        self._regrab_timer.timeout.connect(self._regrab)
+        self.hide()
+
+    def _on_grey(self, v) -> None:
+        self._grey = float(v)
+        self.update()
+
+    def _on_fill(self, v) -> None:
+        self._fill = float(v)
+        self.update()
+
+    def _ripple(self) -> None:
+        if motion.on() and self.isVisible() and 0.0 < self._fill < 1.0:
+            self._phase = (self._phase + 0.08) % (2 * math.pi)
+            self.update()
+
+    def _maybe_hide(self) -> None:
+        if not self._busy and self._grey <= 0.001:
+            self._ripple_timer.stop()
+            self.hide()
+            self._shot = None
+
+    def _go(self, anim: QVariantAnimation, now: float, target: float, ms: int) -> None:
+        anim.stop()
+        if not motion.on() or ms <= 0 or not self.isVisible():
+            (self._on_grey if anim is self._grey_anim else self._on_fill)(target)
+            if anim is self._grey_anim:
+                self._maybe_hide()
+            return
+        anim.setDuration(ms)
+        anim.setStartValue(now)
+        anim.setEndValue(target)
+        anim.start()
+
+    def refresh(self) -> None:
+        """The card's text changed: take the greyscale copy again (once, after the change has been drawn)."""
+        if self._busy and not self._regrab_timer.isActive():
+            self._regrab_timer.start(0)
+
+    def _regrab(self) -> None:
+        if not self._busy or not self._card.isVisible() or self._card.width() < 4:
+            self._shot = None
+            self.update()
+            return
+        self._grabbing = True  # the veil paints nothing while the card is copied, so it is not in its own picture
+        try:
+            src = self._card.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        finally:
+            self._grabbing = False
+        out = QImage(src.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        out.setDevicePixelRatio(src.devicePixelRatio())
+        out.fill(Qt.GlobalColor.transparent)
+        q = QPainter(out)
+        q.drawImage(0, 0, src.convertToFormat(QImage.Format.Format_Grayscale8).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied))
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        q.drawImage(0, 0, src)  # the grey only lands where the card has pixels, so the rounded corners stay
+        q.end()
+        self._shot = QPixmap.fromImage(out)
+        self.update()
+
+    def begin(self, frac: float = 0.0) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self.setGeometry(self._card.rect())
+        self.raise_()
+        self.show()
+        self._ripple_timer.start()
+        self._on_fill(frac)
+        self._regrab()
+        self._go(self._grey_anim, self._grey, 1.0, 260)
+
+    def progress(self, frac: float) -> None:
+        if self._busy:
+            self._go(self._fill_anim, self._fill, max(self._fill, min(1.0, frac)), 220)
+
+    def finish(self) -> None:
+        """Fill the last of it, then let the grey fade away."""
+        if not self._busy:
+            return
+        self._busy = False
+        if not self.isVisible() or not motion.on():
+            self._on_grey(0.0)
+            self._maybe_hide()
+            return
+        self._go(self._fill_anim, self._fill, 1.0, 220)
+        self._out_timer.start(240)
+
+    def _fade_out(self) -> None:
+        if not self._busy:
+            self._go(self._grey_anim, self._grey, 0.0, 320)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self._grabbing or self._grey <= 0.001 or self._shot is None:
+            return
+        w, h = self.width(), self.height()
+        edge = w * self._fill
+        amp = fillmath.wave_amplitude(self._fill, min(9.0, w * 0.03)) if motion.on() else 0.0
+        wave = lambda y: edge + amp * math.sin(2 * math.pi * y / h + self._phase)  # noqa: E731
+        water = QPainterPath()  # everything right of the rippling edge: the part still grey
+        water.moveTo(w, 0)
+        water.lineTo(wave(0), 0)
+        for y in range(3, h + 3, 3):
+            water.lineTo(wave(min(y, h)), min(y, h))
+        water.lineTo(w, h)
+        water.closeSubpath()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setClipPath(water)
+        p.setOpacity(self._grey)
+        p.drawPixmap(0, 0, self._shot)
+        p.end()
+
+
 class Clickable(QFrame):
     """A rounded surface that lifts its outline on hover and emits `clicked(key)` when pressed (mouse, Enter or Space)."""
 
     clicked = Signal(str)
+    context = Signal(str, QPoint)  # key, where on screen the right-click was
 
     def __init__(self, key: str, name: str = "emuCard", radius: int = 14):
         super().__init__()
         self.key = key
+        self._veil = _FillVeil(self, radius)
         self.setObjectName(name)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -166,6 +316,26 @@ class Clickable(QFrame):
             self.clicked.emit(self.key)
         else:
             super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.context.emit(self.key, event.globalPos())
+        event.accept()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._veil.setGeometry(self.rect())
+        self._veil.refresh()
+
+    def set_installing(self, busy: bool, frac: float = 0.0) -> None:
+        """Grey the card out while it installs and let the colour fill back in as the download comes in."""
+        if busy:
+            self._veil.begin(frac)
+        else:
+            self._veil.finish()
+
+    def set_install_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self._veil.progress(min(1.0, max(0.0, done / total)))
 
 
 class CardGrid(QWidget):
@@ -300,6 +470,21 @@ class LogoTile(QLabel):
         T.bind_css(self, lambda: "background: transparent; border: none;")  # replaces the monogram's theme-bound style, which would otherwise return on a restyle
         self.setPixmap(px)
         return True
+
+
+class SourceChip(QLabel):
+    """A small tag naming where a piece of text came from, in that source's colour; the full name is in its tooltip. The tooltip wears
+    the app's own colours: the chip's style is scoped to the chip so it doesn't spill into it."""
+
+    def __init__(self, text: str, tip: str, colour: str):
+        super().__init__(text)
+        self.setObjectName("sourceChip")
+        self.setToolTip(tip)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        c = QColor(colour)
+        T.bind_css(self, lambda: f"QLabel#sourceChip {{ {pill_css(c)} }} "
+                                 f"QToolTip {{ background: {T.card.name()}; color: {T.fg.name()}; border: 1px solid {T.border.name()}; "
+                                 "padding: 6px 8px; }")
 
 
 class Callout(QFrame):
@@ -457,10 +642,12 @@ class EmulatorCard(Clickable):
         self.update_btn.setVisible(can_update)
         self.launch.setEnabled(not busy)
         self.update_btn.setEnabled(not busy)
+        self.set_installing(busy)
         self.setToolTip(tip)
 
     def set_busy_text(self, text: str) -> None:
         self.pill.setText(text[:28])
+        self._veil.refresh()
 
     def set_logo(self, path: str) -> None:
         """Swap the monogram for the project's picture (left as it is when the file can't be read)."""
@@ -535,12 +722,14 @@ class EmulatorTile(Clickable):
         self.update_btn.setVisible(can_update)
         self.launch.setEnabled(not busy)
         self.update_btn.setEnabled(not busy)
+        self.set_installing(busy)
         head = "  ·  ".join(part for part in (self._system, facts) if part)
         self.setToolTip("\n\n".join(part for part in (head, tip) if part))
 
     def set_busy_text(self, text: str) -> None:
         self._status = text[:28]
         self._render()
+        self._veil.refresh()
 
     def set_logo(self, path: str) -> None:
         """Swap the monogram for the project's picture (left as it is when the file can't be read)."""

@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMenu, QTreeWidgetItem
 
 from .. import organize as org
+from . import msgbox
 from .theme import T
 
 PATCH_FILTER = "Patches (*.ips *.ups *.bps *.xdelta *.xdelta3 *.vcdiff);;All files (*)"
@@ -228,7 +229,7 @@ class PatchViewMixin:
         menu.addSeparator()
 
     def _patch_rename(self, key: str, k: tuple[str, ...], rom: Path, out: Path) -> None:
-        text, ok = QInputDialog.getText(self, "Name the Patched ROM", f"File name for the patched copy of {rom.name}:",
+        text, ok = msgbox.get_text(self, "Name the Patched ROM", f"File name for the patched copy of {rom.name}:",
                                         text=out.name)
         if not ok:
             return

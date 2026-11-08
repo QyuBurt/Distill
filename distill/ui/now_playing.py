@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons, motion
+from .frameless import FramelessDialog
 from .theme import T
 
 ART_PREVIEW_MAX = 640  # the larger cover's longest side, in pixels
@@ -172,14 +173,12 @@ class ClickLabel(QLabel):
             super().mousePressEvent(event)
 
 
-class ArtPreview(QDialog):
+class ArtPreview(FramelessDialog):
     """The cover at a larger size. Click it, or press Esc, to close."""
 
     def __init__(self, pixmap: QPixmap, title: str, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle(title or "Cover")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
+        super().__init__(parent, title or "Cover", "image", None, (0, 0))
+        lay = self.body((8, 8, 8, 8), 0)
         screen = QApplication.primaryScreen()
         room = int(min(screen.availableGeometry().width(), screen.availableGeometry().height()) * 0.8) if screen else 600
         side = max(120, min(ART_PREVIEW_MAX, room))

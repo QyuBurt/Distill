@@ -23,7 +23,7 @@ MAX_LINKS = 5000
 MAX_PAGE = 8 << 20
 ANY = "*"  # as an extension: every link that ends in some file name, whatever it is
 SCAN = re.compile(r"^scan(?:\[([^\]]*)\])?:(\S+)$", re.IGNORECASE)
-_TEXT_URL = re.compile(r"(?:https?://|magnet:\?)[^\s<>\"'\\]+", re.IGNORECASE)
+_TEXT_URL = re.compile(r"(?:https?://|ftps?://|magnet:\?)[^\s<>\"'\\]+", re.IGNORECASE)
 # Pages and page furniture, not files: what ANY must not pick up
 _PAGE_EXTENSIONS = (".html", ".htm", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi", ".shtml", ".css", ".js",
                     ".json", ".xml", ".rss", ".atom", ".txt", ".ico", ".svg", ".map", ".woff", ".woff2", ".ttf")
@@ -75,7 +75,7 @@ def _extension(path: str) -> str:
 def is_direct_file(url: str, exts: tuple[str, ...] | None = None) -> bool:
     """A web link to a file of a wanted type (judged by the end of its path)."""
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc or parts.path.endswith("/"):
+    if parts.scheme not in ("http", "https", "ftp", "ftps") or not parts.netloc or parts.path.endswith("/"):
         return False
     ext = _extension(parts.path)
     if not ext:
@@ -92,6 +92,8 @@ def _worth_taking(url: str, exts: tuple[str, ...] | None, videos: bool) -> bool:
     if is_direct_file(url, exts):
         return True
     parts = urllib.parse.urlsplit(url)
+    if parts.scheme in ("ftp", "ftps"):
+        return bool(parts.netloc and parts.path.strip("/"))  # a file or folder on an FTP server (not just the server)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return False
     if not parts.path.strip("/") and not parts.query and not parts.fragment:
