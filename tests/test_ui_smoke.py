@@ -206,6 +206,253 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
                 self.assertEqual(win.emd_remove.text(), "Unlink")
                 self.assertIsNotNone(em)
 
+    def test_linux_source_build_requires_a_folder_and_the_result_is_discoverable(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_source_ui_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(root / "state.json")
+        e = em.Emulator("ares", "ares", "Multi", repo="ares-emulator/ares", build="ares", exe=r"(^|/)ares$")
+        win._em_by_id = {e.id: e}
+        win._em_current = e.id
+        win._em_latest[e.id] = (rc.Release("source", "ares", "", "", False, "", ()), {})
+
+        def completed_build(key, live, version):
+            exe = live / "bin/ares"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"\x7fELF" + b"\0" * 64)
+            exe.chmod(0o755)
+            return live / "build-from-source.sh"
+
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.builds, "start", side_effect=completed_build) as start, \
+                mock.patch.object(emulator_page.QMessageBox, "information") as info:
+            win._em_build_from_source()
+            start.assert_not_called()
+            self.assertIn("Choose an Emulators folder", info.call_args.args[2])
+            em.set_emulators_root(win.em_store, root / "Emulators")
+            win._em_build_from_source()
+            start.assert_called_once()
+            self.assertEqual(start.call_args.args[2], "")
+            self.assertIn("Find installed", info.call_args.args[2])
+            with mock.patch.object(em, "default_roots", return_value=[]):
+                found = em.scan_all(win.em_store, [e], "linux")
+            self.assertIn(e.id, found)
+            em.apply_scan(win.em_store, found)
+            self.assertEqual(win.em_store.installed(e.id).exe_path(), root / "Emulators/ares/bin/ares")
+
+    def test_refused_linux_source_build_cannot_start_from_detail_or_card(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_refused_build_")
+        self.addCleanup(td.cleanup)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(Path(td.name) / "state.json")
+        entry = em._emulator({"id": "kytyps5", "name": "KytyPS5", "repo": "KytyPS5/KytyPS5",
+                              "trusted_owner": "KytyPS5", "build": "ares"}, "linux")
+        self.assertFalse(entry.available)
+        win._em_catalog = [entry]
+        win._em_by_id = {entry.id: entry}
+        win._em_latest[entry.id] = (rc.Release("source", "source", "", "", False, "", ()),
+                                   {"name": "built from source", "url": "", "size": 0})
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.builds, "start") as start, \
+                mock.patch.object(em.EmulatorInstaller, "live_for") as live, \
+                mock.patch.object(emulator_page.QMessageBox, "warning") as warning, \
+                mock.patch.object(emulator_page.QMessageBox, "information") as info, \
+                mock.patch.object(win, "_em_start_install") as download:
+            win._em_show_detail(entry.id)
+            self.assertTrue(win.emd_build.isHidden())
+            self.assertFalse(win.emd_main.isEnabled())
+            win._em_build_from_source()
+            self.assertEqual(warning.call_args.args[2], entry.notes)
+            warning.reset_mock()
+            win._em_card_action(entry.id, "update")
+            self.assertEqual(warning.call_args.args[2], entry.notes)
+            start.assert_not_called()
+            live.assert_not_called()
+            download.assert_not_called()
+            info.assert_not_called()
+
+    def test_linux_source_builds_are_excluded_from_card_and_bulk_download_updates(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        td = tempfile.TemporaryDirectory(prefix="distill_source_updates_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(root / "state.json")
+        exe = root / "ares"
+        exe.write_bytes(b"\x7fELF")
+        e = em.Emulator("ares", "ares", "Multi", repo="ares-emulator/ares", build="ares")
+        win.em_store.set_installed(rc.Installed(e.id, "v1", str(root), exe.name))
+        win._em_catalog = [e]
+        win._em_by_id = {e.id: e}
+        win._em_latest = {e.id: (rc.Release("v2", "v2", "", "", False, "", ()), {"url": ""})}
+        card = mock.Mock()
+        win.em_cards = {e.id: card}
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(emulator_page.QMessageBox, "question") as question:
+            self.assertEqual(win._em_updatable(), [])
+            win._em_apply_card(e)
+            self.assertFalse(card.apply.call_args.kwargs["can_update"])
+            win._em_update_all()
+            question.assert_not_called()
+            with mock.patch.object(win, "_em_show_detail") as detail, \
+                    mock.patch.object(win, "_em_build_from_source") as build, \
+                    mock.patch.object(win, "_em_start_install") as download:
+                win._em_card_action(e.id, "update")
+            detail.assert_called_once_with(e.id)
+            build.assert_called_once()
+            download.assert_not_called()
+
+    def test_linux_linked_and_scanned_project64_launches_through_wine_without_changing_ownership(self):
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_linked_wine_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name) / "Emulators"
+        root.mkdir()
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._em_store = rc.Store(Path(td.name) / "state.json")
+        em.set_emulators_root(win.em_store, root)
+        e = em.Emulator("project64", "Project64", "Nintendo 64", wine=True, exe=r"(^|/)Project64\.exe$")
+        win._em_by_id = {e.id: e}
+        with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                mock.patch.object(em.shutil, "which", return_value="/usr/bin/wine"):
+            for source, linked in (("link", "file"), ("scan", "folder")):
+                with self.subTest(source=source):
+                    folder = root if source == "link" else root / "Project64"
+                    folder.mkdir(exist_ok=True)
+                    exe = folder / "Project64.exe"
+                    exe.write_bytes(b"MZ")
+                    save = folder / "keep.sav"
+                    save.write_bytes(b"user save")
+                    if source == "link":
+                        em.link(win.em_store, e, exe, "linux")
+                    else:
+                        with mock.patch.object(em, "default_roots", return_value=[]):
+                            em.apply_scan(win.em_store, em.scan_all(win.em_store, [e], "linux"))
+                    installed = win.em_store.installed(e.id)
+                    self.assertEqual(installed.linked, linked)
+                    before = sorted(folder.iterdir())
+                    with mock.patch.object(em.subprocess, "Popen") as process:
+                        win._em_launch_id(e.id)
+                    self.assertEqual(process.call_args.args[0], ["wine", str(exe)])
+                    self.assertEqual(process.call_args.kwargs["cwd"], str(folder))
+                    self.assertEqual(win.em_store.installed(e.id), installed)
+                    self.assertEqual(sorted(folder.iterdir()), before)
+                    self.assertFalse((folder / em.LAUNCHER).exists())
+                    em.uninstall(win.em_store, e)
+                    self.assertEqual(exe.read_bytes(), b"MZ")
+                    self.assertEqual(save.read_bytes(), b"user save")
+
+    def owned_flatpak_window(self):
+        import queue
+        import tempfile
+        from pathlib import Path
+        from distill import emulators as em, recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_remove_flatpak_")
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.ui_q = queue.Queue()
+        win._em_store = rc.Store(root / "state.json")
+        em.set_emulators_root(win.em_store, root / "Emulators")
+        e = em.Emulator("mame", "MAME", "Arcade", flatpak="org.mamedev.MAME")
+        live = root / "Emulators/MAME"
+        live.mkdir(parents=True)
+        (live / em.LAUNCHER).write_text("#!/bin/sh\n")
+        save = live / "keep.sav"
+        save.write_bytes(b"user save")
+        installed = rc.Installed(e.id, "0.289", str(live), em.LAUNCHER)
+        win.em_store.data["flatpak_installs"] = {e.id: {"app": e.flatpak, "owned": True}}
+        win.em_store.set_installed(installed)
+        win._em_catalog = [e]
+        win._em_by_id = {e.id: e}
+        win._em_current = e.id
+        win.em_views.setCurrentIndex(1)
+        return win, e, installed, save
+
+    def test_owned_flatpak_removal_uses_a_guarded_worker_and_delivers_success_or_failure(self):
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        for fail in (True, False):
+            with self.subTest(failure=fail):
+                win, e, installed, save = self.owned_flatpak_window()
+                result = mock.Mock(returncode=1 if fail else 0, stderr=b"locked" if fail else b"", stdout=b"")
+                with mock.patch.object(rc, "platform_key", return_value="linux"), \
+                        mock.patch.object(emulator_page.QMessageBox, "question", return_value=emulator_page.QMessageBox.StandardButton.Yes) as question, \
+                        mock.patch.object(emulator_page.threading, "Thread") as worker, \
+                        mock.patch.object(em, "uninstall", wraps=em.uninstall) as uninstall, \
+                        mock.patch.object(em.subprocess, "run", return_value=result), \
+                        mock.patch.object(win, "_em_say", wraps=win._em_say) as say:
+                    win._em_remove()
+                    uninstall.assert_not_called()
+                    worker.assert_called_once_with(target=win._em_start_remove, args=(e,), daemon=True)
+                    worker.return_value.start.assert_called_once()
+                    self.assertFalse(win.emd_remove.isEnabled())
+                    self.assertFalse(win.emd_main.isEnabled())
+                    win._em_remove()
+                    win._em_begin_install(e)
+                    worker.assert_called_once()
+                    question.assert_called_once()
+                    self.assertFalse(win._em_busy[e.id].is_set())
+                    say.reset_mock()
+                    worker.call_args.kwargs["target"](*worker.call_args.kwargs["args"])
+                    say.assert_not_called()  # Workers queue results instead of touching Qt widgets.
+                    self.assertIn(e.id, win._em_busy)
+                    event = win.ui_q.get_nowait()
+                    self.assertEqual(event[0], "emu_removed")
+                    win._em_event(event)
+                    self.assertNotIn(e.id, win._em_busy)
+                    self.assertNotIn(e.id, win._em_removing)
+                    self.assertNotIn(e.id, win._em_prog)
+                    if fail:
+                        self.assertIn("locked", win.emd_msg.text())
+                        self.assertTrue(win.emd_remove.isEnabled())
+                        self.assertEqual(rc.Store(win.em_store.path).installed(e.id), installed)
+                        self.assertTrue(win.em_store.data["flatpak_installs"][e.id]["owned"])
+                        self.assertEqual(save.read_bytes(), b"user save")
+                    else:
+                        self.assertEqual(win.emd_msg.text(), "Uninstalled.")
+                        self.assertIsNone(rc.Store(win.em_store.path).installed(e.id))
+                        self.assertFalse(installed.exe_path().exists())
+
+    def test_windows_flatpak_removal_retains_the_existing_synchronous_path(self):
+        from distill import emulators as em, recomps as rc
+        from distill.ui import emulator_page
+
+        win, e, _installed, _save = self.owned_flatpak_window()
+        with mock.patch.object(rc, "platform_key", return_value="windows"), \
+                mock.patch.object(emulator_page.QMessageBox, "question", return_value=emulator_page.QMessageBox.StandardButton.Yes), \
+                mock.patch.object(emulator_page.threading, "Thread") as worker, \
+                mock.patch.object(em, "uninstall", wraps=em.uninstall) as uninstall:
+            win._em_remove()
+        uninstall.assert_called_once_with(win.em_store, e)
+        worker.assert_not_called()
+        self.assertEqual(win.emd_msg.text(), "Uninstalled.")
+
     def test_emulators_page_shows_compact_tiles_by_default_and_can_switch_to_cards(self):
         import tempfile
         from pathlib import Path
@@ -951,6 +1198,21 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         self.assertEqual(win._dl_visible(), [0, 1, 2])
         self.assertFalse(hasattr(win, "dl_extras"))
         self.assertIn("2 archive.org extras left out", win.dl_status.text())
+
+    def test_linux_format_filter_ignores_events_after_its_table_is_deleted(self):
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QTableView
+        import shiboken6
+        from distill.ui.ytdlp_picker import FormatRows
+
+        # Invoke the actual filter on a surviving Python wrapper, as Qt does during teardown.
+        table = QTableView()
+        rows = FormatRows.__new__(FormatRows)
+        QObject.__init__(rows)
+        rows.table = table
+        shiboken6.delete(table)
+        with mock.patch("distill.ui.ytdlp_picker.sys.platform", "linux"):
+            self.assertFalse(rows.eventFilter(rows, QEvent(QEvent.Type.Resize)))
 
     def test_a_video_row_opens_to_a_format_and_quality_choice(self):
         from distill import ytdlp

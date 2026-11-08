@@ -164,6 +164,19 @@ tests/                                unittest suite
 
 Rules the tests enforce: nothing outside `ui/` and `app.py` may import Qt, and modules never import each other in a circle.
 
+## Linux
+
+Run `python Distill.pyw` with Python 3.10+ and the dependencies in `requirements.txt` (including PySide6).
+Linux uses the XDG config, data, state and cache directories under `distill/`; downloaded tools live in
+`$XDG_DATA_HOME/distill/tools` (default `~/.local/share/distill/tools`). `DISTILL_PORTABLE=1` uses the app folder.
+Native tool downloads, Flatpak emulators, Project64 through Wine and an ares source-build action are supported.
+See [LINUX-BUILD.md](LINUX-BUILD.md) for packaging, runtime paths and tool requirements.
+
+**AppImage (x86_64):** build it with `bash packaging/build-in-docker.sh` (or take the `Distill-x86_64.AppImage` artifact from the
+*Linux AppImage* workflow), then `chmod +x Distill-x86_64.AppImage && ./Distill-x86_64.AppImage`. Verify it with the
+`Distill-x86_64.AppImage.sha256` file next to it. On systems without FUSE run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+Wayland is used when available. Flatpak and Wine are only needed for the emulators that use them.
+
 ## Credits
 
-Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License.
+Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License. Linux support (native tool downloads, Flatpak/Wine/source-build emulator installs and the AppImage packaging) builds on a Linux port by Niko.

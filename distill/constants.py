@@ -97,6 +97,52 @@ PKG_MISSING_HINT = {
 }
 
 
+if sys.platform.startswith("linux"):
+    _EXE = ".exe" if sys.platform == "win32" else ""  # only Windows programs carry the extension
+
+    def _missing_tool(main: str, linux_hint: str = "") -> str:
+        """Help text for a program that isn't there: what to pick, then (on Linux) where to get it."""
+        return main + (f"\n\n{linux_hint}" if linux_hint and sys.platform != "win32" else "")
+
+    TOOL_MISSING_TEXT = {  # shown when a page's tool can't be found (the Settings window opens on Tools)
+        "chd": _missing_tool(
+            f"Could not locate the 'chdman' program.\n\nPlease use the Browse button to select your actual chdman{_EXE} file.",
+            "On Linux chdman ships with MAME's tools: Fedora/Bazzite 'sudo rpm-ostree install mame-tools', "
+            "Debian/Ubuntu 'sudo apt install mame-tools', Arch 'sudo pacman -S mame-tools'."),
+        "rvz": _missing_tool(
+            f"Could not locate DolphinTool.\n\nPlease use the Browse button to select DolphinTool{_EXE} "
+            "(or your Dolphin folder).",
+            "On Linux, DolphinTool is built together with Dolphin (github.com/dolphin-emu/dolphin, cmake); no project "
+            "publishes a Linux binary of it."),
+        "cso": _missing_tool(
+            f"Could not locate the 'maxcso' program.\n\nPlease use the Browse button to select your maxcso{_EXE} file.",
+            "On Linux, maxcso has to be built from source (github.com/unknownbrackets/maxcso, make), or installed from "
+            "your distribution if it packages it."),
+        "xbox": _missing_tool(
+            f"Could not locate xdvdfs.\n\nPlease use the Browse button to select xdvdfs{_EXE} (from "
+            "github.com/antangelo/xdvdfs)."),
+        "ps3": _missing_tool(
+            f"Could not locate PS3Dec.\n\nPlease use the Browse button to select PS3Dec{_EXE} (on Windows it ships "
+            "inside PS3QDD, github.com/ElektroStudios/PS3-Quick-Disc-Decryptor; on Linux and macOS use ps3dec from "
+            "github.com/Redrrx/ps3dec)."),
+        "relinker": _missing_tool(
+            f"Could not locate the AnyPS5 relinker.\n\nUse the Browse button to select relinker{_EXE} (from a "
+            "boykopovar/AnyPS5 release or your own build), or choose KytyPS5 instead."),
+        "zar": _missing_tool(
+            f"Could not locate the 'zarchive' program.\n\nPlease use the Browse button to select zarchive{_EXE} "
+            "(from github.com/Exzap/ZArchive).",
+            "On Linux, ZArchive has to be built from source (github.com/Exzap/ZArchive, cmake), or installed from your "
+            "distribution if it packages it."),
+    }
+
+    PKG_MISSING_HINT = {
+        "anyps5": f"Please use the Browse button to select pkg-to-anyps5{_EXE} (or install it with  cargo install "
+                  "--git https://github.com/awake-devel/pkg-to-anyps5).",
+        "shadplus": f"Please use the Browse button to select pkg_extractor{_EXE} (from github.com/AzaharPlus/shadPS4Plus, "
+                    "release 'PKG Extractor').",
+    }
+
+
 TOOLS_DIR_NAME = "tools"  # every conversion tool gets a folder of its own in here
 
 

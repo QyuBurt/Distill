@@ -176,7 +176,16 @@
     "dolphin-emu",
     "dolphin emulator"
    ],
-   "exe": "(^|/)Dolphin(\\.exe)?$|\\.app$"
+   "exe": "(^|/)Dolphin(\\.exe)?$|\\.app$",
+   "linux": {
+    "platforms": [
+     "windows",
+     "macos",
+     "linux"
+    ],
+    "notes": "An open-source emulator for GameCube and Wii games that supports high-definition rendering, network play, and modding tools. On Linux it is installed from Flathub.",
+    "flatpak": "org.DolphinEmu.dolphin-emu"
+   }
   },
   {
    "id": "cemu",
@@ -238,7 +247,23 @@
     "eden"
    ],
    "portable": "user/",
-   "channels": "stable"
+   "channels": "stable",
+   "linux": {
+    "platforms": [
+     "windows",
+     "linux"
+    ],
+    "download_hosts": [
+     "git.eden-emu.dev",
+     "stable.eden-emu.dev"
+    ],
+    "asset": {
+     "linux": "Eden-Linux-v[0-9.]+-amd64-clang-pgo\\.AppImage$",
+     "windows": "Eden-Windows-v[0-9.]+-amd64-msvc-standard\\.zip$"
+    },
+    "exe": "(^|/)Eden[^/]*\\.AppImage$|(^|/)eden\\.exe$",
+    "verify": false
+   }
   },
   {
    "id": "sudachi",
@@ -393,7 +418,18 @@
     "xenia",
     "xenia_canary"
    ],
-   "portable": "portable.txt"
+   "portable": "portable.txt",
+   "linux": {
+    "platforms": [
+     "windows",
+     "linux"
+    ],
+    "asset": {
+     "linux": "linux.*\\.(tar[\\w.]*|zip)$",
+     "windows": "windows"
+    },
+    "exe": "(^|/)xenia_canary$|(^|/)xenia_canary\\.exe$"
+   }
   },
   {
    "id": "xemu",
@@ -470,7 +506,14 @@
    },
    "notes": "An extensive multi-purpose hardware preservation project designed to reproduce arcade machines and vintage computers.",
    "systems": [],
-   "exe": "(^|/)mame[\\w.]*\\.exe$"
+   "exe": "(^|/)mame[\\w.]*\\.exe$",
+   "linux": {
+    "platforms": [
+     "windows",
+     "linux"
+    ],
+    "flatpak": "org.mamedev.MAME"
+   }
   },
   {
    "id": "ares",
@@ -495,7 +538,20 @@
     "WonderSwan",
     "Neo Geo Pocket"
    ],
-   "notes": "An open-source multi-system emulator focused on cycle accuracy and source code clarity."
+   "notes": "An open-source multi-system emulator focused on cycle accuracy and source code clarity.",
+   "linux": {
+    "notes": "An open-source multi-system emulator focused on cycle accuracy and source code clarity. On Linux it is built from source (a script in a terminal does the work).",
+    "build": "ares",
+    "platforms": [
+     "windows",
+     "linux",
+     "macos"
+    ],
+    "asset": {
+     "windows": "windows.*\\.zip$"
+    },
+    "exe": "(^|/)ares(\\.exe)?$"
+   }
   },
   {
    "id": "snes9x",
@@ -528,7 +584,25 @@
    ],
    "platforms": [
     "windows"
-   ]
+   ],
+   "linux": {
+    "notes": "A free and open-source emulator for the Nintendo 64 and Nintendo 64 Disk Drive. On Linux the portable build runs through Wine.",
+    "platforms": [
+     "windows",
+     "linux"
+    ],
+    "source": "custom",
+    "adapter": "pj64_site",
+    "wine": true,
+    "download_hosts": [
+     "www.pj64-emu.com"
+    ],
+    "asset": {
+     "windows": "\\.zip$",
+     "linux": "\\.zip$"
+    },
+    "exe": "(^|/)Project64\\.exe$"
+   }
   },
   {
    "id": "lime3ds",
@@ -601,7 +675,15 @@
    "platforms": [
     "windows",
     "macos"
-   ]
+   ],
+   "linux": {
+    "platforms": [
+     "windows",
+     "macos",
+     "linux"
+    ],
+    "flatpak": "org.scummvm.ScummVM"
+   }
   },
   {
    "id": "blastem",

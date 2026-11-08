@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from distill import batch
 from distill.batch import BatchRunner
 from distill.models import Config
 from tests.helpers import (FAKE_CHDMAN, FAKE_PKG_EXTRACTOR, POSIX_ONLY, TempDirTest, build_pkg, logs, make_tool,
@@ -286,6 +287,49 @@ class PkgRunTests(IsolatedAppDir):
         self.assertEqual(len(summary.failures), 1)  # the update and the DLC have no eboot of their own
         self.assertTrue(summary.failures[0].name.startswith("game"))
         self.assertIn("eboot.bin", summary.failures[0].reason.lower())
+
+
+class WindowsPs3DecTests(unittest.TestCase):
+    def test_windows_keeps_the_original_command_without_running_a_probe(self):
+        with mock.patch.object(batch.sys, "platform", "win32"), \
+                mock.patch.object(batch.subprocess, "run") as run:
+            got = batch.ps3dec_args("PS3Dec.exe", "ab" * 16, Path("in.iso"), Path("out.iso"))
+        self.assertEqual(got, ["d", "key", "ab" * 16, "in.iso", "out.iso"])
+        run.assert_not_called()
+
+
+@POSIX_ONLY  # the stand-in programs are shebang scripts
+class Ps3DecDialectTests(TempDirTest):
+    """Two PS3Dec programs are in the wild: PS3QDD's 1.x takes a sub-command, the Rust 3.x rewrite takes flags.
+
+    Distill has to drive whichever one it is handed, so it asks the program itself once and remembers the answer.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(batch.sys, "platform", "linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def program(self, name: str, help_text: str) -> str:
+        batch._PS3DEC_STYLE.clear()  # the answer is cached per program path
+        return str(make_tool(self.tmp / name, f"print({help_text!r})"))
+
+    def test_the_rust_rewrite_gets_flags_with_no_closing_prompt(self):
+        exe = self.program("ps3dec", "Usage: ps3dec [OPTIONS] [ISO]...\n  -k, --dk <DK>  Decryption key")
+        got = batch.ps3dec_args(exe, "ab" * 16, Path("/in/Game.iso"), Path("/out/Game - BLES00000.iso"))
+        # -s skips its "press a key" ending, which would leave a batch run waiting forever
+        self.assertEqual(got, ["-k", "ab" * 16, "-s", "-o", "/out", "-n", "Game - BLES00000", "/in/Game.iso"])
+
+    def test_ps3qdd_keeps_the_sub_command_form(self):
+        exe = self.program("PS3Dec", "PS3Dec - d key <32 hex> <input iso> <output iso>")
+        got = batch.ps3dec_args(exe, "ab" * 16, Path("/in/Game.iso"), Path("/out/x.iso"))
+        self.assertEqual(got, ["d", "key", "ab" * 16, "/in/Game.iso", "/out/x.iso"])
+
+    def test_a_program_that_will_not_run_falls_back_to_the_sub_command(self):
+        batch._PS3DEC_STYLE.clear()
+        got = batch.ps3dec_args(str(self.tmp / "not-here"), "ab" * 16, Path("/in/x.iso"), Path("/out/x.iso"))
+        self.assertEqual(got, ["d", "key", "ab" * 16, "/in/x.iso", "/out/x.iso"])
 
 
 if __name__ == "__main__":

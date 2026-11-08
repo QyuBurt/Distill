@@ -6,6 +6,7 @@ import json
 import urllib.error
 import os
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -93,11 +94,530 @@ class ManifestTests(Isolated):
         self.assertFalse(cat["kytyps5"].available)  # and the repo no longer matches it
         self.assertIn("malware", cat["kytyps5"].notes)
 
+    def test_linux_overrides_cannot_remove_a_bundled_trusted_owner(self):
+        user = self.tmp / "mine.json"
+        user.write_text(json.dumps({"emulators": [{"id": "kytyps5", "name": "KytyPS5",
+                        "repo": "KytyPS5/KytyPS5", "linux": {"repo": "evil/KytyPS5", "trusted_owner": ""}}]}))
+        cat = {e.id: e for e in em.load_catalog([em.bundled_manifest(), user], "linux")}
+        self.assertEqual(cat["kytyps5"].trusted_owner, "KytyPS5")
+        self.assertFalse(cat["kytyps5"].available)
+        self.assertIn("malware", cat["kytyps5"].notes)
+
+    def test_linux_catalog_download_sources_leave_windows_unchanged(self):
+        windows = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}
+        linux = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "linux")}
+        # Eden's Windows source is whatever the shared entry says (Forgejo since upstream v1.1.7); only "linux" may differ.
+        self.assertEqual(windows["eden"].repo, "eden-emu/eden")
+        self.assertEqual(windows["eden"].source, "forgejo")
+        self.assertEqual(windows["eden"].host, "git.eden-emu.dev")
+        self.assertEqual(windows["eden"].asset, {})
+        self.assertEqual(windows["project64"].source, "github")
+        self.assertEqual(linux["eden"].source, "forgejo")
+        self.assertEqual(linux["eden"].host, "git.eden-emu.dev")
+        self.assertEqual(linux["project64"].adapter, "pj64_site")
+        self.assertTrue(linux["project64"].wine)
+
+    def test_linux_overrides_cannot_add_install_kinds_to_a_pinned_entry(self):
+        user = self.tmp / "mine.json"
+        for kind, value in (("flatpak", "org.unrelated.App"), ("build", "ares"), ("wine", True)):
+            for owner in ({}, {"trusted_owner": ""}, {"trusted_owner": "KytyPS5"}):
+                with self.subTest(kind=kind, owner=owner):
+                    user.write_text(json.dumps({"emulators": [{"id": "kytyps5", "name": "KytyPS5",
+                                    "repo": "KytyPS5/KytyPS5", "linux": {kind: value, **owner}}]}))
+                    for platform in ("linux", "windows", "macos"):
+                        entry = next(e for e in em.load_catalog([em.bundled_manifest(), user], platform)
+                                     if e.id == "kytyps5")
+                        self.assertEqual(entry.trusted_owner, "KytyPS5")
+                        self.assertEqual(entry.available, platform != "linux")
+                        self.assertEqual(em.downloadable(entry, platform), platform != "linux")
+                        if platform == "linux":
+                            self.assertTrue(entry.notes.startswith("Refused:"))
+                            self.assertIn("trusted owner KytyPS5", entry.notes)
+
+    def test_bundled_linux_install_kinds_are_unpinned_and_available(self):
+        entries = [e for e in em.load_catalog([em.bundled_manifest()], "linux") if e.flatpak or e.build or e.wine]
+        self.assertEqual({e.id for e in entries}, {"dolphin", "mame", "scummvm", "ares", "project64"})
+        for entry in entries:
+            with self.subTest(entry=entry.id):
+                self.assertFalse(entry.trusted_owner)
+                self.assertTrue(em.downloadable(entry, "linux"))
+
     def test_an_entry_marked_inactive_is_listed_but_not_downloadable(self):
         cat = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "windows")}
         self.assertFalse(em.downloadable(cat["anyps5"]))
         self.assertTrue(em.downloadable(cat["pcsx2"]))
-        self.assertFalse(em.downloadable(cat["mame"], "linux"))  # Windows-only build
+        self.assertFalse(em.downloadable(cat["mame"], "linux"))
+        cat = {e.id: e for e in em.load_catalog([em.bundled_manifest()], "linux")}
+        # MAME publishes no Linux build of its own, but it is on Flathub.
+        self.assertTrue(em.downloadable(cat["mame"], "linux"))
+        self.assertEqual(cat["mame"].flatpak, "org.mamedev.MAME")
+
+
+class LinuxInstallKinds(Isolated):
+    """Linux gets emulators three ways a Windows-only catalog never had to describe: Flatpak, Wine and a named
+    executable buried deeper than the guessing limit (Xenia's lives in build/bin/Linux/Release)."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(rc, "platform_key", return_value="linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (("flatpak_installed_apps", set()), ("flatpak_installed_version", ""),
+                            ("flatpak_installed_commit", "")):
+            patcher = mock.patch.object(em, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_refused_entries_cannot_reach_any_linux_installer(self):
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        note = "Refused: the trusted owner cannot be verified."
+        for kind in ({"flatpak": "org.unrelated.App"}, {"build": "ares"}, {"wine": True}, {}):
+            with self.subTest(kind=kind), \
+                    mock.patch.object(installer, "_install_flatpak") as flatpak, \
+                    mock.patch.object(installer, "_need_wine") as wine, \
+                    mock.patch.object(rc.Installer, "install") as download:
+                entry = emu(available=False, notes=note, **kind)
+                self.assertFalse(em.downloadable(entry))
+                with self.assertRaisesRegex(rc.RecompError, "^" + note + "$"):
+                    installer.install(entry, rel("v1"), {})
+                flatpak.assert_not_called()
+                wine.assert_not_called()
+                download.assert_not_called()
+        with mock.patch.object(installer, "_flatpak") as command:
+            with self.assertRaisesRegex(rc.RecompError, "Refused:"):
+                installer._install_flatpak(emu(available=False, notes=note, flatpak="org.unrelated.App"), rel("v1"))
+            command.assert_not_called()
+
+    def test_refused_linux_entries_cannot_launch_flatpak_or_wine(self):
+        for kind, name in (({"flatpak": "org.unrelated.App"}, em.LAUNCHER), ({"wine": True}, "Program.exe")):
+            with self.subTest(kind=kind), mock.patch.object(em.subprocess, "Popen") as process, \
+                    mock.patch.object(rc, "launch") as launch, \
+                    mock.patch.object(em.EmulatorInstaller, "_need_wine") as wine:
+                entry = emu(available=False, notes="Refused: untrusted install kind.", **kind)
+                installed = rc.Installed(entry.id, "v1", str(self.tmp), name)
+                with self.assertRaisesRegex(rc.RecompError, "Refused:"):
+                    em.launch(entry, installed)
+                launch.assert_not_called()
+                process.assert_not_called()
+                wine.assert_not_called()
+                for platform in ("windows", "macos"):
+                    with mock.patch.object(rc, "platform_key", return_value=platform):
+                        em.launch(entry, installed)
+                self.assertEqual(launch.call_args_list, [mock.call(installed), mock.call(installed)])
+
+    def test_source_builds_are_not_download_updates_but_windows_still_uses_downloads(self):
+        e = emu(id="ares", name="ares", build="ares")
+        installed = rc.Installed(e.id, "v1", str(self.tmp), "ares")
+        latest = (rel("v2"), {"name": "built from source", "url": "", "size": 0})
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(rc.Installer, "install", return_value=installed) as download:
+            self.assertEqual(em.update_state(e, installed, latest), "unknown")
+            self.assertFalse(em.auto_update_ok(e))
+            with self.assertRaisesRegex(rc.RecompError, "Build from source"):
+                installer.install(e, *latest)
+            download.assert_not_called()
+            with mock.patch.object(rc, "platform_key", return_value="windows"):
+                self.assertEqual(em.update_state(e, installed, latest), "update")
+                self.assertTrue(em.auto_update_ok(e))
+                self.assertEqual(installer.install(e, *latest), installed)
+            download.assert_called_once()
+
+    def test_flatpak_queries_force_a_stable_locale_without_changing_the_environment(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+
+        def query(*args, **kwargs):
+            env = kwargs["env"]
+            self.assertEqual((env["LC_ALL"], env["LANG"]), ("C", "C"))
+            self.assertNotIn("LANGUAGE", env)
+            return mock.Mock(returncode=0, stdout=("Version: 2.0\nCommit: " + "b" * 64).encode())
+
+        with mock.patch.dict(os.environ, {"LC_ALL": "fr_FR.UTF-8", "LANG": "fr_FR.UTF-8", "LANGUAGE": "fr"}), \
+                mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em.subprocess, "run", side_effect=query) as run:
+            latest = em.latest_for(e, self.store)
+            self.assertEqual(os.environ["LANGUAGE"], "fr")
+            self.assertEqual(os.environ["LC_ALL"], "fr_FR.UTF-8")
+        run.assert_called_once()
+        self.assertEqual((latest[0].tag, latest[1]["flatpak_commit"]), ("2.0", "b" * 64))
+        installed = rc.Installed(e.id, "1.0", str(self.tmp), em.LAUNCHER, stamp="a" * 64)
+        self.assertEqual(em.update_state(e, installed, latest), "update")
+
+    def test_unreadable_flatpak_metadata_does_not_substitute_the_installed_version(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installed = rc.Installed(e.id, "2.0", str(self.tmp), em.LAUNCHER)
+        for text in (None, "", "版本: 3.0\n提交: " + "a" * 64):
+            with self.subTest(text=text), mock.patch.object(em, "flatpak_available", return_value=True), \
+                    mock.patch.object(em, "_flatpak_out", return_value=text), \
+                    mock.patch.object(em, "flatpak_installed_version", return_value="2.0") as version:
+                latest = em.latest_for(e, self.store)
+                self.assertIsInstance(latest, tuple)
+                self.assertEqual(latest[0].tag, "latest")
+                self.assertEqual(latest[1]["flatpak_commit"], "")
+                self.assertEqual(em.update_state(e, installed, latest), "unknown")
+                version.assert_not_called()
+
+    def test_missing_user_remote_still_allows_initial_flatpak_installation(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "_flatpak_remote_info", return_value=("", "")):
+            latest = em.latest_for(e, self.store)
+        self.assertIsInstance(latest, tuple)
+        self.assertEqual(latest[0].tag, "latest")
+        self.assertEqual(em.update_state(e, None, latest), "missing")
+        previous = rc.Installed(e.id, "0.288", str(self.tmp), em.LAUNCHER, stamp="a" * 64)
+        self.assertEqual(em.update_state(e, previous, latest), "unknown")
+        unknown = rc.Installed(e.id, "latest", str(self.tmp), em.LAUNCHER)
+        self.assertEqual(em.update_state(e, unknown, (rel("0.289"), {"flatpak_commit": "b" * 64})), "unknown")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_version", return_value="0.289"), \
+                mock.patch.object(em, "flatpak_installed_commit", return_value="b" * 64), \
+                mock.patch.object(installer, "_flatpak") as flatpak:
+            installed = installer.install(e, *latest)
+        self.assertEqual(flatpak.call_args_list, [
+            mock.call(["remote-add", "--user", "--if-not-exists", "flathub", em.FLATPAK_REMOTE_URL]),
+            mock.call(["install", "--user", "-y", "--or-update", "flathub", e.flatpak]),
+        ])
+        self.assertEqual((installed.version, installed.stamp), ("0.289", "b" * 64))
+
+    def test_wine_launch_preserves_native_windows_and_installed_launcher_paths(self):
+        e = emu(id="project64", wine=True)
+        for platform, executable in (("windows", "Project64.exe"), ("linux", em.LAUNCHER)):
+            with self.subTest(platform=platform), mock.patch.object(rc, "platform_key", return_value=platform), \
+                    mock.patch.object(rc, "launch") as native, \
+                    mock.patch.object(em.subprocess, "Popen") as process:
+                installed = rc.Installed(e.id, "3.0", str(self.tmp), executable, linked="folder")
+                em.launch(e, installed)
+                native.assert_called_once_with(installed)
+                process.assert_not_called()
+
+    def test_windows_flatpak_query_environment_is_unchanged(self):
+        with mock.patch.object(rc, "platform_key", return_value="windows"), \
+                mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=b"")) as run:
+            em._flatpak_out(["list", "--app"])
+        self.assertNotIn("env", run.call_args.kwargs)
+
+    def test_a_flatpak_entry_needs_no_release_files(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME", platforms=("windows", "linux"))
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_version", return_value=""), \
+                mock.patch.object(em, "_flatpak_remote_info", return_value=("0.289", "a" * 64)):
+            got = em.latest_for(e, self.store)
+        self.assertIsInstance(got, tuple)
+        rel, chosen = got
+        self.assertEqual(rel.tag, "0.289")
+        self.assertIn("org.mamedev.MAME", chosen["name"])
+
+    def test_without_flatpak_the_reason_is_explained_not_a_traceback(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME", platforms=("windows", "linux"))
+        with mock.patch.object(em, "flatpak_available", return_value=False):
+            got = em.latest_for(e, self.store)
+        self.assertIsInstance(got, str)
+        self.assertIn("Flatpak", got)
+
+    def test_flatpak_install_is_per_user_and_preserves_existing_files(self):
+        import threading
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        live = installer.live_for(e)
+        live.mkdir(parents=True)
+        save = live / "keep.sav"
+        save.write_bytes(b"save data")
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(installer, "_flatpak") as flatpak:
+            installed = installer.install(e, rel("0.289"), {})
+        self.assertEqual(flatpak.call_args_list, [
+            mock.call(["remote-add", "--user", "--if-not-exists", "flathub", em.FLATPAK_REMOTE_URL]),
+            mock.call(["install", "--user", "-y", "--or-update", "flathub", "org.mamedev.MAME"]),
+        ])
+        self.assertEqual(save.read_bytes(), b"save data")
+        self.assertTrue(installed.exe_path().is_file())
+        self.assertIn("exec flatpak run org.mamedev.MAME", installed.exe_path().read_text())
+        self.assertEqual(self.store.installed(e.id), installed)
+
+    def test_cancelling_a_running_flatpak_stops_its_child_without_recording_an_install(self):
+        entry = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        for needs_kill in (False, True):
+            with self.subTest(needs_kill=needs_kill):
+                cancel = threading.Event()
+                installer = em.EmulatorInstaller(self.store, lambda *a: None, cancel)
+                remote, child = mock.MagicMock(returncode=0), mock.MagicMock(returncode=-15)
+                for process in (remote, child):
+                    process.__enter__.return_value = process
+                remote.communicate.return_value = (b"", b"")
+
+                def blocked(timeout=None):
+                    if not cancel.is_set():
+                        cancel.set()
+                        raise em.subprocess.TimeoutExpired("flatpak", timeout)
+                    if needs_kill and not child.kill.called:
+                        raise em.subprocess.TimeoutExpired("flatpak", timeout)
+                    return b"", b""
+
+                child.communicate.side_effect = blocked
+                with mock.patch.object(em, "flatpak_available", return_value=True), \
+                        mock.patch.object(em.subprocess, "Popen", side_effect=[remote, child]) as popen:
+                    with self.assertRaises(rc.Cancelled):
+                        installer.install(entry, rel("0.289"), {})
+                self.assertEqual(popen.call_args.args[0],
+                                 ["flatpak", "install", "--user", "-y", "--or-update", "flathub", entry.flatpak])
+                self.assertEqual(popen.call_args.kwargs["stdout"], em.subprocess.PIPE)
+                self.assertEqual(popen.call_args.kwargs["stderr"], em.subprocess.PIPE)
+                remote.terminate.assert_not_called()
+                remote.kill.assert_not_called()
+                child.terminate.assert_called_once_with()
+                self.assertEqual(child.kill.call_count, int(needs_kill))
+                self.assertEqual(child.communicate.call_args_list[1], mock.call(timeout=3))
+                self.assertEqual(child.communicate.call_count, 3 if needs_kill else 2)
+                if needs_kill:
+                    child.communicate.assert_called_with()
+                self.assertIsNone(self.store.installed(entry.id))
+                self.assertNotIn(entry.id, self.store.data.get("flatpak_installs", {}))
+                self.assertFalse(installer.live_for(entry).exists())
+
+    def test_flatpak_cancel_after_return_or_metadata_does_not_record_success(self):
+        entry = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        for stage in ("runner", "install", "metadata"):
+            with self.subTest(stage=stage):
+                cancel = threading.Event()
+                progress = mock.Mock()
+                installer = em.EmulatorInstaller(self.store, progress, cancel)
+
+                def finished(args, **kwargs):
+                    if args[0] == "install":
+                        cancel.set()
+
+                target, method = (em, "_run_flatpak") if stage == "runner" else (installer, "_flatpak")
+                with mock.patch.object(em, "flatpak_available", return_value=True), \
+                        mock.patch.object(target, method, side_effect=finished if stage != "metadata" else None), \
+                        mock.patch.object(em, "flatpak_installed_commit", side_effect=(lambda app: cancel.set())
+                                          if stage == "metadata" else None):
+                    with self.assertRaises(rc.Cancelled):
+                        installer.install(entry, rel("0.289"), {})
+                self.assertIsNone(self.store.installed(entry.id))
+                self.assertNotIn(entry.id, self.store.data.get("flatpak_installs", {}))
+                self.assertNotIn(mock.call("Installed.", 1, 1), progress.call_args_list)
+
+    def test_cancellable_flatpak_preserves_timeout_and_stderr_errors(self):
+        for times_out in (False, True):
+            with self.subTest(times_out=times_out):
+                child = mock.MagicMock(returncode=1)
+                child.__enter__.return_value = child
+                child.communicate.side_effect = ([em.subprocess.TimeoutExpired("flatpak", 0.2), (b"", b"")]
+                                                 if times_out else None)
+                child.communicate.return_value = (b"fallback", b"first\nsecond\nthird\nfourth\n")
+                clock = [0, 0, 3601] if times_out else [0, 0]
+                with mock.patch.object(em.subprocess, "Popen", return_value=child), \
+                        mock.patch.object(em.time, "monotonic", side_effect=clock):
+                    message = "Flatpak took too long and was stopped" if times_out else "Flatpak could not install: second third fourth"
+                    with self.assertRaisesRegex(rc.RecompError, message):
+                        em._run_flatpak(["install", "example"], cancel=threading.Event())
+                self.assertEqual(child.terminate.call_count, int(times_out))
+                child.kill.assert_not_called()
+
+    def test_flatpak_update_preserves_linked_ownership_and_uninstall_preserves_saves(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        em.set_emulators_root(self.store, self.tmp / "emus")
+        save = self.touch("Original/keep.sav", b"user save")
+        previous = rc.Installed(e.id, "0.288", str(save.parent), "mame", 1.0, "folder")
+        self.store.set_installed(previous)
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_apps", return_value={e.flatpak}), \
+                mock.patch.object(installer, "_flatpak"):
+            installed = installer.install(e, rel("0.289"), {})
+        self.assertEqual(installed.linked, "folder")
+        self.assertEqual(installed.folder, previous.folder)
+        reloaded = rc.Store(self.store.path)
+        with mock.patch.object(em, "_run_flatpak") as flatpak:
+            self.assertIn("left where they are", em.uninstall(reloaded, e))
+        flatpak.assert_not_called()
+        self.assertEqual(save.read_bytes(), b"user save")
+        self.assertIsNone(reloaded.installed(e.id))
+
+    def test_flatpak_update_runs_or_update_before_recording_the_new_release(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        live = installer.live_for(e)
+        previous = rc.Installed(e.id, "0.288", str(live), em.LAUNCHER)
+        self.store.set_installed(previous)
+        self.store.data["flatpak_installs"] = {e.id: {"app": e.flatpak, "owned": True}}
+
+        def install(args):
+            self.assertEqual(self.store.installed(e.id), previous)
+            if args[0] == "install":
+                self.assertIn("--or-update", args)
+
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_apps", return_value={e.flatpak}), \
+                mock.patch.object(em, "flatpak_installed_version", return_value="0.289"), \
+                mock.patch.object(em, "flatpak_installed_commit", return_value="a" * 64), \
+                mock.patch.object(installer, "_flatpak", side_effect=install) as flatpak:
+            installed = installer.install(e, rel("0.289"), {})
+        self.assertEqual(flatpak.call_count, 2)
+        self.assertEqual((installed.version, installed.stamp), ("0.289", "a" * 64))
+        self.assertTrue(self.store.data["flatpak_installs"][e.id]["owned"])
+
+    def test_flatpak_versions_and_commits_compare_consistent_identifiers(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "_flatpak_out", return_value="Version: 2.0\nCommit: " + "a" * 64):
+            self.assertEqual(em.flatpak_remote_version(e.flatpak, "2.0"), "2.0")
+            latest = em.latest_for(e, self.store)
+        self.assertEqual(latest[0].tag, "2.0")
+        installed = rc.Installed(e.id, "2.0", str(self.tmp), em.LAUNCHER, stamp="a" * 64)
+        self.assertEqual(em.update_state(e, installed, latest), "current")
+        rebuilt = (rel("2.0"), {"flatpak_commit": "b" * 64})
+        self.assertEqual(em.update_state(e, installed, rebuilt), "update")
+        newer = (rel("3.0"), {"flatpak_commit": "c" * 64})
+        self.assertEqual(em.update_state(e, installed, newer), "update")
+        legacy = rc.Installed(e.id, "a" * 64, str(self.tmp), em.LAUNCHER)
+        self.assertEqual(em.update_state(e, legacy, newer), "update")
+        without_stamp = rc.Installed(e.id, "2.0", str(self.tmp), em.LAUNCHER)
+        self.assertEqual(em.update_state(e, without_stamp, latest), "current")
+
+    def test_linux_forks_reset_parent_specific_install_kinds_and_download_hosts(self):
+        parents = (
+            emu(id="dolphin", flatpak="org.DolphinEmu.dolphin-emu"),
+            emu(id="ares", build="ares"),
+            emu(id="eden", hosts=("stable.eden-emu.dev",)),
+            emu(id="project64", wine=True),
+        )
+        for parent in parents:
+            with self.subTest(parent=parent.id):
+                fork = em.make_fork(parent, "someone/fork", accepted=True)
+                self.assertEqual((fork.flatpak, fork.build, fork.hosts, fork.wine), ("", "", (), False))
+                self.assertEqual((fork.source, fork.repo, fork.trusted_owner), ("github", "someone/fork", "someone"))
+                installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+                installer.check_asset(fork, {"url": "https://github.com/someone/fork/releases/download/v1/fork.zip"})
+                with mock.patch.object(rc.Installer, "install", return_value=None) as native, \
+                        mock.patch.object(installer, "_install_flatpak") as flatpak, \
+                        mock.patch.object(installer, "_need_wine") as wine:
+                    installer.install(fork, rel("v1"), {})
+                native.assert_called_once()
+                flatpak.assert_not_called()
+                wine.assert_not_called()
+
+    def test_windows_fork_settings_remain_unchanged(self):
+        parent = emu(flatpak="org.example.Parent", build="ares", hosts=("example.org",), wine=True)
+        with mock.patch.object(rc, "platform_key", return_value="windows"):
+            fork = em.make_fork(parent, "someone/fork", accepted=True)
+        self.assertEqual((fork.flatpak, fork.build, fork.hosts, fork.wine),
+                         (parent.flatpak, parent.build, parent.hosts, parent.wine))
+
+    def test_owned_flatpak_uninstall_removes_the_app_and_forgets_it_only_on_success(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), mock.patch.object(installer, "_flatpak"):
+            installed = installer.install(e, rel("0.289"), {})
+        reloaded = rc.Store(self.store.path)
+        with mock.patch.object(em.subprocess, "run", return_value=mock.Mock(returncode=1, stderr=b"denied")):
+            with self.assertRaisesRegex(rc.RecompError, "denied"):
+                em.uninstall(reloaded, e)
+        self.assertEqual(reloaded.installed(e.id), installed)
+        self.assertTrue(installed.exe_path().is_file())
+        self.assertTrue(reloaded.data["flatpak_installs"][e.id]["owned"])
+        with mock.patch.object(em.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            self.assertEqual(em.uninstall(reloaded, e), "Uninstalled.")
+        self.assertEqual(run.call_args.args[0], ["flatpak", "uninstall", "--user", "-y", e.flatpak])
+        self.assertIsNone(rc.Store(self.store.path).installed(e.id))
+        self.assertFalse(installed.exe_path().exists())
+
+    def test_external_flatpak_is_never_uninstalled_or_claimed_by_distill(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_apps", return_value={e.flatpak}), \
+                mock.patch.object(installer, "_flatpak"):
+            installer.install(e, rel("0.289"), {})
+        self.assertFalse(self.store.data["flatpak_installs"][e.id]["owned"])
+        with mock.patch.object(em, "_run_flatpak") as flatpak:
+            em.uninstall(self.store, e)
+        flatpak.assert_not_called()
+
+    def test_an_unknown_flatpak_owner_does_not_start_installation(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_apps", return_value=None), \
+                mock.patch.object(installer, "_flatpak") as flatpak:
+            with self.assertRaisesRegex(rc.RecompError, "could not be read"):
+                installer.install(e, rel("0.289"), {})
+        flatpak.assert_not_called()
+        self.assertIsNone(self.store.installed(e.id))
+
+    def test_stale_flatpak_ownership_does_not_claim_an_external_install(self):
+        e = emu(id="mame", name="MAME", flatpak="org.mamedev.MAME")
+        self.store.data["flatpak_installs"] = {e.id: {"app": e.flatpak, "owned": True}}
+        installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+        with mock.patch.object(em, "flatpak_available", return_value=True), \
+                mock.patch.object(em, "flatpak_installed_apps", return_value={e.flatpak}), \
+                mock.patch.object(installer, "_flatpak"):
+            installer.install(e, rel("0.289"), {})
+        self.assertFalse(self.store.data["flatpak_installs"][e.id]["owned"])
+
+    def test_launcher_names_cannot_inject_shell_commands(self):
+        import shlex
+        for kind in ("flatpak", "wine"):
+            with self.subTest(kind=kind):
+                e = emu(id=kind, name="Example\nid #", flatpak="org.example.App" if kind == "flatpak" else "",
+                        wine=kind == "wine")
+                installer = em.EmulatorInstaller(self.store, lambda *a: None, threading.Event())
+                if kind == "flatpak":
+                    with mock.patch.object(em, "flatpak_available", return_value=True), \
+                            mock.patch.object(installer, "_flatpak"):
+                        installed = installer.install(e, rel("1.0"), {})
+                else:
+                    exe = self.touch("Wine/Example.exe", b"MZ")
+                    installed = installer._wrap_in_wine(e, rc.Installed(e.id, "1.0", str(exe.parent), exe.name))
+                script = installed.exe_path().read_text()
+                self.assertNotIn("id", list(shlex.shlex(script, posix=True)))
+                self.assertNotIn(e.name, script)
+
+    def test_a_wine_item_writes_a_launcher_and_records_it(self):
+        e = emu(id="project64", name="Project64", wine=True, platforms=("windows", "linux"))
+        live = self.tmp / "emus" / "Project64"
+        live.mkdir(parents=True)
+        (live / "Project64.exe").write_bytes(b"MZ")
+        base = rc.Installed("project64", "v3.0", str(live), "Project64.exe", 1.0)
+        self.store.set_installed(base)
+        inst = em.EmulatorInstaller(self.store, lambda *a: None, __import__("threading").Event())
+        with mock.patch.object(em.shutil, "which", return_value="/usr/bin/wine"):
+            wrapped = inst._wrap_in_wine(e, base)
+        launcher = Path(wrapped.folder) / wrapped.exe
+        self.assertTrue(launcher.is_file() and launcher.stat().st_mode & 0o111)
+        self.assertIn("wine", launcher.read_text())
+        self.assertEqual(self.store.installed("project64").exe, launcher.name)
+
+    def test_a_named_executable_deeper_than_the_guess_limit_is_found(self):
+        deep = self.tmp / "emus" / "xenia" / "app" / "build" / "bin" / "Linux" / "Release"
+        deep.mkdir(parents=True)
+        exe = deep / "xenia_canary"
+        exe.write_bytes(b"\x7fELF" + b"\0" * 64)
+        named = emu(id="xenia-canary", name="Xenia Canary", exe=r"(^|/)xenia_canary$")
+        self.assertEqual(em.locate_exe(self.tmp / "emus" / "xenia" / "app", named, "linux"), exe)
+        # without the regex the same file is beyond the guessing depth, and nothing is claimed
+        self.assertIsNone(em.locate_exe(self.tmp / "emus" / "xenia" / "app", emu(id="xenia-canary"), "linux"))
+
+    def test_catalog_hosts_are_honoured_for_an_off_site_download(self):
+        e = emu(id="eden", name="Eden", source="forgejo", host="git.eden-emu.dev",
+                hosts=("git.eden-emu.dev", "stable.eden-emu.dev"))
+        self.assertEqual(em.download_hosts(e), frozenset({"git.eden-emu.dev", "stable.eden-emu.dev"}))
+
+    def test_a_badly_named_tarball_is_still_unpacked_as_one(self):
+        import tarfile
+        src = self.tmp / "src"
+        src.mkdir()
+        (src / "xenia_canary").write_bytes(b"\x7fELF")
+        archive = self.tmp / "xenia_canary_linux.tar_.xz"
+        with tarfile.open(archive, "w:xz") as t:
+            t.add(src / "xenia_canary", arcname="build/bin/Linux/Release/xenia_canary")
+        self.assertTrue(rc._sniffs_as_tar(archive, archive.name.lower()))
+        dest = self.tmp / "out"
+        rc.extract(archive, dest)
+        self.assertTrue((dest / "build" / "bin" / "Linux" / "Release" / "xenia_canary").is_file())
+        self.assertFalse(rc._sniffs_as_tar(archive, "thing.appimage"))  # a single program is never unpacked
 
 
 class ReleaseChoiceTests(Isolated):

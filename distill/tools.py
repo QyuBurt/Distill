@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import mmap
 import os
@@ -10,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import urllib.error
 import urllib.parse
@@ -41,6 +43,44 @@ def mame_version(tag: str) -> str:
 
 class ReleaseUnavailable(RuntimeError):
     """A tool has no prebuilt download (the message tells the user how to get it)."""
+
+
+# Which prebuilt package to ask each project for. Every manager keeps Windows first; these say what the other
+# platforms look like so the same tool can be fetched there too.
+WINDOWS = sys.platform == "win32"
+LINUX = sys.platform.startswith("linux")
+ARM = platform.machine().lower() in ("arm64", "aarch64")
+ARM64_TAG = "aarch64" if ARM else "x86_64"  # how Rust projects name their builds
+
+
+def _asset_named(assets: list[dict], *names: str) -> dict | None:
+    """The asset whose file name is one of these (case-insensitive), or None."""
+    by_name = {a["name"].lower(): a for a in assets}
+    for name in names:
+        if name and name.lower() in by_name:
+            return by_name[name]
+    return None
+
+
+def _sha256_from_sums(assets: list[dict], asset: dict, agent: str) -> str | None:
+    """The asset's SHA-256: GitHub's own digest if it publishes one, else the release's SHA256SUMS file."""
+    digest = asset.get("digest") or ""
+    if digest.startswith("sha256:"):
+        return digest.split(":", 1)[1]
+    sums = next((a for a in assets if a["name"].lower() in ("sha256sums", "sha256sums.txt", "sha256sum.txt")), None)
+    if not sums:
+        return None
+    try:
+        req = urllib.request.Request(sums["browser_download_url"], headers={"User-Agent": agent})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read(1 << 20).decode("utf-8", "replace")
+    except Exception:
+        return None
+    for line in text.splitlines():  # "<hash>  <file name>" (a leading * marks binary mode)
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip().lstrip("*") == asset["name"] and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            return parts[0]
+    return None
 
 
 class ToolManager:
@@ -106,6 +146,22 @@ class ToolManager:
         """A copy of the tool the user placed in the tool folder themselves (chdman has none)."""
         return None
 
+    def _legacy_copy(self) -> Path | None:
+        """Read older Linux tool folders in place; installs still go to the Slice 2 data directory."""
+        if not sys.platform.startswith("linux") or paths.layout() != "xdg":
+            return None
+        for base in (APP_DIR, paths.data_dir().parent / APP_NAME):
+            root = base / TOOLS_DIR_NAME / self.SUBDIR
+            if root == self.root or not root.is_dir():
+                continue
+            previous = copy.copy(self)
+            previous.root = root
+            if local := previous._local_copy():
+                return local
+            if cached := previous.cached():
+                return cached[1]
+        return None
+
     def run(self) -> None:
         """Background thread entry point. Always ends with a <key>_ready event."""
         try:
@@ -127,6 +183,10 @@ class ToolManager:
                          f"auto-update skipped{note}")
             return
         cached = self.cached()
+        if not cached and (legacy := self._legacy_copy()):
+            self._emit((f"{self.KEY}_path", self._shown(legacy)))
+            self._status(f"Using existing {self.NAME} from {portable_path(legacy.parent)}; files left in place.")
+            return
         if cached:
             self._emit((f"{self.KEY}_path", self._shown(cached[1])))
             self._status(f"{self.NAME} from {self.SOURCE} {self._label(cached[0])} - checking for updates...")
@@ -180,6 +240,46 @@ class ToolManager:
                 return
         with _py7zr().SevenZipFile(archive) as z:
             z.extractall(path=dest)
+
+    def _extract_tar(self, archive: Path, dest: Path) -> None:
+        """Unpack a .tar / .tar.gz / .tar.xz package into dest. tarfile reads gz and xz itself, so this needs no
+        extra package; the data filter refuses the absolute paths and escaping links a hostile archive could carry."""
+        with tarfile.open(archive) as tar:
+            try:
+                tar.extractall(dest, filter="data")  # Python 3.11.4+
+            except TypeError:  # older Python: no filter argument
+                # Older supported Python releases still need traversal and special-file protection.
+                base = dest.resolve()
+                for member in tar.getmembers():
+                    if not (member.isfile() or member.isdir()):
+                        raise RuntimeError("the tool archive contains a link or special file") from None
+                    try:
+                        (dest / member.name).resolve().relative_to(base)
+                    except ValueError as exc:
+                        raise RuntimeError("the tool archive contains an escaping path") from exc
+                tar.extractall(dest)
+
+    def _unpack_any(self, archive: Path, dest: Path) -> None:
+        """Unpack whichever of .zip / .7z / .tar.gz / .tar.xz the project publishes."""
+        if LINUX and not WINDOWS and tarfile.is_tarfile(archive):
+            self._extract_tar(archive, dest)
+        else:
+            self._extract_all(archive, dest)
+
+    @staticmethod
+    def _make_exec(path: Path) -> None:
+        """Mark a downloaded Unix program as executable (Windows has no such bit)."""
+        if not WINDOWS:
+            path.chmod(path.stat().st_mode | 0o111)
+
+    @staticmethod
+    def _probe_magic(exe: Path, *, smallest: int = 0) -> None:
+        """A download that isn't a program at all is caught before it is ever started."""
+        with exe.open("rb") as f:
+            magic = f.read(4)
+        ok = magic[:2] in (b"MZ", b"#!") or magic == b"\x7fELF" or magic[:4] in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
+        if not ok or exe.stat().st_size < smallest:
+            raise RuntimeError("that file doesn't look like a program")
 
     # ---- shared download / install ---------------------------------------------------------------
     def _download(self, rel: Release, dest: Path) -> None:
@@ -441,7 +541,9 @@ class PkgExtractorManager(ToolManager):
     """
 
     KEY, NAME, SOURCE = "shadplus", "ShadPS4Plus PKG_Extractor", "AzaharPlus/shadPS4Plus"
-    SUBDIR, TAG_RE, EXE_NAME = "pkg-extractor", r"PKG_EXTRACTOR_\d+(?:_\d+)+", "pkg_extractor.exe"
+    SUBDIR, TAG_RE = "pkg-extractor", r"PKG_EXTRACTOR_\d+(?:_\d+)+"
+    EXE_NAME = "pkg_extractor.exe" if WINDOWS else "pkg_extractor"
+    WINDOWS_ONLY = not LINUX  # the release holds Windows packages and a Linux AppImage
     API_URL = "https://api.github.com/repos/AzaharPlus/shadPS4Plus/releases?per_page=30"
 
     def _label(self, tag: str) -> str:
@@ -463,17 +565,30 @@ class PkgExtractorManager(ToolManager):
 
     @staticmethod
     def _windows_asset(assets: list[dict]) -> dict | None:
-        """The Windows download: a lone pkg_extractor .exe, else a .zip / .7z that isn't the Linux package."""
+        """The download for this system: a lone pkg_extractor .exe or the Windows package, else the Linux one."""
         def usable(a: dict, suffixes: tuple[str, ...]) -> bool:
+            n = a["name"].lower()
+            return n.endswith(suffixes) and "install_pkg" not in n
+
+        if not WINDOWS:
+            if not sys.platform.startswith("linux"):
+                return None
+            linux = [a for a in assets if usable(a, (".zip", ".7z"))
+                     and "linux" in a["name"].lower() and "appimage" not in a["name"].lower()]
+            return linux[0] if linux else None
+
+        def windows_only(a: dict, suffixes: tuple[str, ...]) -> bool:
             n = a["name"].lower()
             return n.endswith(suffixes) and not any(w in n for w in ("linux", "appimage", "install_pkg"))
 
-        exes = [a for a in assets if usable(a, (".exe",)) and "extract" in a["name"].lower()]
-        packs = [a for a in assets if usable(a, (".zip", ".7z"))]
+        exes = [a for a in assets if windows_only(a, (".exe",)) and "extract" in a["name"].lower()]
+        packs = [a for a in assets if windows_only(a, (".zip", ".7z"))]
         packs.sort(key=lambda a: "win" not in a["name"].lower())  # a "win" package first
         return (exes or packs or [None])[0]
 
     def _latest_release(self) -> Release:
+        if not WINDOWS and not sys.platform.startswith("linux"):
+            raise ReleaseUnavailable("PKG Extractor downloads are available for Windows and Linux only. Select it manually.")
         headers = github_headers({"User-Agent": self.USER_AGENT, "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(urllib.request.Request(self.API_URL, headers=headers), timeout=10) as resp:
             releases = json.load(resp)
@@ -484,9 +599,32 @@ class PkgExtractorManager(ToolManager):
                 digest = asset.get("digest") or ""
                 sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else None
                 return Release(data["tag_name"], asset["name"], asset["browser_download_url"], asset.get("size", 0), sha)
-        raise RuntimeError("no Windows PKG Extractor package found in the shadPS4Plus releases")
+        raise RuntimeError("no Windows PKG Extractor package found in the shadPS4Plus releases" if WINDOWS else
+                           "no PKG Extractor package for this system found in the shadPS4Plus releases")
+
+    # The Linux package holds an AppImage, not a plain program. An AppImage wants FUSE to mount itself, which a
+    # locked-down system may not have, so it is wrapped in a launcher that always runs it in extract-and-run mode:
+    # the same program, no FUSE needed, a moment slower to start.
+    LINUX_LAUNCHER = """#!/bin/sh
+here=$(dirname "$(readlink -f "$0")")
+exec env APPIMAGE_EXTRACT_AND_RUN=1 "$here/pkg_extractor.AppImage" "$@"
+"""
 
     def _unpack(self, archive: Path, tmp: Path, dest: Path) -> None:
+        if not WINDOWS and sys.platform.startswith("linux"):
+            staging = tmp / "extracted"
+            staging.mkdir()
+            self._unpack_any(archive, staging)
+            appimage = next((p for p in staging.rglob("*") if p.is_file() and p.name.lower().endswith(".appimage")), None)
+            if appimage is None:
+                raise RuntimeError("the Linux PKG Extractor package holds no AppImage")
+            self._make_exec(appimage)
+            shutil.rmtree(dest, ignore_errors=True)
+            shutil.copytree(appimage.parent, dest)  # the AppImage and anything shipped beside it
+            launcher = dest / self.EXE_NAME
+            launcher.write_text(self.LINUX_LAUNCHER)
+            launcher.chmod(0o755)
+            return
         if archive.suffix.lower() == ".exe":  # the release is the bare program
             staging = tmp / "extracted"
             staging.mkdir()
@@ -515,6 +653,10 @@ class PkgExtractorManager(ToolManager):
     def _probe(exe: Path) -> str:
         with exe.open("rb") as f:
             magic = f.read(4)
+        if not WINDOWS and sys.platform.startswith("linux") and magic[:2] == b"#!":  # the Linux AppImage launcher
+            if not os.access(exe, os.X_OK):
+                raise RuntimeError("the launcher is not executable")
+            return "ok"
         if not (magic[:2] == b"MZ" or magic == b"\x7fELF") or exe.stat().st_size < 32 * 1024:
             raise RuntimeError("that file doesn't look like a program")
         return "ok"
@@ -528,7 +670,9 @@ class PkgToAnyPs5Manager(ToolManager):
     the release's SHA256SUMS.txt, and the binary is test-run (--version) before it is used."""
 
     KEY, NAME, SOURCE = "anyps5", "pkg-to-anyps5", "awake-devel/pkg-to-anyps5"
-    SUBDIR, TAG_RE, EXE_NAME = "pkg-to-anyps5", r"v?\d+(?:\.\d+)+", "pkg-to-anyps5.exe"
+    SUBDIR, TAG_RE = "pkg-to-anyps5", r"v?\d+(?:\.\d+)+"
+    EXE_NAME = "pkg-to-anyps5.exe" if WINDOWS else "pkg-to-anyps5"
+    WINDOWS_ONLY = not LINUX  # automatic downloads support Windows and Linux
     API_URL = "https://api.github.com/repos/awake-devel/pkg-to-anyps5/releases/latest"
 
     def _local_copy(self) -> Path | None:
@@ -579,27 +723,41 @@ class PkgToAnyPs5Manager(ToolManager):
         tag = data["tag_name"]
         if not re.fullmatch(self.TAG_RE, tag):
             raise RuntimeError(f"unexpected release tag {tag!r}")
-        windows = [a for a in data.get("assets", [])
-                   if a["name"].lower().endswith(".zip") and "windows" in a["name"].lower() and "x86_64" in a["name"].lower()]
-        if not windows:
-            raise RuntimeError("no Windows package found in the latest pkg-to-anyps5 release")
-        asset = windows[0]
+        assets = data.get("assets", [])
+        if WINDOWS:
+            usable = [a for a in assets if a["name"].lower().endswith(".zip")
+                      and "windows" in a["name"].lower() and "x86_64" in a["name"].lower()]
+            what = "Windows"
+        elif LINUX:
+            wanted = f"linux-{'aarch64' if ARM else 'x86_64'}"
+            usable = [a for a in assets if wanted in a["name"].lower()
+                      and a["name"].lower().endswith((".tar.gz", ".tgz", ".zip"))]
+            what = wanted
+        else:
+            raise ReleaseUnavailable("Automatic pkg-to-anyps5 downloads support Windows and Linux only. Build it "
+                                     "with cargo (cargo install --git github.com/awake-devel/pkg-to-anyps5), or select "
+                                     "it yourself.")
+        if not usable:
+            raise RuntimeError(f"no {what} package found in the latest pkg-to-anyps5 release")
+        asset = usable[0]
         return Release(tag, asset["name"], asset["browser_download_url"], asset.get("size", 0),
                        self._published_sha256(data, asset))
 
     def _unpack(self, archive: Path, tmp: Path, dest: Path) -> None:
         staging = tmp / "extracted"
         staging.mkdir()
-        self._extract_all(archive, staging)
-        exes = [p for p in staging.rglob("*") if p.is_file() and p.suffix.lower() == ".exe"]
-        found = (next((p for p in exes if p.name.lower() == self.EXE_NAME), None)
-                 or next((p for p in exes if p.name.lower().startswith("pkg-to-anyps5")), None))
+        self._unpack_any(archive, staging)  # a .zip on Windows, a .tar.gz on Linux
+        files = [p for p in staging.rglob("*") if p.is_file() and (not WINDOWS or p.suffix.lower() == ".exe")]
+        found = (next((p for p in files if p.name.lower() == self.EXE_NAME.lower()), None)
+                 or next((p for p in files if p.name.lower().startswith("pkg-to-anyps5")
+                          and p.suffix.lower() == (".exe" if WINDOWS else "")), None))
         if not found:
-            raise RuntimeError("pkg-to-anyps5.exe is not in this package")
+            raise RuntimeError(f"{self.EXE_NAME} is not in this package")
         if found.name != self.EXE_NAME:
             target = found.with_name(self.EXE_NAME)
             found.rename(target)
             found = target
+        self._make_exec(found)
         shutil.rmtree(dest, ignore_errors=True)
         os.replace(found.parent, dest)
 
@@ -696,14 +854,25 @@ class ZArchiveManager(ToolManager):
 
 
 class Ps3QddManager(ToolManager):
-    """PS3Dec (PS3Dec.exe, the PS3 disc decryptor inside ElektroStudios' PS3 Quick Disc Decryptor) from the newest
-    release of that GitHub project (Windows only). The package is kept whole, so its Keys folder of Redump .dkey
-    files is there for the PS3 tab. A PS3Dec.exe you put in ./tools/ps3qdd (or an unpacked PS3QDD folder there) is
-    used as is. The release's file names are not assumed: the package with keys is taken if there is one."""
+    """PS3Dec, the PS3 disc decryptor, from the release of whichever project ships it for this system.
 
-    KEY, NAME, SOURCE = "ps3qdd", "PS3QDD", "ElektroStudios/PS3-Quick-Disc-Decryptor"
-    SUBDIR, TAG_RE, EXE_NAME = "ps3qdd", r"v?\d+(?:\.\d+)+", "PS3Dec.exe"
+    Windows: PS3Dec.exe from ElektroStudios' PS3 Quick Disc Decryptor. That package is kept whole, so the Keys folder
+    of Redump .dkey files comes with it, and its command line ("d key <hex> <in> <out>") is the one Distill was
+    written for.
+
+    Linux and macOS: Redrrx/ps3dec, the same decryptor rewritten in Rust (checked against the release's SHA256SUMS).
+    It takes flags rather than a sub-command, so batch.py asks the program which form it wants before decrypting.
+
+    A PS3Dec you put in ./tools/ps3qdd yourself is used as is, on any system.
+    """
+
+    KEY, NAME = "ps3qdd", "PS3QDD" if WINDOWS else "PS3Dec"
+    SOURCE = "ElektroStudios/PS3-Quick-Disc-Decryptor" if WINDOWS else "ps3dec"
+    SUBDIR, TAG_RE = "ps3qdd", r"v?\d+(?:\.\d+)+"
+    EXE_NAME = "PS3Dec.exe" if WINDOWS else "ps3dec"
+    WINDOWS_ONLY = not LINUX  # the Rust decryptor is supported on Linux
     API_URL = "https://api.github.com/repos/ElektroStudios/PS3-Quick-Disc-Decryptor/releases/latest"
+    OTHER_API_URL = "https://api.github.com/repos/Redrrx/ps3dec/releases/latest"
 
     def _local_copy(self) -> Path | None:
         def unmanaged(d: Path) -> bool:
@@ -721,45 +890,70 @@ class Ps3QddManager(ToolManager):
         return Path(found) if found else None
 
     def _latest_release(self) -> Release:
+        if not WINDOWS and not sys.platform.startswith("linux"):
+            raise ReleaseUnavailable("PS3Dec downloads are available for Windows and Linux only. Select it manually.")
         headers = github_headers({"User-Agent": self.USER_AGENT, "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(urllib.request.Request(self.API_URL, headers=headers), timeout=10) as resp:
+        url = self.API_URL if WINDOWS else self.OTHER_API_URL  # PS3QDD on Windows, Redrrx/ps3dec elsewhere
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as resp:
             data = json.load(resp)
         tag = data["tag_name"]
         if not re.fullmatch(self.TAG_RE, tag):
             raise RuntimeError(f"unexpected release tag {tag!r}")
-        usable = [a for a in data.get("assets", []) if a["name"].lower().endswith((".zip", ".7z"))]
-        if not usable:
-            raise ReleaseUnavailable("No download found in the latest PS3QDD release. Get it from "
-                                     "github.com/ElektroStudios/PS3-Quick-Disc-Decryptor, or select PS3Dec.exe yourself.")
-        asset = next((a for a in usable if "key" in a["name"].lower()), usable[0])  # the package with the keys
+        if WINDOWS:
+            usable = [a for a in data.get("assets", []) if a["name"].lower().endswith((".zip", ".7z"))]
+            if not usable:
+                raise ReleaseUnavailable("No download found in the latest PS3QDD release. Get it from "
+                                         "github.com/ElektroStudios/PS3-Quick-Disc-Decryptor, or select PS3Dec.exe yourself.")
+            asset = next((a for a in usable if "key" in a["name"].lower()), usable[0])  # the package with the keys
+        else:
+            # Redrrx/ps3dec: one tarball per target, named after the Rust target triple
+            triple = ("aarch64" if ARM else "x86_64") + "-unknown-linux-gnu"
+            asset = _asset_named(data.get("assets", []), f"ps3dec-{triple}.tar.gz")
+            if asset is None:
+                raise ReleaseUnavailable(f"No ps3dec-{triple}.tar.gz in the latest ps3dec release. Build it with "
+                                         f"cargo (cargo install --git github.com/Redrrx/ps3dec), or select it yourself.")
         digest = asset.get("digest") or ""
         sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else None
+        if not WINDOWS:
+            sha = _sha256_from_sums(data.get("assets", []), asset, self.USER_AGENT)
         return Release(tag, asset["name"], asset["browser_download_url"], asset.get("size", 0), sha)
 
     def _unpack(self, archive: Path, tmp: Path, dest: Path) -> None:
         staging = tmp / "extracted"
         staging.mkdir()
-        self._extract_all(archive, staging)
+        self._unpack_any(archive, staging)
         found = next((p for p in staging.rglob("*") if p.is_file() and p.name.lower() == self.EXE_NAME.lower()), None)
         if not found:
-            raise RuntimeError("PS3Dec.exe is not in this PS3QDD package")
+            raise RuntimeError("PS3Dec.exe is not in this PS3QDD package" if WINDOWS else
+                               f"{self.EXE_NAME} is not in this package")
         root = staging
         while (kids := list(root.iterdir())) and len(kids) == 1 and kids[0].is_dir():  # a single wrapper folder
             root = kids[0]
         rel = found.relative_to(root)
         shutil.rmtree(dest, ignore_errors=True)
-        os.replace(root, dest)  # keep everything: the Keys folder sits beside the program
+        os.replace(root, dest)  # keep everything: on Windows the Keys folder sits beside the program
         if not (dest / self.EXE_NAME).is_file():
             shutil.copy2(dest / rel, dest / self.EXE_NAME)
+        self._make_exec(dest / self.EXE_NAME)
 
     @staticmethod
     def _probe(exe: Path) -> str:
-        """PS3Dec waits for a key press, so it is not started here: the file just has to be a program."""
+        """The Windows PS3Dec waits for a key press, so it is never started here. The Rust build has --version."""
         with exe.open("rb") as f:
             magic = f.read(4)
         if not (magic[:2] == b"MZ" or magic == b"\x7fELF"):
             raise RuntimeError("that file doesn't look like a program")
-        return ""
+        if WINDOWS:
+            return ""
+        try:
+            res = subprocess.run([str(exe), "--version"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                                 creationflags=SUBPROCESS_FLAGS)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"the program didn't start: {exc}") from exc
+        text = (res.stdout + res.stderr).decode(errors="replace")
+        if "ps3dec" not in text.lower():
+            raise RuntimeError("the downloaded ps3dec did not run")
+        return text
 
 
 class XdvdfsManager(ToolManager):
@@ -768,7 +962,9 @@ class XdvdfsManager(ToolManager):
     the Windows package is the one with "windows" in its name, else the one program there is."""
 
     KEY, NAME, SOURCE = "xdvdfs", "xdvdfs", "antangelo/xdvdfs"
-    SUBDIR, TAG_RE, EXE_NAME = "xdvdfs", r"v?\d+(?:\.\d+)+", "xdvdfs.exe"
+    SUBDIR, TAG_RE = "xdvdfs", r"v?\d+(?:\.\d+)+"
+    EXE_NAME = "xdvdfs.exe" if WINDOWS else "xdvdfs"
+    WINDOWS_ONLY = not LINUX  # antangelo ships a Linux build as well
     API_URL = "https://api.github.com/repos/antangelo/xdvdfs/releases/latest"
 
     def _local_copy(self) -> Path | None:
@@ -793,12 +989,23 @@ class XdvdfsManager(ToolManager):
         tag = data["tag_name"]
         if not re.fullmatch(self.TAG_RE, tag):
             raise RuntimeError(f"unexpected release tag {tag!r}")
-        usable = [a for a in data.get("assets", []) if a["name"].lower().endswith((".zip", ".7z", ".exe"))]
-        windows = [a for a in usable if "win" in a["name"].lower()] or [a for a in usable if a["name"].lower().endswith(".exe")]
-        if not windows:
-            raise ReleaseUnavailable("No Windows download found in the latest xdvdfs release. Get it from "
-                                     "github.com/antangelo/xdvdfs, or select xdvdfs.exe yourself.")
-        asset = windows[0]
+        usable = [a for a in data.get("assets", []) if a["name"].lower().endswith((".zip", ".7z", ".exe", ".tar.gz"))]
+        if WINDOWS:
+            usable = [a for a in usable if a["name"].lower().endswith((".zip", ".7z", ".exe"))]
+            usable = [a for a in usable if "win" in a["name"].lower()] or [a for a in usable if a["name"].lower().endswith(".exe")]
+        elif LINUX:
+            # one Linux build per architecture, named xdvdfs-linux-<commit>.zip (the x86-64 one carries no arch token)
+            usable = [a for a in usable if "linux" in a["name"].lower() and ("aarch64" in a["name"].lower()) == ARM]
+        else:
+            raise ReleaseUnavailable("antangelo publishes xdvdfs for Windows and Linux only. Build it with cargo "
+                                     "(cargo install --git github.com/antangelo/xdvdfs), or select it yourself.")
+        if not usable:
+            if WINDOWS:
+                raise ReleaseUnavailable("No Windows download found in the latest xdvdfs release. Get it from "
+                                         "github.com/antangelo/xdvdfs, or select xdvdfs.exe yourself.")
+            raise ReleaseUnavailable("No download for this system in the latest xdvdfs release. Get it from "
+                                     "github.com/antangelo/xdvdfs, or select the program yourself.")
+        asset = usable[0]
         digest = asset.get("digest") or ""
         sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else None
         return Release(tag, asset["name"], asset["browser_download_url"], asset.get("size", 0), sha)
@@ -807,17 +1014,21 @@ class XdvdfsManager(ToolManager):
         if archive.suffix.lower() == ".exe":  # the release is the program itself
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copy2(archive, dest / self.EXE_NAME)
+            self._make_exec(dest / self.EXE_NAME)
             return
         staging = tmp / "extracted"
         staging.mkdir()
-        self._extract_all(archive, staging)
-        exes = [p for p in staging.rglob("*") if p.is_file() and p.suffix.lower() == ".exe"]
-        found = next((p for p in exes if p.name.lower() == self.EXE_NAME), None) or (exes[0] if len(exes) == 1 else None)
+        self._unpack_any(archive, staging)
+        files = [p for p in staging.rglob("*") if p.is_file() and (not WINDOWS or p.suffix.lower() == ".exe")]
+        found = (next((p for p in files if p.name.lower() == self.EXE_NAME.lower()), None)
+                 or (next((p for p in files if p.name.lower() == "xdvdfs"), None) if not WINDOWS else None)
+                 or (files[0] if len(files) == 1 else None))
         if not found:
-            raise RuntimeError("xdvdfs.exe is not in this xdvdfs package")
+            raise RuntimeError(f"{self.EXE_NAME} is not in this xdvdfs package")
         shutil.rmtree(dest, ignore_errors=True)
         dest.mkdir(parents=True)
         shutil.copy2(found, dest / self.EXE_NAME)
+        self._make_exec(dest / self.EXE_NAME)
 
     @staticmethod
     def _probe(exe: Path) -> str:
@@ -844,7 +1055,9 @@ class AnyPS5Manager(ToolManager):
     beside it or in the source build's build/core/libs/libs."""
 
     KEY, NAME, SOURCE = "relinker", "AnyPS5 relinker", "boykopovar/AnyPS5"
-    SUBDIR, TAG_RE, EXE_NAME = "anyps5", r"v?\d+(?:\.\d+)+", "relinker.exe"
+    SUBDIR, TAG_RE = "anyps5", r"v?\d+(?:\.\d+)+"
+    EXE_NAME = "relinker.exe" if WINDOWS else "relinker"
+    WINDOWS_ONLY = not LINUX  # each release holds relinker-vX for Linux beside relinker-vX.exe
     API_URL = "https://api.github.com/repos/boykopovar/AnyPS5/releases?per_page=10"
 
     def __init__(self, emit: Callable[[tuple], None]):
@@ -861,7 +1074,9 @@ class AnyPS5Manager(ToolManager):
             folders = [self.root]
         for folder in folders:
             try:
-                found = next(iter(sorted(folder.glob("relinker*.exe"))), None)
+                found = next(iter(sorted(folder.glob("relinker*.exe"))), None) if WINDOWS else next((p for p in sorted(folder.iterdir())
+                              if p.is_file() and p.name.lower().startswith("relinker")
+                              and (p.suffix.lower() == ".exe") == WINDOWS), None)
             except OSError:
                 found = None
             if found:
@@ -883,13 +1098,23 @@ class AnyPS5Manager(ToolManager):
             if rel.get("draft") or not re.fullmatch(self.TAG_RE, tag):
                 continue
             assets = rel.get("assets", [])
-            exe = next((a for a in assets if re.fullmatch(r"relinker.*\.exe", a["name"], re.I)), None)
-            libs = next((a for a in assets if re.fullmatch(r"prx-windows.*\.zip", a["name"], re.I)), None)
+            if WINDOWS:
+                exe = next((a for a in assets if re.fullmatch(r"relinker.*\.exe", a["name"], re.I)), None)
+                libs = next((a for a in assets if re.fullmatch(r"prx-windows.*\.zip", a["name"], re.I)), None)
+            elif sys.platform.startswith("linux"):
+                # relinker-vX.Y.Z is the Linux program; the libraries it needs ship as prx-linux-vX.Y.Z.tar.gz
+                exe = next((a for a in assets if re.fullmatch(r"relinker(?:-v?[\d.]+)?", a["name"], re.I)), None)
+                libs = next((a for a in assets if re.fullmatch(r"prx-linux.*\.(?:tar\.gz|tgz|zip)", a["name"], re.I)), None)
+            else:
+                break
             if exe and libs:
                 self._libs_release = asset(libs, tag)
                 return asset(exe, tag)
-        raise ReleaseUnavailable("No AnyPS5 release with a Windows relinker and system libraries was found. Build "
-                                 "AnyPS5 from github.com/boykopovar/AnyPS5, or select relinker.exe yourself.")
+        if WINDOWS:
+            raise ReleaseUnavailable("No AnyPS5 release with a Windows relinker and system libraries was found. Build "
+                                     "AnyPS5 from github.com/boykopovar/AnyPS5, or select relinker.exe yourself.")
+        raise ReleaseUnavailable("No AnyPS5 release with a relinker and system libraries for this system was found. "
+                                 "Build AnyPS5 from github.com/boykopovar/AnyPS5, or select the relinker yourself.")
 
     def _unpack(self, archive: Path, tmp: Path, dest: Path) -> None:
         libs_release = self._libs_release
@@ -898,12 +1123,13 @@ class AnyPS5Manager(ToolManager):
         shutil.rmtree(dest, ignore_errors=True)
         try:
             dest.mkdir(parents=True)
-            shutil.copy2(archive, dest / self.EXE_NAME)  # relinker-vX.Y.Z.exe -> relinker.exe
+            shutil.copy2(archive, dest / self.EXE_NAME)  # relinker-vX.Y.Z(.exe) -> relinker(.exe)
+            self._make_exec(dest / self.EXE_NAME)
             zip_path = tmp / libs_release.name
             self._download(libs_release, zip_path)
             staging = tmp / "libs_extracted"
             staging.mkdir()
-            self._extract_all(zip_path, staging)
+            self._unpack_any(zip_path, staging)
             holders = [staging, *sorted(d for d in staging.rglob("*") if d.is_dir())]
             libs = next((d for d in holders if any(d.glob("*.prx"))), None)  # the .prx files (and the DLLs beside them)
             if libs is None:
@@ -1050,17 +1276,27 @@ class FfmpegManager(FlatToolManager):
     ./tools/ytdlp beside yt-dlp. The download is a rolling "latest" build, so its upload date is the version."""
 
     KEY, NAME, SOURCE = "ffmpeg", "ffmpeg", "BtbN"
-    SUBDIR, TAG_RE, EXE_NAME = "ytdlp", r"\d{8}", "ffmpeg.exe"
-    FILES = ("ffmpeg.exe", "ffprobe.exe")
+    SUBDIR, TAG_RE = "ytdlp", r"\d{8}"
+    EXE_NAME = "ffmpeg.exe" if WINDOWS else "ffmpeg"
+    FILES = ("ffmpeg.exe", "ffprobe.exe") if WINDOWS else ("ffmpeg", "ffprobe")
+    WINDOWS_ONLY = not LINUX  # BtbN builds for Linux and Windows alike
     API_URL = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
 
     def _latest_release(self) -> Release:
         data = self._github(self.API_URL, self.USER_AGENT)
         arm = platform.machine().lower() in ("arm64", "aarch64")
-        wanted = f"ffmpeg-master-latest-{'winarm64' if arm else 'win64'}-gpl.zip"
+        if WINDOWS:
+            wanted = f"ffmpeg-master-latest-{'winarm64' if arm else 'win64'}-gpl.zip"
+        elif LINUX:
+            wanted = f"ffmpeg-master-latest-{'linuxarm64' if ARM else 'linux64'}-gpl.tar.xz"
+        else:
+            raise ReleaseUnavailable("BtbN publishes ffmpeg builds for Windows and Linux only. Install ffmpeg with "
+                                     "your package manager, or select it yourself.")
         asset = next((a for a in data["assets"] if a["name"] == wanted), None)
         if asset is None:
-            raise RuntimeError("no Windows build in the latest FFmpeg-Builds release")
+            if WINDOWS:
+                raise RuntimeError("no Windows build in the latest FFmpeg-Builds release")
+            raise RuntimeError(f"no {wanted} build in the latest FFmpeg-Builds release")
         stamp = re.sub(r"\D", "", str(asset.get("updated_at") or asset.get("created_at") or ""))[:8]
         if len(stamp) != 8:
             raise RuntimeError("the ffmpeg build has no date")
@@ -1070,7 +1306,19 @@ class FfmpegManager(FlatToolManager):
         return f"{tag[:4]}-{tag[4:6]}-{tag[6:]}"
 
     def _unpack(self, archive: Path, tmp: Path, dest: Path) -> None:
-        wanted = {name: None for name in self.FILES}
+        """Take just the two programs, not the whole package."""
+        if not WINDOWS and tarfile.is_tarfile(archive):  # Linux: a .tar.xz holding bin/ffmpeg and bin/ffprobe
+            staging = tmp / "extracted"
+            staging.mkdir()
+            self._extract_tar(archive, staging)
+            for name in self.FILES:
+                found = next((p for p in staging.rglob(name) if p.is_file()), None)
+                if found is None:
+                    raise RuntimeError(f"{name} is not in this ffmpeg package")
+                shutil.copy2(found, dest / name)
+                self._make_exec(dest / name)
+            return
+        wanted = {name.lower(): None for name in self.FILES}
         with zipfile.ZipFile(archive) as z:  # only the two programs, not the whole package
             for member in z.namelist():
                 base = member.rsplit("/", 1)[-1].lower()
@@ -1078,8 +1326,11 @@ class FfmpegManager(FlatToolManager):
                     with z.open(member) as src, (dest / base).open("wb") as out:
                         shutil.copyfileobj(src, out)
                     wanted[base] = True
-        if not wanted["ffmpeg.exe"]:
-            raise RuntimeError("ffmpeg.exe is not in this ffmpeg package")
+        if not wanted[self.EXE_NAME.lower()]:
+            raise RuntimeError(f"{self.EXE_NAME} is not in this ffmpeg package")
+        for name in self.FILES:
+            if (dest / name).is_file():
+                self._make_exec(dest / name)
 
     @staticmethod
     def _probe(exe: Path) -> str:

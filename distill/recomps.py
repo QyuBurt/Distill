@@ -962,6 +962,17 @@ def _extract_7z(archive: Path, dest: Path) -> None:
         raise RecompError(f"Couldn't unpack {archive.name}: {type(exc).__name__}: {exc}") from exc
 
 
+def _sniffs_as_tar(archive: Path, name: str) -> bool:
+    """True when the file really is a tar whatever it is called: some projects name theirs badly (Xenia ships
+    "xenia_canary_linux.tar_.xz"), and a name-only check would drop that file in as a single executable."""
+    if platform_key() != "linux" or name.endswith(SINGLE_FILE_SUFFIXES + (".dmg",)):
+        return False
+    try:
+        return tarfile.is_tarfile(archive)
+    except OSError:
+        return False
+
+
 def extract(archive: Path, dest: Path) -> None:
     name = archive.name.lower()
     dest.mkdir(parents=True, exist_ok=True)
@@ -976,7 +987,7 @@ def extract(archive: Path, dest: Path) -> None:
                     p.chmod(p.stat().st_mode | 0o111)
     elif name.endswith(".7z"):
         _extract_7z(archive, dest)
-    elif name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+    elif name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")) or _sniffs_as_tar(archive, name):
         with tarfile.open(archive) as t:
             for m in t.getmembers():
                 _safe_join(dest, m.name)
@@ -1160,7 +1171,7 @@ class Installer:
             self.progress("Unpacking...", 0, 0)
             stage = tmp / "stage"
             low = archive.name.lower()
-            if low.endswith(ARCHIVE_SUFFIXES):
+            if low.endswith(ARCHIVE_SUFFIXES) or _sniffs_as_tar(archive, low):
                 extract(archive, stage)
             elif low.endswith(".dmg"):
                 stage.mkdir()
