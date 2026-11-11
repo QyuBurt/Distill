@@ -120,7 +120,7 @@ class DownloadMixin:
                                 "7z and rar need 7-Zip installed.")
         self.dl_post.currentIndexChanged.connect(lambda *_: self._dl_save_soon())
         self.dl_organize = AnimCheckBox("Then open Sort by System")
-        self.dl_organize.setToolTip("When everything finished without errors, open the Organize page on the "
+        self.dl_organize.setToolTip("When everything finished without errors, open the Organise page on the "
                                     "download folder so you can scan and sort it.")
         self.dl_organize.toggled.connect(lambda *_: self._dl_save_soon())
         self.dl_command = QLineEdit()
@@ -959,14 +959,14 @@ class DownloadMixin:
             self._toast(f"Downloads complete: {', '.join(parts)} in {took}.", "ok", 15000)
             if self.dl_organize.isChecked() and (sm.done or sm.skipped) and not sm.stopped:
                 self._dl_hand_to_organize()
-            self._dl_after_run(sm)
+            self._dl_run_after_actions(sm)
             return
         lines = [f"  - {name}: {reason}" for _i, name, reason in sm.failures[:12]]
         if len(sm.failures) > 12:
             lines.append(f"  ...and {len(sm.failures) - 12} more (see the Status column)")
         if self.dl_power.currentIndex() > 0 and not sm.stopped:  # left to run on its own: no question to wait on
             self._toast(f"Downloads finished: {', '.join(parts)}, {len(sm.failures)} failed (see the Status column).", "warn", 15000)
-            self._dl_after_run(sm)
+            self._dl_run_after_actions(sm)
             return
         text = (f"{', '.join(parts)}, {len(sm.failures)} failed, in {took}.\n\nFailed:\n" + "\n".join(lines)
                 + "\n\nPartial downloads are kept, so a retry resumes where each one stopped.\n\n"
@@ -975,9 +975,9 @@ class DownloadMixin:
         if msgbox.warning(self, "Downloads Finished with Errors", text, retry | cancel, retry) == retry:
             self._start_download(only=[i for i, _name, _why in sm.failures])
         else:
-            self._dl_after_run(sm)
+            self._dl_run_after_actions(sm)
 
-    def _dl_after_run(self, sm: DownloadSummary) -> None:
+    def _dl_run_after_actions(self, sm: DownloadSummary) -> None:
         """The run is over: run the person's command (if any), then (if it worked) sleep / hibernate / shut down. Nothing
         happens after a stop by hand."""
         command, power = self.dl_command.text().strip(), afteractions.POWER[self.dl_power.currentIndex()]

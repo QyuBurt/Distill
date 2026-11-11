@@ -119,6 +119,18 @@ def read_picture(path: str) -> bytes:
     return rc.check_cover_bytes(bytes(buffer.data()))
 
 
+def pick_picture(parent, say) -> bytes | None:
+    """Ask for a picture file and read it. `say` is shown the reason when it can't be used; None when cancelled or unusable."""
+    path, _ = QFileDialog.getOpenFileName(parent, "Choose a cover", "", "Pictures (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;All files (*)")
+    if not path:
+        return None
+    try:
+        return read_picture(path)
+    except rc.RecompError as exc:
+        say(str(exc))
+        return None
+
+
 class PosterBox(QWidget):
     """The cover: an empty rounded poster (2:3, like SteamGridDB's 600 x 900) that shows the picture in its own shape when there is
     one. The picture is never cropped, so what is seen here is what the page will draw."""
@@ -681,7 +693,7 @@ class AddRecompDialog(FramelessDialog):
     def _search_cover(self) -> None:
         key = self.store.sgdb_key()
         if not key:
-            self._say("Searching SteamGridDB needs a free API key. Add yours under Settings > General > API keys, then try again.", "warn")
+            self._say("Searching SteamGridDB needs a free API key. Add yours under Settings > API keys > Games & artwork, then try again.", "warn")
             return
         dlg = CoverSearchDialog(self, key, self.game.text().strip() or self.name.text().strip())
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen:
@@ -693,15 +705,8 @@ class AddRecompDialog(FramelessDialog):
             self._show_cover(dlg.chosen)
 
     def _upload_cover(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Choose a cover", "", "Pictures (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;All files (*)")
-        if not path:
-            return
-        try:
-            data = read_picture(path)
-        except rc.RecompError as exc:
-            self._say(str(exc))
-            return
-        self._show_cover(data)
+        if (data := pick_picture(self, self._say)) is not None:
+            self._show_cover(data)
 
     def _remove_cover(self) -> None:
         if not self.poster.has_picture():

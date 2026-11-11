@@ -362,7 +362,7 @@ def inspect_repo(text: str, store: Store | None = None) -> RepoReport:
         facts = json.loads(_get(f"https://api.github.com/repos/{repo}", store.token() if store else "", "application/vnd.github+json"))
     except urllib.error.HTTPError as exc:
         rep.error = ("That repository doesn't exist, or it is private." if exc.code == 404 else
-                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys."
+                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > API keys > Updates."
                      if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
         return rep
     except (urllib.error.URLError, OSError, ValueError):
@@ -915,7 +915,7 @@ class Store:
             return bool(self.data.get("find_new"))
 
     def sgdb_key(self) -> str:
-        """The key saved in Settings > General > API keys; then one saved by an older version here (moved over on first
+        """The key saved in Settings > API keys > Games & artwork; then one saved by an older version here (moved over on first
         use); then the built-in one; then $SGDB_API_KEY."""
         with self._lock:
             if old := str(self.data.pop("sgdb_key", "") or "").strip():
@@ -937,7 +937,7 @@ class Store:
             self.save()
 
     def token(self) -> str:
-        return github_token() or str(self.data.get("github_token") or "")  # (the field is an older hand-edit; Settings > General holds the key now)
+        return github_token() or str(self.data.get("github_token") or "")  # (the field is an older hand-edit; Settings > API keys holds the key now)
 
     def cache_get(self, key: str, ttl: float = RELEASE_TTL) -> object | None:
         with self._lock:
@@ -1001,7 +1001,7 @@ def releases(repo: str, store: Store | None = None, force: bool = False) -> list
         if store and (stale := store.cache_stale(key)) is not None:
             return [_release_of(d) for d in stale]
         if exc.code in (403, 429):
-            raise RecompError("GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys.") from exc
+            raise RecompError("GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > API keys > Updates.") from exc
         if exc.code == 404:
             raise RecompError(f"{repo} has no public releases.") from exc
         raise RecompError(f"GitHub answered {exc.code}.") from exc

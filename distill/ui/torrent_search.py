@@ -8,8 +8,8 @@ import time
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
+    QWidget,
 )
 
 from .. import torrentsearch as ts
@@ -132,7 +132,7 @@ class TorrentSearchDialog(FramelessDialog):
 
         self.status.setText("Searches Knaben and Torrents-CSV with no setup" +
                             (" and your Prowlarr indexers." if ts.prowlarr_config() else
-                             ". Add Prowlarr under Settings > Accounts for many more sites."))
+                             ". Add Prowlarr under Settings > API keys > Downloads for many more sites."))
         self.query.setFocus()
 
     # ---- searching --------------------------------------------------------------------------------------------

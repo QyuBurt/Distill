@@ -99,7 +99,7 @@ ORG_TOOLS: dict[str, OrgTool] = {t.key: t for t in (
              ("template", "text", "Rename to a pattern (blank = just tidy).  Parts: {title} {region} {tags} {disc} {system} {name}", ""))),
     OrgTool("multi", "Multi-disc games", "Multi-disc games",
             "Move each multi-disc game's discs into a folder of their own, with an .m3u playlist.",
-            ("Game  ->  folder", "Discs"), "Organize Selected Games",
+            ("Game  ->  folder", "Discs"), "Organise Selected Games",
             "No multi-disc games found that still need organizing.", find_multidisc,
             (("loose", "check", "Also pair discs with similar names (left unticked for you to check)", False),
              ("only_missing", "check", "Only list games with a missing disc (e.g. Disc 1 and Disc 3, no Disc 2)", False))),

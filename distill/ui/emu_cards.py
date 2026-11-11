@@ -472,6 +472,9 @@ class LogoTile(QLabel):
         return True
 
 
+LAUNCHBOX_COLOUR = "#B53CB1"  # the LaunchBox chip, on the Games and PC Recomps pages alike
+
+
 class SourceChip(QLabel):
     """A small tag naming where a piece of text came from, in that source's colour; the full name is in its tooltip. The tooltip wears
     the app's own colours: the chip's style is scoped to the chip so it doesn't spill into it."""

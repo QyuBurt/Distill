@@ -5,7 +5,7 @@ import threading
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from .. import updater
 from ..constants import APP_NAME, APP_VERSION

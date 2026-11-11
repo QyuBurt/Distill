@@ -218,7 +218,6 @@ QWidget#commandBar {{ background: {c(self.side)}; border: 1px solid {c(self.card
 QWidget#nowPlaying {{ background: transparent; }}
 QFrame#nowPlayingCard {{ background: {c(self.card)}; border: 1px solid {c(self.card_border)}; border-radius: 12px; }}
 QLabel#nowTitle {{ font-weight: 600; color: {c(self.title)}; }}
-QLabel#nowArt {{ background: {c(self.select)}; border-radius: 8px; color: {c(self.fg3)}; font-size: 18pt; }}
 QToolButton#npButton {{ border: none; border-radius: 8px; background: transparent; }}
 QToolButton#npButton:hover {{ background: {c(self.hover)}; }}
 QToolButton#npButton:disabled {{ background: transparent; }}

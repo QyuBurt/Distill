@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import (QColor, QFont, QGradient, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
+from PySide6.QtGui import (QColor, QFont, QGradient, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
                            QFontMetrics, QPixmap, QWheelEvent)
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QCheckBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy,
-    QStackedWidget, QStyledItemDelegate, QTableView, QToolButton, QTreeWidget,
+    QScrollArea, QStackedWidget, QStyledItemDelegate, QTableView, QToolButton, QTreeWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -32,6 +32,30 @@ class StatusLabel(QLabel):
         motion.swap_text(self, text)
 
 
+DETAIL_WIDTH = 1060  # a detail page (a game, a recomp, an emulator) is never wider than this: long lines are hard to read
+
+
+def detail_shell(view: QWidget) -> QVBoxLayout:
+    """The frame every detail page is built in, so they all look and behave the same: the page's column, centred at DETAIL_WIDTH at
+    most however wide the window is. There is no back button: a detail page floats on the blurred list as a card (see ModalStack),
+    and clicking outside the card, or Esc, closes it. Returns the column's layout, to fill."""
+    shell = QVBoxLayout(view)
+    shell.setContentsMargins(0, 0, 0, 0)
+    shell.setSpacing(12)
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addStretch(1)
+    page = QWidget()
+    page.setMaximumWidth(DETAIL_WIDTH)
+    row.addWidget(page, 1000)
+    row.addStretch(1)
+    shell.addLayout(row, 1)
+    lay = QVBoxLayout(page)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(14)
+    return lay
+
+
 def hint(text: str, tip: str = "", live: bool = False) -> QLabel:
     """A small, dimmed note. Keep `text` to a sentence; the full detail can go in `tip` (shown on hover).
     live=True is for a status line whose message changes as things happen (see StatusLabel)."""
@@ -44,13 +68,13 @@ def hint(text: str, tip: str = "", live: bool = False) -> QLabel:
     return label
 
 
-def fit_columns(tree: QTreeWidget, flex: int) -> None:
+def fit_columns(tree: QTreeWidget, flex: int, flex_min: int = 160) -> None:
     """Make every column of a tree draggable. Qt cannot drag the edge of a column that stretches, so no column
-    stretches: `flex` instead takes up the slack (and follows the window) until the person resizes any column
-    themselves, after which the widths stay as they set them. The last column fills what is left so there is
-    never an empty gap on the right."""
+    stretches: `flex` instead takes up the slack (and follows the window), never narrower than `flex_min`, until
+    the person drags a column edge themselves, after which the widths stay as they set them. The last column
+    fills what is left so there is never an empty gap on the right."""
     from PySide6.QtCore import QObject
-    from PySide6.QtWidgets import QHeaderView
+    from PySide6.QtWidgets import QApplication, QHeaderView
 
     hdr = tree.header()
     hdr.setStretchLastSection(True)
@@ -65,11 +89,13 @@ def fit_columns(tree: QTreeWidget, flex: int) -> None:
             return
         state["busy"] = True
         used = sum(tree.columnWidth(c) for c in range(tree.columnCount()) if c != flex)
-        tree.setColumnWidth(flex, max(160, tree.viewport().width() - used))
+        tree.setColumnWidth(flex, max(flex_min, tree.viewport().width() - used))
         state["busy"] = False
 
     def resized(*_args) -> None:
-        if not state["busy"]:
+        # Only a drag with the mouse button down counts. Qt also resizes sections by itself (the last one stretching, rows being
+        # added), and treating that as a drag switched the fitting off before the table was ever shown, leaving Core squeezed.
+        if not state["busy"] and QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             state["auto"] = False  # the person dragged a column: keep their widths from now on
 
     class _Watch(QObject):
@@ -448,6 +474,7 @@ class AuraButton(_KeyFocus, QPushButton):
     while paused and the glow fades when idle. Pressing shrinks it a little, like the other buttons."""
 
     GLOW = 10  # room kept around the button for the glow, in pixels
+    PAUSED_SAT = 0.25  # how much of its colour the button keeps while paused (1 = all of it)
 
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__(text, parent)
@@ -456,6 +483,10 @@ class AuraButton(_KeyFocus, QPushButton):
         self._paused = False
         self._glow = 0.30  # how strong the glow is now (0..1), eased towards `_glow_goal`
         self._glow_goal = 0.30
+        self._sat = 1.0  # colour saturation now, eased towards 1 (running) or PAUSED_SAT (paused)
+        self._sat_anim = QVariantAnimation(self, duration=220)
+        self._sat_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self._sat_anim.valueChanged.connect(self._set_sat)
         self._scale = 1.0
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(33)
@@ -475,12 +506,29 @@ class AuraButton(_KeyFocus, QPushButton):
     def set_state(self, running: bool, paused: bool = False) -> None:
         """Tell the button whether a batch is running, and whether it is paused."""
         self._running, self._paused = running, paused
+        self._fade_sat(self.PAUSED_SAT if (running and paused) else 1.0)
         self._glow_goal = (0.45 if paused else 1.0) if running else (0.30 if self.isEnabled() else 0.0)
         moving = running and not paused and motion.on() and self.isVisible()
         if moving and not self._tick_timer.isActive():
             self._tick_timer.start()
         elif not moving:
             self._tick_timer.stop()
+        self.update()
+
+    def _fade_sat(self, goal: float) -> None:
+        """Ease the colour towards `goal`; it jumps when motion is reduced or the button is not on screen."""
+        self._sat_anim.stop()
+        if abs(self._sat - goal) < 0.001:
+            return
+        if not motion.on() or not self.isVisible():
+            self._set_sat(goal)
+            return
+        self._sat_anim.setStartValue(self._sat)
+        self._sat_anim.setEndValue(goal)
+        self._sat_anim.start()
+
+    def _set_sat(self, value) -> None:
+        self._sat = float(value)
         self.update()
 
     def _tick(self) -> None:
@@ -532,6 +580,9 @@ class AuraButton(_KeyFocus, QPushButton):
             if lighten:
                 c = QColor(min(255, c.red() + int((255 - c.red()) * lighten)), min(255, c.green() + int((255 - c.green()) * lighten)),
                            min(255, c.blue() + int((255 - c.blue()) * lighten)))
+            if self._sat < 1.0:  # paused: wash the colour out (the glow is built from this gradient too)
+                hue, sat, val, _a = c.getHsvF()
+                c = QColor.fromHsvF(max(hue, 0.0), sat * self._sat, val)
             c.setAlpha(alpha)
             grad.setColorAt(stop, c)
         return grad
@@ -992,7 +1043,6 @@ class ToolChips(QWidget):
                 w.deleteLater()
         self._lay.addStretch(1)  # first, so the chips sit against the right edge
         for name, ready, note in items:
-            colour = (T.ok if ready else T.bad).name()
             chip = QFrame()
             chip.setObjectName("toolChip")
             chip.setToolTip(f"{name}: {note}" if note else name)
@@ -1362,6 +1412,175 @@ class ThemeWipe(QWidget):
             g.setColorAt(1.0, c2)
             p.setClipPath(path)
             p.fillRect(self.rect(), g)
+
+
+class IconButton(QAbstractButton):
+    """A small flat button that shows one line icon (the sidebar's hide / keep-open switch)."""
+
+    def __init__(self, name: str, tip: str = "", size: int = 32, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.name = name
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setToolTip(tip)
+
+    def enterEvent(self, event) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self.underMouse() or self.isDown():
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(T.select if self.isDown() else T.hover)
+            p.drawRoundedRect(r, 8, 8)
+        if self.hasFocus():
+            p.setPen(QPen(T.fg3, 1.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 7, 7)
+        pix = icons.pixmap(self.name, T.fg if self.underMouse() else T.fg3, 18)
+        p.drawPixmap(int(self.width() / 2 - 9), int(self.height() / 2 - 9), pix)
+
+
+class SideHost(QWidget):
+    """The area the sidebar floats over: tells the window when it changes size, so the sidebar can follow."""
+
+    resized = Signal()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.resized.emit()
+
+
+class EdgeHotZone(QWidget):
+    """An invisible strip down the left edge of the window: the mouse touching it asks the compact sidebar to come out."""
+
+    entered = Signal()
+    left = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event) -> None:
+        self.entered.emit()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.left.emit()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:  # draws nothing, whatever the style sheet says
+        pass
+
+
+class SideShadow(QWidget):
+    """A soft shadow on the right of the sidebar while it floats over the page (the page is not pushed aside then)."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        peak = 95 if T.dark else 45
+        grad = QLinearGradient(0, 0, self.width(), 0)
+        grad.setColorAt(0.0, QColor(0, 0, 0, peak))
+        grad.setColorAt(0.35, QColor(0, 0, 0, round(peak * 0.35)))
+        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(self.rect(), grad)
+
+
+class RunBar(QAbstractButton):
+    """The strip along the bottom of the window while a job runs on a page you are not looking at: what is running,
+    how far it has got, and a click takes you back to its page. The whole strip is the progress bar."""
+
+    HEIGHT = 38
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.title, self.detail, self.value = "", "", 0  # value is 0..1000, like the run panel's bar
+        self.setFixedHeight(self.HEIGHT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_info(self, title: str, detail: str) -> None:
+        if (title, detail) == (self.title, self.detail):
+            return
+        self.title, self.detail = title, detail
+        self.setToolTip(f"Back to {title}")
+        self.setAccessibleName(f"{title}: {detail}. Click to go back to it.")
+        self.update()
+
+    def set_value(self, value: int) -> None:
+        value = max(0, min(1000, int(value)))
+        if value != self.value:
+            self.value = value
+            self.update()
+
+    def enterEvent(self, event) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), T.side)
+        p.setPen(QPen(T.card_border, 1))
+        p.drawLine(0, 0, w, 0)
+        fill = w * self.value / 1000
+        if fill > 0:
+            start, end = T.wash(70, 26)
+            wash = QLinearGradient(0, 0, max(w, 1), 0)
+            wash.setColorAt(0.0, start)
+            wash.setColorAt(1.0, end)
+            p.fillRect(QRectF(0, 1, fill, h - 1), wash)
+            line = QLinearGradient(0, 0, max(w, 1), 0)
+            for stop, col in zip((0.0, 0.5, 1.0), T.grad):
+                line.setColorAt(stop, col)
+            p.fillRect(QRectF(0, 0, fill, 3), line)
+        if self.underMouse():
+            hover = QColor(T.hover)
+            hover.setAlpha(110)
+            p.fillRect(QRectF(0, 1, w, h - 1), hover)
+        if self.hasFocus():
+            p.setPen(QPen(T.fg3, 1.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(1.5, 2.5, w - 3, h - 4))
+        pct = f"{self.value // 10}%"
+        bold = QFont(self.font())
+        bold.setWeight(QFont.Weight.DemiBold)
+        p.setFont(bold)
+        pct_w = p.fontMetrics().horizontalAdvance("100%") + 6
+        chevron = icons.pixmap("chevron-right", T.fg3, 16)
+        p.drawPixmap(int(w - 18 - 16), int(h / 2 - 8), chevron)
+        p.setPen(T.accent_text)
+        p.drawText(QRectF(w - 18 - 16 - 6 - pct_w, 0, pct_w, h), AlignR | AlignV, pct)
+        room = int(w - 18 - 16 - 6 - pct_w - 14 - 18)
+        fm = p.fontMetrics()
+        title = fm.elidedText(self.title, Qt.TextElideMode.ElideRight, max(room, 40))
+        p.setPen(T.fg)
+        p.drawText(QRectF(18, 0, max(room, 40), h), AlignL | AlignV, title)
+        left = 18 + fm.horizontalAdvance(title) + 12
+        if self.detail and left < 18 + room:
+            plain = QFont(self.font())
+            p.setFont(plain)
+            p.setPen(T.fg3)
+            p.drawText(QRectF(left, 0, 18 + room - left, h), AlignL | AlignV,
+                       p.fontMetrics().elidedText(self.detail, Qt.TextElideMode.ElideRight, int(18 + room - left)))
 
 
 class SwitchToggle(_KeyFocus, QAbstractButton):
@@ -1959,6 +2178,236 @@ class CheckTree(QTreeWidget):
                 self.spacePressed.emit(item)
             return
         super().keyPressEvent(event)
+
+class _CornerCap(QWidget):
+    """Laid over a modal card: paints the dimmed photo of the app back over the four corners outside the card's 16px curve, with an
+    anti-aliased edge (a widget mask is jagged), plus the card's outline. The square content under it shows through everywhere else."""
+
+    def __init__(self, overlay: QWidget):
+        super().__init__(overlay)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._img: QImage | None = None
+        self._key: tuple | None = None
+
+    def paintEvent(self, _event) -> None:
+        ov = self.parentWidget()
+        shot = getattr(ov, "_shot", None)
+        w, h = self.width(), self.height()
+        if shot is None or w < 40 or h < 40:
+            return
+        dpr = self.devicePixelRatioF()
+        key = (w, h, self.x(), self.y(), ov.width(), ov.height(), shot.cacheKey(), dpr, T.card_border.rgba())
+        if key != self._key:
+            img = QImage(round(w * dpr), round(h * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+            img.setDevicePixelRatio(dpr)
+            img.fill(0)
+            q = QPainter(img)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            q.translate(-self.x(), -self.y())
+            q.drawPixmap(ov.rect(), shot)  # what the overlay paints behind the card
+            q.fillRect(ov.rect(), QColor(0, 0, 0, 150))
+            q.resetTransform()
+            shape = QPainterPath()
+            shape.addRoundedRect(QRectF(0, 0, w, h), 16, 16)
+            q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            q.fillPath(shape, QColor(0, 0, 0))  # clear the card's own area, edge anti-aliased
+            q.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            edge = QPainterPath()
+            edge.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 15.5, 15.5)
+            q.setPen(QPen(T.card_border, 1))
+            q.setBrush(Qt.BrushStyle.NoBrush)
+            q.drawPath(edge)
+            q.end()
+            self._img, self._key = img, key
+        QPainter(self).drawImage(0, 0, self._img)
+
+
+class _ModalOverlay(QWidget):
+    """The blurred, dimmed photo of the app with a detail card floating on it. A click on the dim area (or Esc) asks to close."""
+
+    closeRequested = Signal()
+
+    def __init__(self, parent: QWidget, detail: QWidget):
+        super().__init__(parent)
+        self._shot: QPixmap | None = None
+        self._k = 1.0
+        self.card = QFrame(self)
+        self.card.setObjectName("modalCard")
+        T.bind_css(self.card, lambda: f"QFrame#modalCard {{ background: {T.bg.name()}; border: 1px solid {T.card_border.name()}; border-radius: 16px; }}")
+        lay = QVBoxLayout(self.card)
+        lay.setContentsMargins(1, 1, 1, 1)  # just the card's border: the page's art runs right to the edge
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        detail.setParent(None)
+        self.scroll.setWidget(detail)
+        detail.setAutoFillBackground(False)
+        lay.addWidget(self.scroll)
+        self._cap = _CornerCap(self)  # smooths the card's rounded corners over the square content
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.hide()
+
+    def open(self, shot: QPixmap, animate: bool = True) -> None:
+        w, h = shot.width(), shot.height()
+        small = shot.scaled(max(1, w // 14), max(1, h // 14), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._shot = small.scaled(small.width() * 2, small.height() * 2, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._place()
+        self.show()
+        self.raise_()
+        self.setFocus()
+        self.scroll.verticalScrollBar().setValue(0)
+        if animate and motion.on():
+            motion._fade(self, 0.0, 1.0, 180)
+
+    def _place(self) -> None:
+        par = self.parentWidget()
+        if par is None:
+            return
+        self.setGeometry(par.rect())
+        w = min(DETAIL_WIDTH + 40, max(320, self.width() - 56))
+        h = max(240, self.height() - 56)
+        self.card.setGeometry((self.width() - w) // 2, (self.height() - h) // 2, w, h)
+        self._cap.setGeometry(self.card.geometry())
+        self._cap.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        if self._shot is not None:
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawPixmap(self.rect(), self._shot)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 150))
+
+    def mousePressEvent(self, event) -> None:
+        if not self.card.geometry().contains(event.position().toPoint()):
+            self.closeRequested.emit()
+        event.accept()
+
+    def wheelEvent(self, event) -> None:
+        event.accept()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.closeRequested.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class BackdropView(QWidget):
+    """The root of a game's or a recomp's page. It paints the game's background art across the top, a little desaturated, and fades it
+    into the page's colour as it comes down behind the first card (like the colour wash on the Emulator page, but with the game's own
+    picture)."""
+    HEIGHT = 400
+
+    def __init__(self):
+        super().__init__()
+        self._src: QPixmap | None = None
+        self._cache: tuple[tuple, QPixmap] | None = None
+
+    def set_art(self, pix: QPixmap | None) -> None:
+        self._src = pix if pix is not None and not pix.isNull() else None
+        self._cache = None
+        self.update()
+
+    def _prepared(self) -> QPixmap | None:
+        if self._src is None or self.width() < 20:
+            return None
+        w, h = self.width(), self.HEIGHT
+        key = (w, self._src.cacheKey(), T.bg.rgb())
+        if self._cache is not None and self._cache[0] == key:
+            return self._cache[1]
+        scaled = self._src.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        crop = scaled.copy((scaled.width() - w) // 2, int((scaled.height() - h) * 0.3), w, h)
+        colour = crop.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        grey = colour.convertToFormat(QImage.Format.Format_Grayscale8).convertToFormat(QImage.Format.Format_ARGB32)
+        out = QPixmap(w, h)
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.drawImage(0, 0, colour)
+        p.setOpacity(0.45)  # a little desaturated: the grey copy laid over the colour one
+        p.drawImage(0, 0, grey)
+        p.setOpacity(1.0)
+        page = QColor(T.bg)
+        fade = QLinearGradient(0, 0, 0, h)
+        for at, alpha in ((0.0, 95), (0.45, 150), (0.8, 235), (1.0, 255)):
+            page.setAlpha(alpha)
+            fade.setColorAt(at, QColor(page))
+        p.fillRect(0, 0, w, h, fade)
+        p.end()
+        self._cache = (key, out)
+        return out
+
+    def paintEvent(self, _event) -> None:
+        pix = self._prepared()
+        if pix is not None:
+            QPainter(self).drawPixmap(0, 0, pix)
+
+
+class ModalStack(QStackedWidget):
+    """A list page (0) and a detail page (1). Showing the detail does not replace the list: the app is blurred and dimmed and the
+    detail floats on it as a card; clicking outside the card (or Esc) emits `dismissed`. Everything else behaves like a stack, so
+    currentIndex() is 1 while the card is up."""
+
+    dismissed = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._detail: QWidget | None = None
+        self._overlay: _ModalOverlay | None = None
+        self._open = False
+
+    def addWidget(self, widget: QWidget) -> int:
+        if self.count() == 1 and self._detail is None:
+            self._detail = widget
+            return super().addWidget(QWidget())  # a stand-in: the real page lives in the card
+        return super().addWidget(widget)
+
+    def widget(self, index: int) -> QWidget:
+        if index == 1 and self._detail is not None:
+            return self._detail
+        return super().widget(index)
+
+    def currentIndex(self) -> int:
+        return 1 if self._open else super().currentIndex()
+
+    def setCurrentIndex(self, index: int) -> None:
+        if index == 1 and self._detail is not None:
+            if not self._open:
+                self._open = True
+                self._show_overlay(animate=True)
+            return
+        if self._open:
+            self._open = False
+            if self._overlay is not None:
+                self._overlay.hide()
+        super().setCurrentIndex(index)
+
+    def _show_overlay(self, animate: bool) -> None:
+        host = self.window().centralWidget() if hasattr(self.window(), "centralWidget") else self.window()
+        if host is None or self._detail is None:
+            return
+        if self._overlay is None or self._overlay.parentWidget() is not host:
+            self._overlay = _ModalOverlay(host, self._detail)
+            self._overlay.closeRequested.connect(self.dismissed)
+        shot = host.grab()
+        self._overlay.open(shot, animate)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if self._open and self._overlay is not None:
+            self._overlay.hide()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._open:
+            QTimer.singleShot(0, lambda: self._open and self.isVisible() and self._show_overlay(animate=False))
+
 
 
 class SizedStack(QStackedWidget):

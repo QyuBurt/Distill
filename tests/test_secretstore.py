@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from distill import downloads as dl, secretstore
+from distill import apikeys, downloads as dl, secretstore
 
 
 class SecretStoreTests(unittest.TestCase):
@@ -33,9 +33,12 @@ class SecretStoreTests(unittest.TestCase):
 class LoginFileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.patch = mock.patch.object(dl, "LOGIN_FILE", self.tmp / "logins.json")
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
+        for name, file in (("FILE", "keys.json"), ("LEGACY_KEYS_FILE", "old_keys.json"), ("LEGACY_LOGINS_FILE", "logins.json")):
+            patch = mock.patch.object(apikeys, name, self.tmp / file)
+            patch.start()
+            self.addCleanup(patch.stop)
+        apikeys._cache = None
+        self.addCleanup(setattr, apikeys, "_cache", None)
         saved = dict(dl.LOGINS)
         self.addCleanup(lambda: (dl.LOGINS.clear(), dl.LOGINS.update(saved)))
 
@@ -46,7 +49,7 @@ class LoginFileTests(unittest.TestCase):
         self.assertEqual(dl.LOGINS["1fichier"]["apikey"], "K")
         with mock.patch.object(secretstore, "best_method", return_value="plain"):
             dl.save_logins(True)
-        on_disk = json.loads((self.tmp / "logins.json").read_text())
+        on_disk = json.loads((self.tmp / "keys.json").read_text())
         self.assertEqual(on_disk["v"], 2)
         self.assertTrue(dl.load_logins())
         self.assertEqual(dl.LOGINS["custom"][0]["host"], "a.com")
@@ -56,7 +59,7 @@ class LoginFileTests(unittest.TestCase):
         fake = (lambda b: bytes(x ^ 0x5A for x in b), lambda b: bytes(x ^ 0x5A for x in b))
         with mock.patch.dict(secretstore.METHODS, {"fake": fake}), mock.patch.object(secretstore, "best_method", return_value="fake"):
             dl.save_logins(True)
-            self.assertNotIn("SECRETKEY", (self.tmp / "logins.json").read_text())
+            self.assertNotIn("SECRETKEY", (self.tmp / "keys.json").read_text())
             self.assertTrue(dl.load_logins())
         self.assertEqual(dl.LOGINS["1fichier"]["apikey"], "SECRETKEY")
 

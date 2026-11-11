@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QPixmap, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..constants import APP_DIR

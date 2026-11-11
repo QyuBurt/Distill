@@ -980,7 +980,6 @@ class SwitchRunner:
             self._drop(stage_root)
 
     def _decrypt_into(self, dump: Path, job: _Job, stage_root: Path, tid: int, label: str) -> dict[str, str]:
-        cfg = self.cfg
         dump.mkdir(parents=True)
         meta: dict[str, str] = {}
         base_nca: Path | None = None

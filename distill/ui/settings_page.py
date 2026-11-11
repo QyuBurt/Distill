@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QComboBox, QDialog, QFrame,
+    QAbstractButton, QApplication, QComboBox, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -24,9 +24,10 @@ from ..folderwatch import WATCH_FOLDER
 from ..system import portable_path, resolve_dolphintool, resolve_tool_path
 from . import motion
 from .state import LABEL_W, TOOL_GROUPS, TOOLS
-from .apikeys_card import ApiKeysCard
+from .apikeys_card import ApiKeysPanel, KeyFolder
 from .dialogs import LoginsDialog, TorrentDialog
 from .frameless import FramelessDialog
+from .nav import NAV_GROUPS
 from .motion import Motion
 from .rules_panel import RulesPanel
 from .ytdlp_card import YtdlpCard
@@ -137,7 +138,7 @@ class SettingsMixin:
         self.settings_dlg.activateWindow()
 
     def _api_key_changed(self, name: str) -> None:
-        """A key was saved in Settings > General: SteamGridDB posters that were looked for without it are looked for again."""
+        """A key was saved in Settings > API keys: SteamGridDB posters that were looked for without it are looked for again."""
         if name == "sgdb" and hasattr(self, "_rc_art_tried"):
             self._rc_art_tried.clear()
             self._rc_fill()
@@ -185,12 +186,17 @@ class SettingsMixin:
                 want = not terms or visible > 0 or title_hit
                 state = (want, tuple(shows))
                 if state != getattr(card, "_filter_state", (True, (True,) * len(shows))):  # only a real change moves
-                    if page.isVisible():
+                    if page.isVisible() and (card.parentWidget() or page).isVisible():  # (not inside a folder that is folded)
                         motion.slide(card, want)  # opens, closes or resizes to fit the rows that are left
                     else:
                         card.setVisible(want)
                 card._filter_state = state
                 hits += want
+            for folder in page.findChildren(KeyFolder):  # API keys: open the folders that have a match, hide the ones that don't
+                inside = any(getattr(c, "_filter_state", (True,))[0] for c in folder.findChildren(Card))
+                folder.setVisible(not terms or inside)
+                if terms and inside:
+                    folder.header.setChecked(True)
             if hits and first_with_hits < 0:
                 first_with_hits = index
         if terms and first_with_hits >= 0 and self.settings_stack.currentIndex() != first_with_hits:
@@ -212,7 +218,7 @@ class SettingsMixin:
         nav = self.settings_list = QListWidget()
         nav.setFrameShape(QFrame.Shape.NoFrame)
         nav.setSpacing(2)
-        nav.addItems(["Tools", "Downloads", "Accounts", "General"])
+        nav.addItems(["Tools", "Downloads", "API keys", "General", "Sidebar"])
         stack = self.settings_stack = QStackedWidget()
         nav.currentRowChanged.connect(stack.setCurrentIndex)
         left = QWidget()
@@ -345,20 +351,19 @@ class SettingsMixin:
         lay.addWidget(card)
         lay.addStretch(1)
 
-        # -- Accounts: the sign-in details that used to be a popup
-        lay, _ = page("Accounts")
-        lay.addWidget(hint("Sign-in details for archive.org, 1fichier, TorBox and any other file host.",
-                           tip="With a TorBox API key, torrents are looked up in TorBox's cache first: cached files "
-                               "download straight from TorBox over HTTPS, and only what isn't cached falls back to "
-                               "torrenting."))
+        # -- API keys: every key and login, in folders by what they are for (one encrypted file behind them: apikeys.py)
+        lay, _ = page("API keys")
+        lay.addWidget(hint("Optional. Every key and login is kept in one encrypted file on this computer. Open only the folders you use."))
         self.logins_panel = LoginsDialog(self, [], self.dl_remember, embedded=True)  # one card per site, drawn by the panel
         self.logins_panel.saved.connect(self._logins_saved)
-        lay.addWidget(self.logins_panel)
+        self.api_keys = ApiKeysPanel(self.logins_panel)  # the Downloads folder holds the sign-ins above
+        self.api_keys.changed.connect(self._api_key_changed)
+        lay.addWidget(self.api_keys)
         lay.addStretch(1)
 
         # -- General: app-wide behaviour
         lay, _ = page("General")
-        lay.addWidget(hint("App-wide behaviour: animations, notifications and your API keys."))
+        lay.addWidget(hint("App-wide behaviour: animations and notifications."))
         card = Card("Run Feedback")
         self.reduce_motion = AnimCheckBox("Reduce motion (turn off all animations)")
         self.reduce_motion.setToolTip("Stops the Start button's drifting gradient, folding and sliding, checkbox bounces, "
@@ -372,10 +377,43 @@ class SettingsMixin:
                                      "20 seconds never notify.")
         card.add(self.notify_check)
         lay.addWidget(card)
-        self.api_keys = ApiKeysCard()
-        self.api_keys.changed.connect(self._api_key_changed)
-        lay.addWidget(self.api_keys)
 
+        lay.addStretch(1)
+
+        # -- Sidebar: compact mode, and which tools are pinned to it
+        lay, _ = page("Sidebar")
+        lay.addWidget(hint("How the sidebar behaves and which tools it lists. A tool you unpin is hidden from the sidebar but never "
+                           "removed: Ctrl+K still opens it."))
+        card = Card("Layout")
+        self.compact_box = AnimCheckBox("Compact sidebar (tucked away until the mouse touches the left edge of the window)")
+        self.compact_box.setToolTip("The page uses the whole window. Move the mouse to the left edge and the sidebar eases out over it; "
+                                    "move away and it eases back. Ctrl+B switches this on and off.")
+        self.compact_box.toggled.connect(self._set_compact)
+        card.add(self.compact_box)
+        lay.addWidget(card)
+        self._pin_boxes: dict[str, AnimCheckBox] = {}
+        card = Card("Pinned tools")
+        card.add(hint("Tick the tools you want in the sidebar."))
+        all_row = QHBoxLayout()
+        all_row.setSpacing(8)
+        pin_all, unpin_all = QPushButton("Pin all"), QPushButton("Unpin all")
+        for button, on in ((pin_all, True), (unpin_all, False)):
+            button.clicked.connect(lambda _c=False, on=on: [box.setChecked(on) for box in self._pin_boxes.values()])
+            all_row.addWidget(button)
+        all_row.addStretch(1)
+        card.add(all_row)
+        lay.addWidget(card)
+        for group, items in NAV_GROUPS:
+            card = Card(group.title())
+            for key, text in items:
+                if key.startswith("act_"):  # Logins / Torrent privacy live in Settings
+                    continue
+                box = AnimCheckBox(text)
+                box.setChecked(True)
+                box.toggled.connect(self._apply_pins)
+                self._pin_boxes[key] = box
+                card.add(box)
+            lay.addWidget(card)
         lay.addStretch(1)
         nav.setCurrentRow(0)
 

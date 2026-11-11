@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import http.server
-import os
 import stat
 import struct
 import sys

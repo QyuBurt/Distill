@@ -6,7 +6,8 @@ local_keys.py and fill it in). Nothing here is needed: without keys Distill uses
 
 Values can be plain text or the obfuscated form `python -m distill.github_auth <value>` prints ("enc:...").
 Obfuscation only hides a key from a text search; it is NOT secrecy. Anything you build into an .exe you share can be
-read back out of it, so never put a key you care about in a build you publish. Type personal keys into Settings > General >
-API keys instead (or use the GITHUB_TOKEN / SGDB_API_KEY environment variables); a key saved there is used first."""
+read back out of it, so never put a key you care about in a build you publish. Type personal keys into Settings >
+API keys instead (they are kept in one encrypted file, distill_keys.json) or use the GITHUB_TOKEN / SGDB_API_KEY environment
+variables; a key saved in Settings is used first."""
 GITHUB_TOKEN = ""
 SGDB_API_KEY = ""

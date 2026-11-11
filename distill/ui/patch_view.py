@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QMenu, QTreeWidgetItem
+from PySide6.QtWidgets import QFileDialog, QMenu, QTreeWidgetItem
 
 from .. import organize as org
 from . import msgbox

@@ -22,6 +22,8 @@ class LibraryEntry:
     modified: float  # newest modification time (epoch seconds)
     folder: str  # the folder it sits in, relative to the scanned folder ('' for the top level)
     path: str = ""  # the file's full path (the PC Recomps page reads it to check for the right dump)
+    discs: int = 0  # for a multi-disc game that has an .m3u playlist: how many discs it lists (the playlist is then the game's file)
+    members: tuple = ()  # ...and the paths of those discs, so a scan can tell which separate games the playlist has replaced
 
 
 CSV_HEADER = ["System", "Name", "Format", "Region", "Size (bytes)", "Size", "Modified", "Folder"]

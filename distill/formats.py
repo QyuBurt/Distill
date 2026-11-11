@@ -57,6 +57,28 @@ def associated_files(sheet: Path) -> set[Path]:
     return files
 
 
+def playlist_discs(m3u: Path) -> list[Path]:
+    """The discs an .m3u playlist lists, in order: only the ones that are really there (a comment, a blank line or a line that points at
+    nothing is skipped). Lines are read relative to the playlist's own folder, with a backslash or a slash as the separator."""
+    try:
+        text = m3u.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    found: list[Path] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        path = Path(line.replace("\\", "/"))
+        path = path if path.is_absolute() else m3u.parent / path
+        try:
+            if path.is_file() and path not in found:
+                found.append(path)
+        except OSError:
+            continue
+    return found
+
+
 _WINDOWS_ILLEGAL = str.maketrans(':<>|"?*', "_______")  # what Python's zip extraction does to a name on Windows
 
 

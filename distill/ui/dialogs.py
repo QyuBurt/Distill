@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidgetItem, QWidget,
 )
 
 from .. import cookies as cookiemod, debrid
@@ -80,7 +80,7 @@ class LoginsDialog(FramelessDialog):
                            "or continue without logging in.")
             intro.setWordWrap(True)
             lay.addWidget(intro)
-        if _dl.LOGIN_PROBLEM:
+        if _dl.LOGIN_PROBLEM and not embedded:  # inside Settings the API keys page says it once, at the top
             warn = hint(f"Saved logins couldn't be read: {_dl.LOGIN_PROBLEM}. Enter them again to replace them.")
             lay.addWidget(warn)
         self.fields: dict[tuple[str, str], QLineEdit] = {}

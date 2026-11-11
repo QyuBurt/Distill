@@ -230,6 +230,8 @@ class OrganizeMixin:
     def _org_set_busy(self, busy: bool, label: str = "Working...") -> None:
         self.org_busy = busy
         self._org_label = label
+        if busy and label != "Scanning...":
+            self._org_page = self.current_page  # the page this job was started from: the bar along the bottom leads back to it
         self._update_start_text()
         self.stop_btn.setEnabled(busy)  # an Organize run can be stopped between items; each finished item stays undoable
         for st in self.org.values():
@@ -238,6 +240,7 @@ class OrganizeMixin:
             st.report_btn.setEnabled(not busy and bool(st.findings))
         if not self.is_processing and not self._pending_tools:
             self.start_btn.setEnabled(not busy)
+        self._runbar_sync()
 
     def _org_folder(self) -> str:
         return self._clean(self._org_sources[0].text())
@@ -405,14 +408,14 @@ class OrganizeMixin:
         self._org_stop.clear()
         self._log_clear()
         self.ui_q.put(("log", f"=== {APP_NAME} {APP_VERSION} ===\n--- {tool.title} started: {len(picks)} item(s) ---\n"))
-        self._update_ui_state("Organizing", 0, len(picks))
+        self._update_ui_state("Organising", 0, len(picks))
 
         def work() -> None:
             ok, failures = 0, []
             try:
                 ok, failures = apply_findings(
                     tool.key, picks, lambda m: self.ui_q.put(("log", m)),
-                    lambda cur, total: self.ui_q.put(("progress", "Organizing", cur, total)), self._org_stop,
+                    lambda cur, total: self.ui_q.put(("progress", "Organising", cur, total)), self._org_stop,
                     lambda n, text: self.ui_q.put(("org_row", key, pick_rows[n], text)), tool.title)
             except Exception as exc:
                 failures = [("(run aborted)", f"{type(exc).__name__}: {exc}")]

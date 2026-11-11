@@ -5,7 +5,7 @@ from ..orgpages import ORG_PAGES
 
 
 NAV_GROUPS = (
-    ("GAMES", (("recomps", "PC Recomps"), ("emus", "Emulators"))),
+    ("GAMES", (("games", "Games"), ("recomps", "PC Recomps"), ("emus", "Emulators"))),
     ("DOWNLOADS", (("dl", "Files & Torrents"), ("sound", "Soundtrack Grabber"))),
     ("CONVERT & COMPRESS", (("chd", "CHD Compression"), ("cso", "CSO (PSP Images)"), ("ps3", "PS3 ISO / Folder"),
                             ("pkg", "PS4 PKG Manager"), ("pkg5", "PS5 PKG Manager"), ("rvz", "RVZ (Dolphin)"),
@@ -35,8 +35,10 @@ PAGE_INFO = {
                                    "archives."),
     "dl": ("Files & Torrents", "Download archive.org items, file lists, links, magnets and .torrent files, "
                                         "with resume and verification."),
-    "sound": ("Soundtrack Grabber", "Find and save game soundtracks (FLAC or MP3) by game name, tagged and filed in "
+    "sound": ("Soundtrack Grabber", "Search, stream and save game soundtracks (FLAC or MP3) from KHInsider and archive.org, tagged and filed in "
                                     "one folder or beside each game for RomM."),
+    "games": ("Games", "Your own game library: every platform in one place, with covers, details and a Play button. "
+                      "Games start in RetroArch."),
     "recomps": ("PC Recomps", "Native PC ports of console games: install, update and play them with one click. "
                                "You bring your own copy of the game."),
     "emus": ("Emulators", "Find the emulators you already have, install the ones you don't, and keep them all up to date. "
@@ -71,8 +73,11 @@ PAGE_DETAIL = {
            "by shadPS4 (0.17+), KytyPS5 and Xenia Canary.",
     "dl": "Download archive.org items, file listings, 1fichier links, magnets and .torrent files, with resume and "
           "verification.",
-    "sound": "Find a game's soundtrack by name, check the match and save it: all in one Soundtracks folder, or beside "
+    "sound": "Search for a game, stream its albums like a music player and save what you like: all in one Soundtracks folder, or beside "
              "each game for RomM.",
+    "games": "Scans the folder you choose for games (the same scan as the Library Report), works out each one's platform and title, and shows them "
+             "as posters. Covers come from SteamGridDB (with your key) or the LaunchBox Games Database; details come from LaunchBox. Play starts the "
+             "game in RetroArch with the core you pick for that platform. Nothing in your folder is changed.",
     "recomps": "Projects that rebuild a console game to run natively on PC. Each is downloaded from its own GitHub "
                 "releases; none includes the game, so the page checks your library for a copy you already own.",
     "emus": "Cards for emulators, grouped by console maker. Ones already on this PC are found in your Emulators folder and the usual places and "
@@ -85,5 +90,5 @@ PAGE_DETAIL = {
 PAGE_CHIP = {
     "chd": "CHD", "cso": "PSP", "pkg": "PS4", "pkg5": "PS5", "ps3": "PS3", "rvz": "GAMECUBE / WII",
     "xbox": "XBOX", "switch": "SWITCH", "zar": "UTILITY", "fix": "ORGANISE", "extras": "ORGANISE", "patch": "ORGANISE", "bysystem": "ORGANISE",
-    "report": "ANALYTICS", "dl": "DOWNLOAD", "sound": "AUDIO", "recomps": "GAMES", "emus": "GAMES",
+    "report": "ANALYTICS", "dl": "DOWNLOAD", "sound": "AUDIO", "games": "GAMES", "recomps": "GAMES", "emus": "GAMES",
 }

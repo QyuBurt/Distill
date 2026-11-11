@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ from ..system import resolve_tool_path
 from . import motion
 from .dialogs import SummaryDialog
 from .logview import LogHighlighter
+from .nav import PAGE_INFO
 from .state import TOOLS
 from .widgets import StatusLabel
 from .theme import T
@@ -72,6 +74,7 @@ class RunMixin:
         self.pb_total.setTextVisible(True)
         self.pb_total.setFormat("%p%")
         self.pb_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pb_total.valueChanged.connect(self.run_bar.set_value)  # the bar along the bottom follows it
         prow.addWidget(self.lbl_total_prog)
         prow.addWidget(self.pb_total, 1)
         lay.addLayout(prow)
@@ -95,16 +98,49 @@ class RunMixin:
         self._run_panel, self._log_shown, self._panel_mode = panel, True, "conv"
         return panel
 
+    def _run_target(self) -> tuple[str, str] | None:
+        """(page, what it is doing) of the job in progress, or None. A scan has no progress to show, so it doesn't count."""
+        if self.is_processing:
+            return getattr(self, "_run_page", self.current_page), getattr(self, "_run_label", "Working...")
+        if self.org_busy and (label := getattr(self, "_org_label", "Working...")) != "Scanning...":
+            return getattr(self, "_org_page", self.current_page), label
+        return None
+
+    def _away_from_run(self) -> bool:
+        """A job is running and the page on screen is not the one it was started from."""
+        target = self._run_target()
+        return target is not None and target[0] != self.current_page
+
+    def _runbar_sync(self) -> None:
+        """Show or hide the bar along the bottom, and say what it is for. It is up while a job runs and you are on another page."""
+        bar = getattr(self, "run_bar", None)
+        if bar is None or not hasattr(self, "_panel_mode"):
+            return
+        target = self._run_target()
+        away = target is not None and target[0] != self.current_page
+        if target is not None:
+            key, label = target
+            count = re.search(r"\d+\s*/\s*\d+", self.lbl_total_prog.text())
+            state = "Paused" if self.is_paused and self.is_processing else label.rstrip(".")
+            bar.set_info(PAGE_INFO[key][0] if key in PAGE_INFO else key, state + (f"  |  {count.group(0)}" if count else ""))
+            bar.set_value(self.pb_total.value())
+        motion.set_visible(bar, away)
+        self._apply_panel_mode(self._current_mode())  # this page's own log and bar, or none while the job is elsewhere
+        if hasattr(self, "start_btn"):
+            self._update_start_text()
+
     def _apply_panel_mode(self, mode: str) -> None:
         """Conversion pages show the whole run panel with its live log. Download keeps only the overall bar and the
         speed / ETA line (the table has per-file status). Organise has per-row status, so its panel is hidden."""
-        kind = mode if mode in ("dl", "org", "recomps", "emus") else "conv"
+        kind = mode if mode in ("dl", "org", "games", "recomps", "emus") else "conv"
+        if self._away_from_run():
+            kind = "away"  # the log and bar belong to the job running on another page; the bar along the bottom stands for them here
         if kind == self._panel_mode:
             return
         before, self._panel_mode = self._panel_mode, kind
         conv = kind == "conv"
         self._log_shown = conv
-        hides_panel = ("org", "recomps", "emus")
+        hides_panel = ("org", "games", "recomps", "emus", "away")
         self._panel_gen = gen = getattr(self, "_panel_gen", 0) + 1  # a change of mind cancels what the last one had pending
         if (running := getattr(self, "_panel_anim", None)) is not None:
             running.stop()
@@ -119,6 +155,8 @@ class RunMixin:
         self._run_panel.setVisible(kind not in hides_panel)
         if not conv:
             self._set_settings_visible(True)
+        elif before == "away" and self.is_processing:
+            self._set_settings_visible(False)  # back on the running page: the log gets the window again, as it had
         self.splitter.handle(1).setEnabled(conv)
         if not glide:
             self._settle_panel(conv)
@@ -211,6 +249,8 @@ class RunMixin:
                     self._log_write(msg)
                 case (str() as name, *_rest) if name.startswith("recomp_"):
                     self._rc_event(ev)
+                case (str() as name, *_rest) if name.startswith("games_"):
+                    self._gm_event(ev)
                 case (str() as name, *_rest) if name.startswith("emu_"):
                     self._em_event(ev)
                 case ("notice", text):
@@ -260,6 +300,10 @@ class RunMixin:
                     self._st_on_found(row, res)
                 case ("st_tracks", token, row, album, files, error) if token == self._st_token:
                     self._st_on_tracks(row, album, files, error)
+                case ("st_resolved", token, out):
+                    self._st_on_resolved(token, out)
+                case ("st_stream", token, index, url, error):
+                    self._st_on_stream(token, index, url, error)
                 case ("st_art", url, data):
                     self._st_on_art(url, data)
                 case ("st_finished", text, made):
@@ -351,12 +395,13 @@ class RunMixin:
     def _update_ui_state(self, phase: str, current: int, total: int) -> None:
         self.lbl_phase.setText(f"Phase: {phase}")
         self._set_bar(current, total)
-        kind = "Organize" if phase == "Organizing" else "Batch"
+        kind = "Organise" if phase == "Organising" else "Batch"
         self.lbl_total_prog.setText(f"{kind} Progress: {current} / {total}")
 
     def _cleanup_ui(self) -> None:
         secs = self._active_secs()
         stopped = self._stopping
+        was_download = isinstance(self.runner, DownloadRunner)
         self._title_progress(None)
         self.is_processing = False
         self._update_start_text()  # back to "Start ..."
@@ -369,9 +414,12 @@ class RunMixin:
         self.lbl_eta.setText(f"{'Stopped after' if self._stopping else 'Finished in'} {fmt_duration(self._active_secs())}")
         self._stopping = False
         self._t0 = None
+        if stopped and was_download:  # a stopped run didn't get anywhere: the bar starts over (partial files resume next time)
+            motion.ease_value(self.pb_total, 0)  # a reset jumps, and cancels a glide still in flight
         self.dl_fetch_btn.setEnabled(True)
         self.lbl_run_info.setText("")
         self._set_settings_visible(True)
+        self._runbar_sync()  # the bar along the bottom goes, and this page's own panel comes back
         if not stopped:
             self._notify_run_done(secs)
 
@@ -430,7 +478,7 @@ class RunMixin:
         if mode == "switch":
             self._sw_start()
             return
-        if mode in ("recomps", "emus"):  # nothing to start here: installs are per project
+        if mode in ("games", "recomps", "emus"):  # nothing to start here: installs are per project
             return
         if self.current_page == "sound":  # the Soundtrack Grabber page: save the ticked soundtracks
             self._st_download()

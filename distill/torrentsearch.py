@@ -254,7 +254,7 @@ def search_prowlarr(query: str, url: str, key: str) -> list[SearchResult]:
     except SearchError as exc:
         text = str(exc)
         if "401" in text or "403" in text:
-            raise SearchError("rejected the API key (Settings > Accounts)") from None
+            raise SearchError("rejected the API key (Settings > API keys > Downloads)") from None
         raise
     return parse_prowlarr(data)
 

@@ -82,7 +82,7 @@ class CoresMixin:
         self.emd_cores_tree.setColumnWidth(1, 170)
         self.emd_cores_tree.setColumnWidth(2, 130)
         self.emd_cores_tree.setColumnWidth(3, 64)
-        fit_columns(self.emd_cores_tree, flex=0)  # every column drags (Qt can't drag a stretching one); Core takes the slack until you do
+        fit_columns(self.emd_cores_tree, flex=0, flex_min=280)  # every column drags (Qt can't drag a stretching one); Core takes the slack until you do, and is always wide enough to read
         self.emd_cores_tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.emd_cores_tree.itemChanged.connect(self._cores_item_changed)
         self.emd_cores_tree.currentItemChanged.connect(lambda cur, _prev: self._cores_describe(cur))

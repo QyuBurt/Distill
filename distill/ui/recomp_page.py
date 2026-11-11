@@ -5,25 +5,25 @@ from __future__ import annotations
 import html
 import math
 import threading
-import time
-from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QStackedWidget, QStyledItemDelegate, QStyle, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QStyledItemDelegate, QStyle, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..artqueue import ArtQueue
+from .. import gamemedia as mm
 from .. import recomps as rc
 from ..systems import SYSTEM_NAMES
 from . import flight, icons, motion, msgbox
-from .emu_cards import Callout, chip_css, clear_layout, break_path, FactList, pill_css, section_header, SourceChip, tint, TwoColumn
+from .emu_cards import LAUNCHBOX_COLOUR, Callout, chip_css, clear_layout, break_path, FactList, pill_css, section_header, SourceChip, tint, TwoColumn
 from .motion import smooth_scroll
 from .theme import AlignC, AlignL, AlignV, T
 from .recomp_dialog import AddRecompDialog, CoverSearchDialog, read_picture
-from .widgets import accent_button, AnimRadio, Card, hint
+from .widgets import accent_button, AnimRadio, BackdropView, Card, detail_shell, ModalStack, hint
 
 POSTER_W, POSTER_H = 176, 250  # the cover, 7:10
 CELL_W, CELL_H = 196, 346
@@ -344,11 +344,14 @@ class RecompMixin:
         self._rc_latest: dict[str, object] = {}  # id -> (Release, asset) | error text
         self._rc_art: dict[str, QPixmap] = {}
         self._rc_art_tried: set[str] = set()  # asked for this session (queued, fetched, or settled)
-        self._rc_art_queue: deque = deque()
-        self._rc_art_lock = threading.Lock()
-        self._rc_art_workers = 0
+        self._rc_art_q = ArtQueue(lambda r, key, token: rc.fetch_cover(r, token, False, key),
+                                  lambda r, found: self.ui_q.put(("recomp_art", r.id, found)),
+                                  workers=ART_WORKERS, busy=rc.SgdbBusy, on_busy=lambda r: self._rc_art_tried.discard(r.id))  # rate-limited: ask again next time it is drawn
         self._rc_busy: dict[str, threading.Event] = {}  # installs in progress (the Event cancels)
         self._rc_current = ""
+        self._rc_banner_key = ""  # the game whose banner the page is showing or waiting for
+        self._rc_banner_real = False  # True once real banner art (not the cover stand-in) is on the page
+        self._rc_banner_busy: set[str] = set()  # banners being looked for right now
         self._rc_snap = False  # the next detail refresh follows a change of game: no animation
         self._rc_flight: flight.Flight | None = None  # the cover in the air between the grid and a page
         self._rc_flight_id = 0  # bumped by every new flight and cancellation
@@ -373,7 +376,8 @@ class RecompMixin:
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(14)
-        self.rc_views = QStackedWidget()
+        self.rc_views = ModalStack()
+        self.rc_views.dismissed.connect(self._rc_back)
         self.rc_views.addWidget(self._rc_build_grid())
         self.rc_views.addWidget(self._rc_build_detail())
         lay.addWidget(self.rc_views, 1)
@@ -402,6 +406,10 @@ class RecompMixin:
         self.rc_mine.setAutoExclusive(False)  # a radio that can be switched off again: it is a filter, not one of a set
         self.rc_mine.setToolTip("Show only the projects you added yourself with Add recomp.")
         self.rc_mine.toggled.connect(self._rc_fill)
+        self.rc_installed = AnimRadio("Installed")
+        self.rc_installed.setAutoExclusive(False)  # a filter, like My recomps: it can be switched off again
+        self.rc_installed.setToolTip("Show only the projects installed on this computer.")
+        self.rc_installed.toggled.connect(self._rc_fill)
         self.rc_check_btn = QPushButton("Check my library")
         self.rc_check_btn.setToolTip("Compare the last Library Report with what each project needs. Files are only read, never changed.")
         self.rc_check_btn.clicked.connect(self._rc_check_library)
@@ -411,6 +419,7 @@ class RecompMixin:
         bar.addWidget(self.rc_system)
         bar.addWidget(self.rc_kind)
         actions.addWidget(self.rc_mine)
+        actions.addWidget(self.rc_installed)
         actions.addStretch(1)
         actions.addWidget(self.rc_check_btn)
         self.rc_add_btn = QPushButton("Add recomp...")
@@ -440,32 +449,28 @@ class RecompMixin:
         lay.addWidget(self.rc_list, 1)
         return view
 
+    def _rc_hero_css(self) -> str:
+        """The top card: the colour wash the Emulator page uses; a little see-through while the game's banner shows behind it."""
+        card = tint(T.card, 222 if self._rc_banner_on() else 255)
+        return (f"QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {tint(T.grad[1], 34)}, stop:0.6 {card}, stop:1 {card}); "
+                f"border: 1px solid {T.card_border.name()}; border-radius: 14px; }}")
+
+    def _rc_banner_on(self) -> bool:
+        return getattr(self, "rcd_view", None) is not None and self.rcd_view._src is not None
+
     def _rc_build_detail(self) -> QWidget:
         """One project's page: a hero (rounded poster, name, what the library has, the buttons), then two columns - what to know before
         playing, what the developers say and the release notes on the left; facts and links in a side panel that drops below when narrow."""
-        view = QWidget()
-        outer = QHBoxLayout(view)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addStretch(1)
-        page = QWidget()
-        page.setMaximumWidth(1060)  # the page stays a readable width, centred, however wide the window is
-        outer.addWidget(page, 1000)
-        outer.addStretch(1)
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(14)
-        back = QPushButton("← All recomps")
-        back.setFlat(True)
-        back.setCursor(Qt.CursorShape.PointingHandCursor)
-        back.clicked.connect(self._rc_back)
-        lay.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        view = BackdropView()  # paints the game's banner art across the top of the page, fading into the page's colour
+        self.rcd_view = view
+        lay = detail_shell(view)  # no back button: click outside the card (or Esc) to close it
 
         # -- the hero
         hero = Card()
         hero.lay.setContentsMargins(22, 20, 22, 18)
         hero.lay.setSpacing(16)
-        T.bind_css(hero, lambda: f"QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {tint(T.grad[1], 34)}, stop:0.6 {T.card.name()}, "
-            f"stop:1 {T.card.name()}); border: 1px solid {T.card_border.name()}; border-radius: 14px; }}")
+        self.rcd_hero = hero
+        T.bind_css(hero, self._rc_hero_css)
         top = QHBoxLayout()
         top.setSpacing(22)
         self.rcd_cover = CoverFrame()
@@ -559,7 +564,7 @@ class RecompMixin:
         self.rcd_game_card.lay.setContentsMargins(20, 16, 20, 18)
         self.rcd_game_card.lay.setSpacing(12)
         game_head = section_header("About the game", "info")
-        game_head.addWidget(SourceChip("LaunchBox", "From the LaunchBox Games Database", "#B53CB1"))
+        game_head.addWidget(SourceChip("LaunchBox", "From the LaunchBox Games Database", LAUNCHBOX_COLOUR))
         self.rcd_game_card.add(game_head)
         self.rcd_game = ClampedText()
         self.rcd_game_card.add(self.rcd_game)
@@ -723,7 +728,7 @@ class RecompMixin:
         if chosen is search:
             key = self.rc_store.sgdb_key()
             if not key:
-                msgbox.information(self, "Search SteamGridDB", "Searching SteamGridDB needs a free API key. Add yours under Settings > General > API keys, then try again.")
+                msgbox.information(self, "Search SteamGridDB", "Searching SteamGridDB needs a free API key. Add yours under Settings > API keys > Games & artwork, then try again.")
                 return
             dlg = CoverSearchDialog(self, key, r.game or r.name)
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen:
@@ -784,6 +789,7 @@ class RecompMixin:
         system = self.rc_system.currentText() if self.rc_system.currentIndex() > 0 else ""
         kind = self.rc_kind.currentText() if self.rc_kind.currentIndex() > 0 else ""
         mine = self.rc_mine.isChecked()
+        installed = self.rc_installed.isChecked()
         self.rc_list.clear()
         shown = 0
         # best weighted score first (a high score backed by few stars is pulled toward the average); ties go to the
@@ -796,6 +802,8 @@ class RecompMixin:
             if kind and kind not in rc.kinds_of(r):
                 continue
             if mine and not rc.is_custom(r):
+                continue
+            if installed and not state.get("installed"):
                 continue
             blob = f"{r.name} {r.game} {r.system} {' '.join(r.tags)}".lower()
             if not all(t in blob for t in text):
@@ -815,6 +823,8 @@ class RecompMixin:
         if self.rc_mine.isChecked():
             msg = (f"{shown} of your own project{'s' if shown != 1 else ''}." if shown else
                    "You haven't added any recomps yet. Press Add recomp... to add one from its GitHub address.")
+        elif self.rc_installed.isChecked():
+            msg = (f"{shown} of {total} projects installed." if shown else "Nothing is installed yet. Open a project and press Install.")
         else:
             msg = f"{shown} of {total} projects."
             if not self._rc_owned:
@@ -836,31 +846,7 @@ class RecompMixin:
         if r.id in self._rc_art_tried or rc.cover_settled(r, key):
             return
         self._rc_art_tried.add(r.id)
-        with self._rc_art_lock:
-            self._rc_art_queue.append(r)
-            start = self._rc_art_workers < ART_WORKERS
-            if start:
-                self._rc_art_workers += 1
-        if start:
-            threading.Thread(target=self._rc_art_worker, args=(key, self.rc_store.token()), daemon=True).start()
-
-    def _rc_art_worker(self, key: str, token: str) -> None:
-        while True:
-            with self._rc_art_lock:
-                if not self._rc_art_queue:
-                    self._rc_art_workers -= 1
-                    return
-                r = self._rc_art_queue.pop()  # newest first: what was painted last is what is on screen now
-            try:
-                found = rc.fetch_cover(r, token, False, key)
-            except rc.SgdbBusy:  # rate-limited: ask about this one again next time it is drawn, and ease off for a moment
-                self._rc_art_tried.discard(r.id)
-                found = None
-                time.sleep(3)
-            except Exception:  # one bad game must not stop the rest
-                found = None
-            self.ui_q.put(("recomp_art", r.id, found))
-            time.sleep(0.05)
+        self._rc_art_q.add(r, key, self.rc_store.token())
 
     def _rc_set_art(self, rid: str, path: Path | None, repaint: bool = True) -> None:
         dpr = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
@@ -874,6 +860,42 @@ class RecompMixin:
             self.rc_list.viewport().update()
         if rid == self._rc_current and (cur := self._rc_by_id.get(rid)) is not None:
             self._rc_detail_cover(cur)
+            if not self._rc_banner_real:
+                self._rc_set_banner(self._rc_banner_stand_in(cur), False)
+
+    # ---- the banner behind a project's page -------------------------------------------------------------------
+    def _rc_set_banner(self, pix: QPixmap | None, real: bool) -> None:
+        self.rcd_view.set_art(pix)
+        self._rc_banner_real = real and pix is not None and not pix.isNull()
+        self.rcd_hero.setStyleSheet(self._rc_hero_css())  # see-through while there is art behind it
+
+    def _rc_banner_stand_in(self, r: rc.Recomp) -> QPixmap | None:
+        """Until real banner art is found (or if there is none) the poster, blown up soft, stands in for it."""
+        cover = self._rc_art.get(r.id)
+        return cover.scaled(32, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation) if cover is not None else None
+
+    def _rc_load_banner(self, r: rc.Recomp) -> None:
+        """Put the banner of the game this project plays behind its page: a saved one shows at once, otherwise it is looked for in the
+        background (SteamGridDB with the person's key, else LaunchBox fan art) and swaps in when it arrives."""
+        key = mm.recomp_banner_key(r.game)
+        self._rc_banner_key = key
+        saved = mm.cached_recomp_banner(r.game)
+        if saved is not None:
+            self._rc_set_banner(QPixmap(str(saved)), True)
+            return
+        self._rc_set_banner(self._rc_banner_stand_in(r), False)
+        if key in self._rc_banner_busy:
+            return
+        self._rc_banner_busy.add(key)
+        sgdb, q = self.rc_store.sgdb_key(), self.ui_q
+
+        def work() -> None:
+            try:
+                found = mm.fetch_recomp_banner(r, sgdb)
+            except Exception:  # a banner is a nicety: whatever goes wrong, the page just goes without
+                found = None
+            q.put(("recomp_banner", key, str(found) if found else ""))
+        threading.Thread(target=work, daemon=True).start()
 
     # ---- opening a project ----------------------------------------------------------------------------------
     def _rc_open_item(self, item: QListWidgetItem) -> None:
@@ -897,7 +919,7 @@ class RecompMixin:
 
     # ---- the cover's flight between the grid and a page -------------------------------------------------------
     def _rc_can_fly(self) -> bool:
-        return motion.on() and self.rc_views.isVisible() and self.rc_views.window().isVisible()
+        return False  # the detail is a card over the blurred list: no cover flight
 
     def _rc_scroll_list(self, value: int) -> None:
         """Move the grid's scroll bar, now and once more after it has been laid out (a rebuilt list starts at the top)."""
@@ -968,6 +990,7 @@ class RecompMixin:
         self.rc_views.setCurrentIndex(1)
         self._rc_detail_cover(r)
         self._rc_ensure_art(r)
+        self._rc_load_banner(r)
         clear_layout(self.rcd_chips)
         self.rcd_chips.addWidget(self._rc_chip(r.system.upper(), chip_css(T.accent_text)))
         for tag in r.tags[:4]:
@@ -1311,6 +1334,12 @@ class RecompMixin:
             self._rc_game[ev[1]] = ev[2]
             if ev[1] == self._rc_current:
                 self._rc_set_game(ev[2])
+            return
+        if name == "recomp_banner":
+            _n, key, path = ev
+            self._rc_banner_busy.discard(key)
+            if path and key == self._rc_banner_key and self._rc_current:  # only for the game whose page is open
+                self._rc_set_banner(QPixmap(path), True)
             return
         if name == "recomp_art":
             self._rc_set_art(ev[1], ev[2])

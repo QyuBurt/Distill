@@ -10,13 +10,13 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QEvent, QRect, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QLineEdit,
     QApplication, QButtonGroup, QCheckBox, QFrame,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QSplitter, QToolTip,
+    QPushButton, QScrollArea, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -48,6 +48,7 @@ from .nav import NAV_GROUPS, PAGE_CHIP, PAGE_DETAIL, PAGE_INFO
 from .organize_page import OrganizeMixin
 from .patch_view import PatchViewMixin
 from .emulator_page import EmulatorMixin
+from .games_page import GamesMixin
 from .recomp_page import RecompMixin
 from . import persist, msgbox
 from .persist import PersistMixin
@@ -59,8 +60,8 @@ from .state import _which_any, DOWNLOAD_TOOLS, LABEL_W, OrgState, TabUI, TOOLS
 from .theme import T
 from .tooltips import TooltipWrapper
 from . import icons, motion
-from .widgets import (ThemeWipe, AuraButton, Banner, Card, Expander, GearButton, hint, Logo, NavButton, NavHeader,
-                      PathRow, PressButton, SizedStack, ToolMarkers, ToolRow)
+from .widgets import (ThemeWipe, AuraButton, Banner, Card, EdgeHotZone, Expander, GearButton, hint, IconButton, Logo, NavButton,
+                      NavHeader, PathRow, PressButton, RunBar, SideHost, SideShadow, SizedStack, ToolMarkers, ToolRow)
 
 if TYPE_CHECKING:
     from ..batch import BatchRunner
@@ -81,7 +82,7 @@ BUSY_LABELS = {
 }
 
 
-class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, RecompMixin, EmulatorMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin, UpdatePromptMixin,
+class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, GamesMixin, RecompMixin, EmulatorMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin, UpdatePromptMixin,
                      QMainWindow):
     MODES = ("chd", "rvz", "cso", "pkg", "pkg5", "zar", "ps3", "xbox")  # pkg5: the PS5 page, which runs the "pkg" engine mode
     SIDEBAR_WIDTH = 268
@@ -211,6 +212,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             for header in (g["header"] for g in self.nav_groups.values()):
                 header.update()
             self.centralWidget().update()
+            if hasattr(self, "run_bar"):
+                self.run_bar.update()
             if hasattr(self, "logo"):
                 self.logo.refresh_theme()  # the bright icon in the light look, the dark one in the dark look
             self.setWindowIcon(make_app_icon())
@@ -367,10 +370,24 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._build_settings_dialog()  # tool paths and download options live here, not on each page
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setContentsMargins(self.CARD_GAP, self.CARD_GAP, 0, self.CARD_GAP)  # the sidebar floats as a card
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        body = self._body = SideHost()  # the sidebar and the page; the run bar sits under both
+        outer.addWidget(body, 1)
+        self.run_bar = RunBar()  # while a job runs and another page is showing: what it is and how far it has got
+        self.run_bar.clicked.connect(self._run_bar_clicked)
+        self.run_bar.hide()
+        outer.addWidget(self.run_bar)
+        root = QHBoxLayout(body)
+        root.setContentsMargins(0, self.CARD_GAP, 0, self.CARD_GAP)
         root.setSpacing(0)
-        root.addWidget(self._build_sidebar())
+        self._side_dock = QWidget()  # keeps the sidebar's room open beside the page; closes up in compact mode
+        self._side_dock.setFixedWidth(self.CARD_GAP + self.SIDEBAR_WIDTH)
+        root.addWidget(self._side_dock)
+        self._side = self._build_sidebar()  # a floating card, placed by hand over the body (see _place_sidebar)
+        self._side.setParent(body)
+        self._side_setup(body)
 
         content = QWidget()
         col = QVBoxLayout(content)
@@ -419,6 +436,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.pages["dl"] = self._build_dl_page()
         self.pages["sound"] = self._build_sound_page()  # after the download page: it shares that page's Save-to folder
         self.pages["switch"] = self._build_switch_page()
+        self.pages["games"] = self._build_games_page()
         self.pages["recomps"] = self._build_recomp_page()
         self.pages["emus"] = self._build_emulator_page()
         for page in self.pages.values():
@@ -487,16 +505,17 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             QShortcut(QKeySequence(seq), self, activated=button.click)  # click() is a no-op while disabled
         QShortcut(QKeySequence("Ctrl+,"), self, activated=lambda: self._open_settings())
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_goto)
-        numbered = [k for k in self.pages_order() if k in self.pages][:9]
-        for n, key in enumerate(numbered, 1):  # Ctrl+1 ... Ctrl+9 open the first nine pages, in sidebar order
-            QShortcut(QKeySequence(f"Ctrl+{n}"), self, activated=lambda k=key: self._nav_click(k))
-            if key in self.nav_items:
-                self.nav_items[key].setToolTip(f"{PAGE_INFO[key][0]}  (Ctrl+{n}; Ctrl+K finds any page)")
+        for n in range(1, 10):  # Ctrl+1 ... Ctrl+9 open the first nine pinned pages, in sidebar order
+            QShortcut(QKeySequence(f"Ctrl+{n}"), self, activated=lambda n=n: self._nav_nth(n))
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=lambda: self.compact_box.toggle())  # compact sidebar on / off
         self._explain(self.pause_btn, "Ctrl+P: finish active jobs, start no new ones", "Nothing is running.")
         self._explain(self.stop_btn, "Ctrl+.: abort the run (finished items are kept)", "Nothing is running.")
         self.start_btn.setToolTip("Ctrl+Enter")
 
         self._refresh_nav_dots()
+        self._apply_pins()
+        self._place_sidebar()
+        self._side_raise()
         self._show_page(self.current_page)
 
     def _set_settings_visible(self, visible: bool) -> None:
@@ -531,12 +550,16 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         name = QLabel(APP_NAME)
         name.setObjectName("brandName")
         count = len([k for k in self.pages_order() if not k.startswith("act_")])
-        sub = QLabel(f"{APP_VERSION}  |  {count} tools")
+        sub = self._brand_sub = QLabel(f"{APP_VERSION}  |  {count} tools")
         sub.setObjectName("hint")
         names.addWidget(name)
         names.addWidget(sub)
         brand.addLayout(names)
         brand.addStretch(1)
+        self.side_toggle = IconButton("sidebar")  # compact mode on / off
+        self.side_toggle.clicked.connect(lambda: self.compact_box.toggle())
+        self._sync_compact_ui()
+        brand.addWidget(self.side_toggle, 0, Qt.AlignmentFlag.AlignTop)
         lay.addLayout(brand)
 
         self.nav_search = QLineEdit()  # filters the tools below; Enter opens the first match
@@ -608,6 +631,9 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.now_playing.togglePlay.connect(self._st_toggle_pause)
         self.now_playing.stopped.connect(self._st_stop)
         self.now_playing.volumeChanged.connect(self._st_set_volume)
+        self.now_playing.scratchStarted.connect(self._st_scratch_start)  # hold the disc to stop it, turn it to wind the track
+        self.now_playing.scratched.connect(self._st_scratch_move)
+        self.now_playing.scratchEnded.connect(self._st_scratch_end)
         self.now_playing.seekTo.connect(self._st_seek)
         self.now_playing.opened.connect(lambda: self._nav_click("sound"))
         outer.addWidget(self.now_playing)
@@ -619,11 +645,174 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
     def pages_order() -> list[str]:
         return [key for _group, items in NAV_GROUPS for key, _text in items]
 
-    def _nav_click(self, key: str) -> None:
-        if self.is_processing:  # the Start button belongs to the running batch until it ends
-            QToolTip.showText(QCursor.pos(), "Locked while a run is active. Stop it or wait for it to finish.", self)
+
+    # ---- the sidebar: pinned beside the page, or compact (out of the way until the mouse touches the left edge) ----------
+    def _side_setup(self, body: QWidget) -> None:
+        """The sidebar floats over `body` rather than sitting in its layout. A spacer (the dock) holds its room open while it is
+        pinned and closes up when it is compact, so the page grows to fill the window; the hover reveal then slides the
+        sidebar out over the page without moving it."""
+        self._compact = False
+        self._side_open = 1.0  # how far out the sidebar is: 0 = away to the left, 1 = fully showing
+        self._away_ticks = 0
+        self._side_anim = QVariantAnimation(self)
+        self._side_anim.valueChanged.connect(self._side_step)
+        self._dock_anim = QVariantAnimation(self)
+        self._dock_anim.valueChanged.connect(lambda v: self._side_dock.setFixedWidth(int(v)))
+        self._shadow = SideShadow(body)
+        self._shadow.hide()
+        self._hot = EdgeHotZone(body)
+        self._hot.hide()
+        self._hot_timer = QTimer(self)  # a short dwell, so brushing past the edge doesn't pop it open
+        self._hot_timer.setSingleShot(True)
+        self._hot_timer.setInterval(90)
+        self._hot_timer.timeout.connect(self._reveal_side)
+        self._hot.entered.connect(lambda: self._hot_timer.start())
+        self._hot.left.connect(lambda: self._hot_timer.stop())
+        self._watch = QTimer(self)  # while the sidebar is out: has the mouse gone away from it?
+        self._watch.setInterval(120)
+        self._watch.timeout.connect(self._side_watch_tick)
+        body.resized.connect(self._place_sidebar)
+
+    def _side_raise(self) -> None:
+        for widget in (self._hot, self._shadow, self._side):  # in this order: the hot strip lowest, the sidebar on top
+            widget.raise_()
+
+    def _place_sidebar(self) -> None:
+        if not hasattr(self, "_side_anim"):
             return
-        self._show_page(key)
+        gap, width, body, side = self.CARD_GAP, self.SIDEBAR_WIDTH, self._body, self._side
+        x = round(gap + (self._side_open - 1.0) * (width + gap * 2))
+        height = max(0, body.height() - 2 * gap)
+        side.setGeometry(x, gap, width, height)
+        shown = self._side_open > 0.001
+        if side.isHidden() == shown:
+            side.setVisible(shown)
+            if shown:
+                self._side_raise()
+        floating = shown and self._compact
+        self._shadow.setGeometry(x + width - 2, gap + 12, 24, max(0, height - 24))
+        if self._shadow.isHidden() == floating:
+            self._shadow.setVisible(floating)
+            if floating:
+                self._side_raise()
+        self._hot.setGeometry(0, 0, 8, body.height())
+        if self._hot.isHidden() == self._compact:
+            self._hot.setVisible(self._compact)
+            if self._compact:
+                self._side_raise()
+
+    def _side_step(self, value) -> None:
+        self._side_open = float(value)
+        self._place_sidebar()
+
+    def _glide_side(self, goal: float, duration: int = 240) -> None:
+        """Ease the sidebar to `goal` (0 away, 1 out): out with a quick start that settles, away with a gentler one."""
+        anim = self._side_anim
+        anim.stop()
+        if not motion.on() or not self.isVisible() or self._side_open == goal:
+            self._side_open = goal
+            self._place_sidebar()
+            return
+        anim.setDuration(duration)
+        anim.setStartValue(float(self._side_open))
+        anim.setEndValue(float(goal))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic if goal > self._side_open else QEasingCurve.Type.InOutCubic)
+        anim.start()
+
+    def _glide_dock(self, goal: int) -> None:
+        anim, dock = self._dock_anim, self._side_dock
+        anim.stop()
+        if not motion.on() or not self.isVisible() or dock.width() == goal:
+            dock.setFixedWidth(goal)
+            return
+        anim.setDuration(260)
+        anim.setStartValue(dock.width())
+        anim.setEndValue(goal)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim.start()
+
+    def _set_compact(self, on: bool) -> None:
+        """Compact mode on or off (Settings > Sidebar, Ctrl+B, or the button beside the logo)."""
+        on = bool(on)
+        if on == self._compact:
+            return
+        self._compact = on
+        self._hot_timer.stop()
+        self._watch.stop()
+        self._glide_dock(0 if on else self.CARD_GAP + self.SIDEBAR_WIDTH)
+        self._glide_side(0.0 if on else 1.0, 260)
+        self._place_sidebar()
+        self._sync_compact_ui()
+
+    def _sync_compact_ui(self) -> None:
+        self.side_toggle.setToolTip("Keep the sidebar open (Ctrl+B)" if getattr(self, "_compact", False) else "Hide the sidebar until the mouse touches the left edge (Ctrl+B)")
+
+    def _reveal_side(self) -> None:
+        if not self._compact:
+            return
+        self._away_ticks = 0
+        self._glide_side(1.0, 240)
+        self._watch.start()
+
+    def _conceal_side(self) -> None:
+        self._watch.stop()
+        if self._compact:
+            self._glide_side(0.0, 220)
+
+    def _side_watch_tick(self) -> None:
+        """The sidebar stays out while the mouse is over it (or a menu is open, or a button is held, as when dragging a scrollbar)
+        and eases away a moment after the mouse leaves."""
+        if not self._compact or self._side_open <= 0.0:
+            self._watch.stop()
+            return
+        pos = self._body.mapFromGlobal(QCursor.pos())
+        zone = QRect(0, 0, self.CARD_GAP + self.SIDEBAR_WIDTH + 14, self._body.height())
+        held = QApplication.activePopupWidget() is not None or QApplication.mouseButtons() != Qt.MouseButton.NoButton
+        if (zone.contains(pos) and self.isActiveWindow()) or held:
+            self._away_ticks = 0
+            return
+        self._away_ticks += 1
+        if self._away_ticks >= 3:
+            self._conceal_side()
+
+    # ---- pinning tools to the sidebar --------------------------------------------------------------------------
+    def _is_pinned(self, key: str) -> bool:
+        box = getattr(self, "_pin_boxes", {}).get(key)
+        return True if box is None else box.isChecked()
+
+    def _group_has_pins(self, group: str) -> bool:
+        return any(self._is_pinned(k) for g, items in NAV_GROUPS if g == group for k, _t in items if k in self.nav_items)
+
+    def _apply_pins(self, *_args) -> None:
+        """Show the pinned tools in the sidebar and hide the rest (a group with nothing pinned goes too)."""
+        if not self.nav_groups or not hasattr(self, "nav_search"):
+            return
+        self._filter_nav(self.nav_search.text())
+        count = sum(1 for k in self.nav_items if self._is_pinned(k))
+        self._brand_sub.setText(f"{APP_VERSION}  |  {count} tools")
+        self._refresh_nav_tips()
+
+    def _pinned_pages(self) -> list[str]:
+        return [k for k in self.pages_order() if k in self.pages and self._is_pinned(k)]
+
+    def _refresh_nav_tips(self) -> None:
+        numbered = {k: n for n, k in enumerate(self._pinned_pages()[:9], 1)}
+        for key, item in self.nav_items.items():
+            n = numbered.get(key)
+            item.setToolTip(f"{PAGE_INFO[key][0]}  (Ctrl+{n}; Ctrl+K finds any page)" if n else "")
+
+    def _nav_nth(self, n: int) -> None:
+        """Ctrl+1 ... Ctrl+9: the nth pinned tool, in sidebar order."""
+        pages = self._pinned_pages()
+        if 0 < n <= len(pages):
+            self._nav_click(pages[n - 1])
+
+    def _run_bar_clicked(self) -> None:
+        if (target := self._run_target()) is not None:
+            self._show_page(target[0])
+
+    def _nav_click(self, key: str) -> None:
+        self._show_page(key)  # a run carries on in the background: its bar along the bottom leads back to it
 
     def _filter_nav(self, text: str) -> None:
         """Show only the tools whose names contain every typed word (their groups open up to show them)."""
@@ -636,11 +825,11 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
                 item = self.nav_items.get(key)
                 if item is None:
                     continue
-                show = all(t in label.lower() for t in terms)
+                show = self._is_pinned(key) and all(t in label.lower() for t in terms)
                 item.setVisible(show)  # at once: the body around it is what animates, and it clips them
                 shown.append(show)
                 hits += show
-            want_header, want_body = hits > 0 or not terms, bool(hits) if terms else g["header"].open
+            want_header, want_body = hits > 0, hits > 0 and (bool(terms) or g["header"].open)  # a group with nothing pinned is left out
             if (tuple(shown), want_header, want_body) != g.get("filtered"):  # only a real change moves anything
                 g["filtered"] = (tuple(shown), want_header, want_body)
                 if want_header != g["header"].isVisibleTo(self):
@@ -725,7 +914,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         has_torbox = bool(torbox_key())
         click = "  Click to see what is on your account." if has_torbox else ""
         states.append((provider.name, "ok", "default downloader: key saved" + (click if provider.key == "torbox" else ""))
-                      if provider else ("Debrid", "bad", "no downloader: add a TorBox or other debrid key under Logins"))
+                      if provider else ("Debrid", "bad", "no downloader: add a TorBox or other debrid key under Settings > API keys > Downloads"))
         if has_torbox and provider is not None and provider.key != "torbox":  # TorBox has a key but isn't first in line
             states.append(("TorBox", "ok", "key saved." + click))
         self.markers.set_states(states)
@@ -770,13 +959,17 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.page_chip.setText(PAGE_CHIP.get(key, "").upper())
         motion.fade(self.page_chip, bool(PAGE_CHIP.get(key)))
         for group, items in NAV_GROUPS:  # make sure the group holding this page is expanded
-            if any(k == key for k, _t in items) and not self.nav_groups[group]["header"].open:
+            if any(k == key for k, _t in items) and not self.nav_groups[group]["header"].open and self._group_has_pins(group):
                 self._toggle_group(group)
         for k, item in self.nav_items.items():
             item.selected = k == key
             item.update()
         self._refresh_start_label()
-        if key == "recomps":
+        self._runbar_sync()  # the bar along the bottom shows while the running job's page is not the one on screen
+        self._gm_sync_scrollbar()  # the Games page hides its scrollbar while it has no games; every other page keeps its own
+        if key == "games":
+            self._gm_on_show()
+        elif key == "recomps":
             self._rc_on_show()
         elif key == "emus":
             self._em_on_show()
@@ -791,7 +984,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
     def _current_mode(self) -> str:
         page = self.current_page
         return (page if page in self.MODES else "dl" if page in ("dl", "sound") else "recomps" if page == "recomps"
-                else "emus" if page == "emus" else "switch" if page == "switch" else "org")
+                else "games" if page == "games" else "emus" if page == "emus" else "switch" if page == "switch" else "org")
 
     def _busy_label(self, page: str) -> str:
         """What the Start button says while the run begun from this page is going."""
@@ -806,7 +999,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._update_start_text()
 
     def _update_start_text(self) -> None:
-        """The Start button's words: what the page does when idle, what is happening while a run or an Organize job goes."""
+        """The Start button's words: what the page does when idle, what is happening while a run or an Organise job goes."""
         if not hasattr(self, "start_btn"):
             return
         page, mode = self.current_page, self._current_mode()
@@ -820,15 +1013,21 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
                     else self.org[page].tool.apply_label if mode == "org"
                     else START_LABELS.get(mode, "Start Batch"))
         self.start_btn.setText(text)
+        target = self._run_target()
+        away = target is not None and target[0] != page
+        tip = (f"{PAGE_INFO[target[0]][0]} is running. Click the bar along the bottom to go back to it."
+               if away and target[0] in PAGE_INFO else "Ctrl+Enter")
+        if self.start_btn.toolTip() != tip:
+            self.start_btn.setToolTip(tip)
 
     def _refresh_start_label(self) -> None:
         page, mode = self.current_page, self._current_mode()
         self._update_start_text()
         if not self.is_processing and not self.org_busy:  # the idle label follows the page
             self.lbl_total_prog.setText("Download Progress: 0 / 0" if mode == "dl" else
-                                        "Organize Progress: 0 / 0" if mode == "org" else "Batch Progress: 0 / 0")
-        motion.set_visible(self.perf, mode not in ("dl", "org", "recomps", "emus"))
-        motion.set_visible(self.bar_wrap, mode not in ("recomps", "emus"))
+                                        "Organise Progress: 0 / 0" if mode == "org" else "Batch Progress: 0 / 0")
+        motion.set_visible(self.perf, mode not in ("dl", "org", "games", "recomps", "emus"))
+        motion.set_visible(self.bar_wrap, mode not in ("games", "recomps", "emus"))
         self._apply_panel_mode(mode)
 
     def _build_tab(self, mode: str) -> QWidget:

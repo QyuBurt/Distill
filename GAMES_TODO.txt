@@ -1,0 +1,69 @@
+GAMES LIBRARY: WHAT'S LEFT TO BUILD
+===================================
+How this works: one item at a time, in order. Claude builds an item, ticks it here, then WAITS for the
+go-ahead before starting the next. If you are picking this up again later, the first unticked item is
+where we stopped. When every item is ticked, DELETE THIS FILE.
+
+Design rules for all of them: keep the UI clean (new things go in menus, cards and dialogs we already
+have, not new rows of buttons), reuse the existing styles and transitions, and add tests for the engine.
+
+[x] 1. Tool integration
+       Right-click a game (or a selection) > Tools: convert with the right tool (CHD / CSO / RVZ...),
+       Fix names & discs, Find soundtrack. Reuses the drop router, so it opens the right page with
+       the files already chosen.
+
+[x] 2. Personal fields
+       Star rating, completion status (Plan to play / Playing / Completed / Dropped) and a notes box.
+       Editable in the Edit window and the game page; filterable (Filters > Rating / Progress) and sortable
+       (Rating, Status). Notes are found by the search box too.
+
+[x] 3. Per-platform setup page
+       One place per platform: default emulator, launch options and BIOS status, with a health
+       overview ("PlayStation: BIOS missing") so problems show before a game is started.
+       Right-click a platform in the sidebar (or a game > "<platform> setup...") to open it; platforms that
+       need attention get a coloured dot in the sidebar.
+
+[x] 4. Smart collections
+       A saved filter that stays up to date ("Unplayed SNES RPGs from the 90s"), shown in the
+       sidebar beside the normal collections.
+       Filters > Save as smart collection... saves the platform, search words, Favourites pill and filters
+       showing now. Right-click one in the sidebar to rename or delete it.
+
+[x] 5. Bulk edit
+       Set genre, developer, publisher, year or platform for a whole selection at once.
+       Selection bar > Add to > Set details (or right-click > Set details); platform was already in Add to.
+
+[x] 6. Resume from save state
+       A Continue button for RetroArch games that have a save state; last played shown on the grid.
+       Shown on the game page (beside Play) and in the right-click menu only when a state exists; starts RetroArch with -e <slot>.
+       The grid shows "Played 4 days ago" under the platform.
+
+[x] 7. Import from LaunchBox / Playnite
+       Libraries > Import / export > Import history. LaunchBox: its folder (Data\Platforms and Playlists). Playnite: a JSON export (its own database is not readable).
+       Brings favourites, play time and count, last played, stars, progress, notes and collections; never overwrites what is set in Distill.
+       Bring favourites, playtime and collections across so people can switch without losing history.
+
+[x] 8. Export for other front ends
+       Write RetroArch playlists (.lpl), later ES-DE gamelists.
+       Libraries > Import / export > Export RetroArch playlists. One playlist per platform (named like RetroArch's own), Distill Favourites and one per
+       collection. Existing playlists only gain new games. ES-DE gamelists are still to do.
+
+[x] 9. Small wins (tick each as it is done)
+       [x] Random game button
+           Filters > Random game opens a game picked from the ones showing (never the same one twice running).
+       [x] Recently added pill
+           Fourth pill: games a scan first found in the last 30 days, newest first (gm.RECENT_ADD_DAYS).
+       [x] List view with sortable columns
+           Filters > List view. Title, platform, year, genre, rating, progress, last played, time played, added; click a heading to sort,
+           again to turn it round. Rows are selectable and have the same right-click menu; the choice and the sort are remembered.
+       [x] Hash-based RetroAchievements matching
+           Cartridge platforms are matched by the file's MD5 (headers stripped, N64 byte order fixed, single-file zips opened), then by title.
+           Discs still match by title.
+       [x] Verify ROMs against No-Intro / Redump (the DAT check already exists in Library Report)
+           Right-click > Tools > Verify against a DAT... Reuses datverify; playlists and cue sheets are skipped.
+       [x] Stats view: playtime by platform
+           Filters > Playtime by platform...
+
+Notes
+-----
+- Deliberately NOT planned: Steam / Epic / GOG imports, a Big Picture mode, an add-on system.

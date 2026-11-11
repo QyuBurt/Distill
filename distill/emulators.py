@@ -1272,7 +1272,7 @@ def inspect_fork(parent: Emulator, repo: str, store: rc.Store, catalog: Iterable
         facts = json.loads(rc._get(f"https://api.github.com/repos/{repo}", store.token(), "application/vnd.github+json"))
     except urllib.error.HTTPError as exc:
         rep.error = ("That repository doesn't exist, or it is private." if exc.code == 404 else
-                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > General > API keys." if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
+                     "GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > API keys > Updates." if exc.code in (403, 429) else f"GitHub answered {exc.code}.")
         return rep
     except (urllib.error.URLError, OSError, ValueError):
         rep.error = "Couldn't reach GitHub."

@@ -107,7 +107,7 @@ def _resolve_token(token: str) -> list[RemoteFile]:
         return [hosters.entry(handler, full)]
     if host_of(full).endswith(LINKS_NEED_DEBRID):
         raise LinkError(f"{host_of(full)}: this host needs a debrid service (Real-Debrid, AllDebrid or Premiumize "
-                        "support it). Add one in Settings > Accounts.")
+                        "support it). Add one in Settings > API keys > Downloads.")
     return list_open_directory(full)
 
 

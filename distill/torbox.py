@@ -30,7 +30,7 @@ def _torbox_call(path: str, params: dict | None = None, form: dict | None = None
     """One TorBox API call -> its parsed JSON reply. Every failure is a LinkError with a readable reason."""
     key = torbox_key()
     if not key:
-        raise LinkError("No TorBox API key (Settings > Accounts).")
+        raise LinkError("No TorBox API key (Settings > API keys > Downloads).")
     url = f"{TORBOX_API}/{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
     headers, body = {"User-Agent": USER_AGENT, "Authorization": f"Bearer {key}", "Accept": "application/json"}, None
     if form is not None:  # createtorrent takes multipart/form-data
@@ -48,7 +48,7 @@ def _torbox_call(path: str, params: dict | None = None, form: dict | None = None
             detail = str(json.loads(exc.read() or b"{}").get("detail") or "")
         exc.close()
         if exc.code in (401, 403):
-            raise LinkError("TorBox rejected the API key - check it under Logins.") from None
+            raise LinkError("TorBox rejected the API key - check it under Settings > API keys > Downloads.") from None
         raise LinkError(f"TorBox: HTTP {exc.code}" + (f" - {detail}" if detail else "")) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
         raise LinkError(f"TorBox unreachable: {getattr(exc, 'reason', exc)}") from None

@@ -22,7 +22,7 @@ from . import bios as biosmod, cuebin, patcher
 from .datverify import load_dat, verify as dat_verify
 from .fingerprint import find_same_content
 from .frontends import PRESET_NONE, folder_for
-from .formats import associated_files
+from .formats import associated_files, playlist_discs
 from .library import LibraryEntry
 from .models import fmt_size
 from .onegr import DEFAULT_PRIORITY, choose as onegr_choose, parse_priority
@@ -1212,19 +1212,37 @@ def find_library(root: Path, recursive: bool, opts: dict, stop: threading.Event)
     """One finding per system, holding a LibraryEntry per game. Nothing is changed; the page exports what's ticked."""
     note = opts.get("_note")
     entries: list[LibraryEntry] = []
+    candidates: list[tuple[Path, Path]] = []  # (folder, a game's main file)
+    playlists: list[tuple[Path, Path, list[Path]]] = []  # (folder, an .m3u, the discs it lists)
+    claimed: set[str] = set()  # the discs that have a playlist: they are one game together, not a game each
+    key = lambda p: os.path.normcase(os.path.normpath(str(p)))  # noqa: E731
     for folder, _subdirs, names in _walk(root, recursive, stop):
         mains, _owned = _disc_mains(folder, names)
         mains = [m for m in mains if _is_game_file(m, LIBRARY_EXTENSIONS)]
         mains += [folder / n for n in names if Path(n).suffix.lower() not in ORGANIZE_EXTENSIONS
                   and _is_game_file(folder / n, LIBRARY_EXTENSIONS)]
-        for main in mains:
-            files = _disc_files(main) if main.suffix.lower() in ORGANIZE_EXTENSIONS else [main]
-            entries.append(LibraryEntry(
-                main.name, detect_system(main, root) or UNKNOWN_FOLDER, main.suffix.lstrip(".").upper(),
-                region_of(main.stem), sum(file_size(f) for f in files), max(_mtime(f) for f in files),
-                "" if folder == root else str(folder.relative_to(root)), str(main)))
-            if note and len(entries) % 25 == 0:
-                note(f"Reading files... {len(entries)} found")
+        candidates += [(folder, m) for m in mains]
+        for n in names:
+            if n.lower().endswith(".m3u") and (discs := playlist_discs(folder / n)):
+                playlists.append((folder, folder / n, discs))
+                claimed |= {key(d) for d in discs}
+        if note and len(candidates) % 25 == 0:
+            note(f"Reading files... {len(candidates)} found")
+    for folder, main in candidates:
+        if key(main) in claimed:
+            continue
+        files = _disc_files(main) if main.suffix.lower() in ORGANIZE_EXTENSIONS else [main]
+        entries.append(LibraryEntry(
+            main.name, detect_system(main, root) or UNKNOWN_FOLDER, main.suffix.lstrip(".").upper(),
+            region_of(main.stem), sum(file_size(f) for f in files), max(_mtime(f) for f in files),
+            "" if folder == root else str(folder.relative_to(root)), str(main)))
+    for folder, m3u, discs in playlists:  # a multi-disc game: its playlist stands for all its discs
+        files = [f for d in discs for f in (_disc_files(d) if d.suffix.lower() in ORGANIZE_EXTENSIONS else [d])]
+        system = next((s for d in discs if (s := detect_system(d, root))), "") or detect_system(m3u, root)
+        entries.append(LibraryEntry(
+            m3u.name, system or UNKNOWN_FOLDER, discs[0].suffix.lstrip(".").upper(), region_of(m3u.stem) or region_of(discs[0].stem),
+            sum(file_size(f) for f in files), max(_mtime(f) for f in [m3u, *files]),
+            "" if folder == root else str(folder.relative_to(root)), str(m3u), len(discs), tuple(str(d) for d in discs)))
     by_system: dict[str, list[LibraryEntry]] = {}
     for e in entries:
         by_system.setdefault(e.system, []).append(e)

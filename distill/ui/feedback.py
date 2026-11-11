@@ -3,8 +3,7 @@ log's search and save, the Ctrl+K page jumper and tooltips that say why a contro
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QSystemTrayIcon, QToolTip
-from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QSystemTrayIcon
 
 from ..constants import APP_NAME
 from ..models import fmt_duration
@@ -89,9 +88,6 @@ class FeedbackMixin:
         return out
 
     def _open_goto(self) -> None:
-        if self.is_processing:
-            QToolTip.showText(QCursor.pos(), "Locked while a run is active. Stop it or wait for it to finish.", self)
-            return
         dlg = GoToDialog(self._goto_entries(), self)
         if dlg.exec() == QDialog.DialogCode.Accepted and (key := dlg.chosen()):
             self._open_settings() if key == "__settings__" else self._nav_click(key)
@@ -105,6 +101,7 @@ class FeedbackMixin:
         self._aura_timer.start()
 
     def _aura_sync(self) -> None:
+        self._runbar_sync()  # a safety net: the bar along the bottom always matches whether a job is running and where
         button = getattr(self, "start_btn", None)
         if button is None or not hasattr(button, "set_state"):
             return

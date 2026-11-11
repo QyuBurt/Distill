@@ -497,3 +497,34 @@ class TooltipWrapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class KHInsiderTests(unittest.TestCase):
+    SEARCH = ('<table class="albumList"><tr><td><a href="/game-soundtracks/album/persona-5"><img src="https://x/t.jpg"></a></td>'
+              '<td><a href="/game-soundtracks/album/persona-5">Persona 5</a></td><td>PlayStation 4</td><td>2016</td></tr></table>')
+    ALBUM = ('<h2>Persona 5</h2><div class="albumImage"><a href="https://j/big.jpg"><img src="https://j/t.jpg"></a></div>'
+             '<table id="songlist"><tr><th>CD</th><th>#</th><th>Song Name</th><th>MP3</th><th>FLAC</th></tr>'
+             '<tr><td>1</td><td>1.</td><td><a href="/game-soundtracks/album/persona-5/01%20A.mp3">A</a></td><td>5 MB</td><td>20 MB</td></tr></table>')
+    TRACK = '<audio src="https://v/a/01 A.mp3"></audio><a href="https://v/a/01 A.flac">flac</a>'
+
+    def test_search_page_is_read(self):
+        (hit,) = st.parse_khinsider_search(self.SEARCH)
+        self.assertEqual((hit["slug"], hit["title"], hit["art"]), ("persona-5", "Persona 5", "https://x/t.jpg"))
+
+    def test_album_page_gives_flac_tracks_or_mp3_on_request(self):
+        tracks, cover, _ = st.parse_khinsider_album(self.ALBUM, "persona-5")
+        self.assertEqual((tracks[0].title, tracks[0].ext, tracks[0].size, cover), ("A", ".flac", 20 * 1024 ** 2, "https://j/big.jpg"))
+        self.assertTrue(st.is_khinsider_page(tracks[0].url))
+        self.assertEqual(st.parse_khinsider_album(self.ALBUM, "persona-5", "mp3")[0][0].ext, ".mp3")
+
+    def test_track_page_gives_the_file_address(self):
+        self.assertEqual(st.parse_khinsider_track(self.TRACK), "https://v/a/01%20A.flac")
+        self.assertEqual(st.parse_khinsider_track(self.TRACK, "mp3"), "https://v/a/01%20A.mp3")
+        self.assertIsNone(st.parse_khinsider_track("<html></html>"))
+
+    def test_files_are_resolved_and_plain_urls_pass_through(self):
+        page = "https://downloads.khinsider.com/game-soundtracks/album/x/01.mp3"
+        files = [st.RemoteFile("G/soundtrack/01 - A.mp3", page, 5), st.RemoteFile("G/soundtrack/02 - B.mp3", "https://z/2.mp3", 5)]
+        with mock.patch.object(st, "fetch_text", lambda url, timeout=30: self.TRACK):
+            st._RESOLVED.clear()
+            out, problems = st.resolve_files(files)
+        self.assertEqual((out[0].url, out[1].url, problems), ("https://v/a/01%20A.flac", "https://z/2.mp3", []))

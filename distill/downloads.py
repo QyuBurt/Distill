@@ -23,7 +23,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
-from . import debrid, ftpclient, secretstore, ytdlp
+from . import apikeys, debrid, ftpclient, ytdlp
 from .constants import APP_DIR, APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
 from .models import fmt_size
 from .netrules import GATE, PAUSED, RULES, THROTTLE, host_of
@@ -86,9 +86,6 @@ class RemoteFile:
 
 
 SESSION_FILE = APP_DIR / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
-
-
-LOGIN_FILE = APP_DIR / "distill_logins.json"  # only written when "Remember" is ticked in the Logins window
 
 
 # Sites with their own sign-in: key -> (name, hostnames, ((field, label, hidden), ...), where to find the key, required)
@@ -170,7 +167,7 @@ def auth_headers(url: str) -> dict[str, str]:
 
 
 def ftp_creds(url: str) -> tuple[str, str] | None:
-    """A saved login (Logins... > custom site, user name and password) for this FTP address; None = the address's own, or anonymous."""
+    """A saved login (API keys > Downloads > other site, user name and password) for this FTP address; None = the address's own, or anonymous."""
     cred = login_for(url)
     if cred and cred.get("user") and site_for(url).startswith("custom:") and cred.get("kind") not in CUSTOM_KINDS[1:]:
         return cred["user"], cred["secret"]
@@ -178,21 +175,12 @@ def ftp_creds(url: str) -> tuple[str, str] | None:
 
 
 def load_logins() -> bool:
-    """Read remembered logins. True if anything was remembered."""
+    """Read remembered logins from the keys file (apikeys.py). True if anything was remembered."""
     global LOGIN_PROBLEM
     LOGINS.clear()
     LOGINS["custom"] = []
-    LOGIN_PROBLEM = ""
-    try:
-        data = json.loads(LOGIN_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("v") == 2:  # sealed: see secretstore.py; older files are plain and still load
-            data = json.loads(secretstore.unseal(data).decode("utf-8"))
-    except secretstore.SealError as exc:
-        LOGIN_PROBLEM, data = str(exc), {}
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = apikeys.logins()
+    LOGIN_PROBLEM = apikeys.problem()
     for key in LOGIN_SITES:
         if isinstance(data.get(key), dict):
             LOGINS[key] = {str(k): str(v) for k, v in data[key].items()}
@@ -204,17 +192,9 @@ def load_logins() -> bool:
 
 
 def save_logins(remember: bool) -> None:
-    """Keep the logins on disk (plain text, next to the app) only while 'Remember' is ticked."""
-    try:
-        if remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom")):
-            sealed = secretstore.seal(json.dumps(LOGINS).encode("utf-8"))  # plain text only where nothing better exists
-            LOGIN_FILE.write_text(json.dumps(sealed), encoding="utf-8")
-            with contextlib.suppress(OSError):
-                os.chmod(LOGIN_FILE, 0o600)  # owner-only where the OS supports it
-        else:
-            LOGIN_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    """Keep the logins in the keys file (sealed, see secretstore.py) only while 'Remember' is ticked; the API keys stay either way."""
+    keep = remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom"))
+    apikeys.save_logins(LOGINS if keep else None)
 
 
 def logins_missing(urls: list[str], required_only: bool = False) -> list[str]:
@@ -276,10 +256,10 @@ def describe_error(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.HTTPError):
         url = getattr(exc, "url", "") or ""
         name, have = _site_name(url), login_for(url) is not None
-        hint = {401: f"login rejected - check your {name} login (Logins...)" if have else
-                f"needs a login - add one for {name} under Logins...",
+        hint = {401: f"login rejected - check your {name} login (Settings > API keys > Downloads)" if have else
+                f"needs a login - add one for {name} under Settings > API keys > Downloads",
                 403: "access denied - this account may not have access to it" if have else
-                f"access denied - it may need a {name} login (Logins...)",
+                f"access denied - it may need a {name} login (Settings > API keys > Downloads)",
                 404: "not found", 410: "gone",
                 429: "rate limited - try fewer parallel downloads"}.get(exc.code, "")
         return f"HTTP {exc.code}" + (f" - {hint}" if hint else "")
@@ -388,7 +368,7 @@ def list_archive_item(identifier: str, subpath: str = "") -> list[RemoteFile]:
         if str((data.get("metadata") or {}).get("access-restricted-item", "")).lower() == "true":
             raise LinkError(f"{identifier} is access-restricted. " + (
                 "Your account doesn't appear to have access to its files." if login_for(ARCHIVE_URL) else
-                "Add your archive.org keys under Logins... and fetch again."))
+                "Add your archive.org keys under Settings > API keys > Downloads and fetch again."))
         raise LinkError(f"{identifier}: no downloadable files found (item missing, empty or not public)")
     meta: dict[str, dict] = {f["name"]: f for f in data["files"] if f.get("name")}
 
@@ -467,7 +447,7 @@ FICHIER_API = "https://api.1fichier.com/v1"
 def _fichier_call(endpoint: str, payload: dict) -> dict:
     key = (LOGINS.get("1fichier") or {}).get("apikey", "")
     if not key:
-        raise LinkError("1fichier links need your API key - add it under Logins...")
+        raise LinkError("1fichier links need your API key - add it under Settings > API keys > Downloads.")
     req = urllib.request.Request(
         f"{FICHIER_API}/{endpoint}", data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"User-Agent": USER_AGENT, "Content-Type": "application/json", "Authorization": f"Bearer {key}"})

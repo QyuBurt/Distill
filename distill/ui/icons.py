@@ -12,6 +12,7 @@ from .assets import asset
 
 PATHS: dict[str, str] = {
     "search": '<circle cx="11" cy="11" r="7.5"/><path d="M21 21l-4.6-4.6"/>',
+    "sidebar": '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
     "folder": '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     "folder-open": '<path d="M3 18V6a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V9"/>'
                    '<path d="M3 18l2.4-7.2A2 2 0 0 1 7.3 9.5H21a1 1 0 0 1 .95 1.3L19.7 17.6A2 2 0 0 1 17.8 19H4a1 1 0 0 1-1-1z"/>',
@@ -40,6 +41,7 @@ PATHS: dict[str, str] = {
     "chevron-up": '<path d="M6 15l6-6 6 6"/>',
     "chevron-right": '<path d="M9 6l6 6-6 6"/>',
     "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "calendar": '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
     "list": '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
     # media transport: solid shapes use the placeholder @c, which svg_bytes swaps for the colour asked for
     "play": '<path d=\"M8 5l11 7-11 7z\" fill=\"@c\"/>',
@@ -73,6 +75,7 @@ BY_TITLE = (
     ("link", "link"), ("file", "file"),
     ("games", "gamepad"), ("soundtrack", "music"), ("music", "music"), ("package", "cube"), ("archive", "archive"),
     ("playstation", "playstation"), ("junk", "brush"), ("platform", "layout"), ("report", "chart"), ("disc", "disc"), ("setting", "settings"),
+    ("update", "branch"),
 )
 
 

@@ -19,11 +19,11 @@ class NavTests(unittest.TestCase):
         self.assertEqual(names["ORGANISE LIBRARY"], ["Fix Names & Discs", "Remove Extras / Junk", "Patch ROMs",
                                                      "Sort by System", "Library Report"])
         self.assertEqual(names["DOWNLOADS"], ["Files & Torrents", "Soundtrack Grabber"])
-        self.assertEqual(names["GAMES"], ["PC Recomps", "Emulators"])
+        self.assertEqual(names["GAMES"], ["Games", "PC Recomps", "Emulators"])
 
     def test_every_page_has_a_title_blurb_detail_and_chip(self):
         keys = [key for _g, items in NAV_GROUPS for key, _t in items]
-        self.assertEqual(len(keys), 18)
+        self.assertEqual(len(keys), 19)
         for key in keys:
             self.assertTrue(PAGE_INFO[key][0] and PAGE_INFO[key][1], key)
             self.assertTrue(PAGE_DETAIL[key], key)
@@ -36,7 +36,7 @@ class NavTests(unittest.TestCase):
             "pkg": "PS4 PKG Manager", "pkg5": "PS5 PKG Manager", "rvz": "RVZ Compression (Dolphin)",
             "switch": "Switch NSZ / NUP Converter", "xbox": "Xbox ISO / XEX Repacker", "zar": "ZAR Archive Compressor", "fix": "Fix Names & Discs",
             "extras": "Remove Extras & Junk", "patch": "Patch ROMs", "bysystem": "Sort by System", "report": "Library Report",
-            "dl": "Files & Torrents", "sound": "Soundtrack Grabber", "recomps": "PC Recomps", "emus": "Emulators"})
+            "dl": "Files & Torrents", "sound": "Soundtrack Grabber", "games": "Games", "recomps": "PC Recomps", "emus": "Emulators"})
 
     def test_ps_pages_run_in_numerical_order(self):
         keys = [key for _g, items in NAV_GROUPS for key, _t in items]
@@ -92,9 +92,6 @@ class AssetTests(unittest.TestCase):
                          body.count("/>"))  # every element is self-closed
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ThemeTests(unittest.TestCase):
     def test_light_palette_is_readable_and_switches_back(self):
@@ -117,3 +114,7 @@ class ThemeTests(unittest.TestCase):
             self.assertEqual(T.check_icon, "check-dark.png")
         finally:
             T.set_dark(True)
+
+
+if __name__ == "__main__":
+    unittest.main()

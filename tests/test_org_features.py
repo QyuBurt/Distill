@@ -147,6 +147,31 @@ class LibraryReportTests(Base):
         self.assertGreaterEqual(entry.size, 5000)
 
 
+    def test_a_playlist_makes_its_discs_one_game(self):
+        for n in (1, 2, 3):
+            self.make(f"PlayStation/Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc {n}).chd", b"MComprHD" + b"x" * 100)
+        (self.root / "PlayStation/Final Fantasy VII (USA)/Final Fantasy VII (USA).m3u").write_text(
+            "#EXTM3U\nFinal Fantasy VII (USA) (Disc 1).chd\r\nFinal Fantasy VII (USA) (Disc 2).chd\nFinal Fantasy VII (USA) (Disc 3).chd\n")
+        self.make("PlayStation/Crash Bandicoot (USA).chd", b"MComprHD")
+        findings, _ = find_library(self.root, True, {}, NEVER)
+        entries = sorted((e for f in findings for e in f.data), key=lambda e: e.name)
+        self.assertEqual([e.name for e in entries], ["Crash Bandicoot (USA).chd", "Final Fantasy VII (USA).m3u"])  # no game for each disc
+        ff7 = entries[1]
+        self.assertEqual((ff7.discs, ff7.kind, ff7.region, ff7.system), (3, "CHD", "USA", "PlayStation"))
+        self.assertEqual(len(ff7.members), 3)
+        self.assertGreaterEqual(ff7.size, 3 * 108)
+        self.assertEqual(entries[0].discs, 0)
+
+    def test_a_playlist_may_point_into_another_folder_and_a_dead_one_is_ignored(self):
+        self.make("PS/Discs/Game (Disc 1).chd", b"MComprHD")
+        self.make("PS/Discs/Game (Disc 2).chd", b"MComprHD")
+        (self.root / "PS/Game.m3u").write_text("Discs\\Game (Disc 1).chd\nDiscs/Game (Disc 2).chd\n")
+        (self.root / "PS/Dead.m3u").write_text("nothing here.chd\n")  # lists nothing that exists: not a game
+        findings, _ = find_library(self.root, True, {}, NEVER)
+        entries = [e for f in findings for e in f.data]
+        self.assertEqual([(e.name, e.discs) for e in entries], [("Game.m3u", 2)])
+
+
 class HistoryAndReportTests(Base):
     def rename(self, old: str, new: str):
         src = self.make(old)

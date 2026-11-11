@@ -4,11 +4,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from distill import downloads as dl
 from distill import ftpclient, links
-from distill.downloads import LinkError, RemoteFile
+from distill.downloads import RemoteFile
 
 FILES = {"/pub/a.zip": b"0123456789" * 50, "/pub/sub/b.7z": b"B" * 300, "/pub/sub/deeper/c.rar": b"C" * 7, "/top.bin": b"T" * 40}
 DIRS = {"/", "/pub", "/pub/sub", "/pub/sub/deeper"}

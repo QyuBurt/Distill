@@ -36,6 +36,8 @@ Settings and downloaded tools are kept next to the `.exe`, so both builds are po
 
 - **PC Recomps** is a poster grid of native PC ports of console games (Ship of Harkinian, Zelda 64: Recompiled, Starship and more). Install, update and play with one click from each project's own GitHub release, checked against the published checksum. Updates keep your saves. *Check my library* shows which games you already have the dump for. Nothing is ever downloaded or converted for you. **Add recomp...** puts a project that isn't on any list yet on the page: give its GitHub address and Distill fills in what it can, then you say what game it plays and what kind of project it is. It installs and updates like the rest, and you can edit or remove it later.
 - **Emulators** is a catalog of about 36 emulators with install, update and launch.
+- **Games library > Libraries > Import / export > Export RetroArch playlists** writes a playlist for each platform, your favourites and each collection into RetroArch's playlist folder. A playlist RetroArch already has keeps everything in it and only gains the games it was missing.
+- **Games library > Libraries > Import / export > Import history** brings your favourites, play time, stars, progress and collections across from a LaunchBox folder or a Playnite JSON export. Only games already in your library are updated, nothing you set in Distill is overwritten, and importing twice changes nothing.
 
 ### Downloads
 
@@ -44,10 +46,10 @@ Settings and downloaded tools are kept next to the `.exe`, so both builds are po
   - **Scan a page for links:** paste `scan:https://example.com/page` (or `scan[zip,7z]:https://...` to pick file types) and every download link on that page is listed: files, magnets and links to Drive, MediaFire, Dropbox, OneDrive, Pixeldrain, 1fichier and archive.org. Pixeldrain lists are expanded into their files.
   - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into the `Watch` folder beside Distill and its links are listed. Taken files move into `Watch/queued`.
   - **Unpacking:** multi-part sets (`.part1.rar`, `.7z.001`, `.rar` + `.r00`, `.zip` + `.z01`) are unpacked from the first part and, with "then delete them", every part goes afterwards. Password-protected archives are tried with each line of `distill_archive_passwords.txt` (next to Distill), then with ones worked out from the site the file came from (`www.site.com`, `site.com`, `site`), then with their own name.
-  - **FTP:** paste an `ftp://` or `ftps://` address (`ftp://user:password@host/path` if it needs a login, or save one under Logins). A folder is listed with everything under it; downloads resume. FTP does not use the proxy rules.
+  - **FTP:** paste an `ftp://` or `ftps://` address (`ftp://user:password@host/path` if it needs a login, or save one under Settings > API keys > Downloads). A folder is listed with everything under it; downloads resume. FTP does not use the proxy rules.
   - **Site headers:** under Settings > Downloads > per-site rules, a site can have a Referer (`auto` = its own front page), a User-Agent and extra `Name: value` headers. They are sent only to that site, never on a redirect to another one.
   - **When finished:** run a command of your own (`"C:\Tools\sync.bat" {folder}`; also `{list}`, `{count}`, `{failed}`), then optionally sleep, hibernate or shut down after a 60-second countdown you can cancel. Nothing happens if you stopped the downloads yourself, and the power option resets to Nothing each time Distill starts.
-- **Soundtrack Grabber** takes a list of game names (or reads them from your library) and finds each game's soundtrack on archive.org. It scores the matches, previews tracks, and can fill in missing tags and cover art.
+- **Soundtrack Grabber** is a music-player style page: one search bar, and the albums found laid out with the cover on the left and the tracks on the right. Tracks stream from KHInsider (archive.org is searched too); saving uses KHInsider (FLAC when available) and falls back to archive.org. It can fill in missing tags and cover art.
 
 ### Convert & compress
 
@@ -78,7 +80,10 @@ Work through the pages in order. Every change can be previewed first, and every 
 ### Interface
 
 - Dark and light themes (click the Distill logo)
-- `Ctrl+K` to jump to any page, `Ctrl+1` to `Ctrl+9` for the first nine, `Ctrl+,` for Settings
+- `Ctrl+K` to jump to any page, `Ctrl+1` to `Ctrl+9` for the first nine pinned tools, `Ctrl+,` for Settings
+- **Compact sidebar** (`Ctrl+B`, the button beside the logo, or Settings > Sidebar): the sidebar tucks away to the left and the page uses the whole window. Move the mouse to the left edge and it eases out over the page; move away and it eases back
+- **Pin and unpin tools** under Settings > Sidebar to keep only the ones you use in the sidebar. Unpinned tools stay available from `Ctrl+K`
+- **Runs don't lock the window.** Start a conversion or download, then go anywhere in the app. A bar along the bottom shows what is running and its percentage; click it to return to that page
 - Searchable, copyable log with coloured errors, warnings and verified lines
 - Window layout, folders and options remembered between runs
 - Taskbar progress and a notification when a long run finishes
@@ -97,14 +102,17 @@ On Windows you can also double-click `Distill.pyw`.
 
 ### Optional keys
 
-Distill works without any keys. These only raise rate limits or add artwork:
+Distill works without any keys. They only raise rate limits, add artwork or sign you in to a file host. Everything lives in **Settings > API keys**, in folders so you only open what you use:
 
-| Key | Used for |
-| --- | --- |
-| `GITHUB_TOKEN` | Read-only token. Raises GitHub's limit from 60 to 5,000 requests an hour (PC Recomps, tool updates) |
-| `SGDB_API_KEY` | steamgriddb.com key for portrait posters in PC Recomps |
+| Folder | Holds | Used for |
+| --- | --- | --- |
+| Games & artwork | SteamGridDB, RetroAchievements | Posters, covers and icons for Games, PC Recomps and Emulators; a game's achievements |
+| Downloads & file hosts | archive.org, 1fichier, TorBox and other debrid services, Prowlarr, any other site | Sign-ins for the Files & Torrents page, cached torrents, more torrent search |
+| Updates | GitHub | A read-only token raises GitHub's limit from 60 to 5,000 requests an hour (tool, emulator and recomp update checks) |
 
-The easiest way is **Settings > General > API keys**: paste a key there and it is saved (encrypted for your Windows account) and used straight away, in a downloaded build too. Otherwise set them as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
+Paste a key there and it is saved and used straight away, in a downloaded build too. All of them are kept in **one file, `distill_keys.json`**, next to the app: encrypted so only your Windows account can read it (with the system keyring on other platforms; plain text only where neither is available). Moving the file to another computer or account makes it unreadable on purpose. Keys from older versions (`distill_apikeys.json` and `distill_logins.json`) are moved into it the first time the app starts, and those two files are then removed.
+
+Otherwise set `GITHUB_TOKEN` / `SGDB_API_KEY` as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). A key saved in Settings is used first. Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
 
 ## Development
 

@@ -1,7 +1,7 @@
 """The GitHub token, if there is one. Without it GitHub allows 60 requests an hour per IP, which a few launches can use up
 (each tool is checked for updates at start-up); with a read-only token it is 5,000.
 
-Looked for in this order: the key saved in Settings > General > API keys (apikeys.py), $GITHUB_TOKEN / $GH_TOKEN, then
+Looked for in this order: the key saved in Settings > API keys > Updates (apikeys.py), $GITHUB_TOKEN / $GH_TOKEN, then
 `GITHUB_TOKEN` in distill/local_keys.py (an optional, git-ignored file that updates never overwrite; see
 local_keys.example.py).
 """

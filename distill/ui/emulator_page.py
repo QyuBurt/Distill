@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QRect, QSize, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
+    QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton,
     QTextBrowser, QVBoxLayout, QWidget,
 )
 
@@ -26,7 +26,7 @@ from .fork_dialog import AddForkDialog
 from .retroarch_cores import CoresMixin
 from .ryujinx_ldn import LdnMixin
 from .theme import T
-from .widgets import accent_button, Card, hint
+from .widgets import accent_button, Card, detail_shell, ModalStack, hint
 
 FILTERS = ("All emulators", "Installed", "Updates available", "Not installed", "For my library")
 TILES = (("installed", "installed", 1), ("updates", "updates available", 2), ("library", "match your library", 4))  # key, caption, filter it applies
@@ -73,7 +73,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(14)
-        self.em_views = QStackedWidget()
+        self.em_views = ModalStack()
+        self.em_views.dismissed.connect(self._em_back)
         self.em_views.addWidget(self._em_build_list())
         self.em_views.addWidget(self._em_build_detail())
         lay.addWidget(self.em_views, 1)
@@ -178,21 +179,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         its release notes and its forks on the left; the facts, the update channel and the links in a side panel. Under about 820 px the
         panel drops below the column, and the whole page stays a readable width however wide the window is."""
         view = QWidget()
-        outer = QHBoxLayout(view)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addStretch(1)
-        page = QWidget()
-        page.setMaximumWidth(1060)  # long lines are hard to read: on a wide window the page stays centred at this width
-        outer.addWidget(page, 1000)
-        outer.addStretch(1)
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(14)
-        self.emd_back = QPushButton("← All emulators")
-        self.emd_back.setFlat(True)
-        self.emd_back.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.emd_back.clicked.connect(self._em_back)
-        lay.addWidget(self.emd_back, 0, Qt.AlignmentFlag.AlignLeft)
+        lay = detail_shell(view)  # no back button: click outside the card (or Esc) to close it; a fork's page closes to its emulator
 
         # -- the hero
         hero = self.emd_hero = Card()
@@ -610,6 +597,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         menu.deleteLater()
 
     def _em_everything(self) -> list[em.Emulator]:
+        """Every emulator and fork. The Games page asks this before the Emulators page was ever opened, so the manifest is read on the
+        first ask (the page's own first show replaces it with the full, enriched catalog)."""
+        if not self._em_catalog:
+            self._em_catalog = self._em_base = em.load_catalog()
+            self._em_reload_forks()
         return [*self._em_catalog, *self._em_forks]
 
     def _em_updatable(self) -> list[em.Emulator]:
@@ -671,7 +663,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
 
     # ---- the icon's flight between the list and a page --------------------------------------------------------
     def _em_can_fly(self) -> bool:
-        return motion.on() and self.em_views.isVisible() and self.em_views.window().isVisible()
+        return False  # the detail is a card over the blurred list: no cover flight
 
     def _em_logo_of(self, rid: str):
         """The picture (or monogram) on this emulator's tile or card in the list, when there is one."""
@@ -738,7 +730,6 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self._em_snap = True  # a different emulator: its buttons swap at once; only a change to the same one animates
         self.em_views.setCurrentIndex(1)
         self._em_scroll_to(0)
-        self.emd_back.setText(f"← {parent.name}" if parent else "← All emulators")
         src = parent or e  # a fork wears its emulator's picture and colour
         colour = group_colour(src.group)
         self.emd_chip.setText((f"FORK OF {parent.name}  ·  {e.system}" if parent else f"{e.group}  ·  {e.system}").upper())

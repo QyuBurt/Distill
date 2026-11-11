@@ -140,7 +140,7 @@ class ToolManager:
         except Exception as exc:
             limited = isinstance(exc, urllib.error.HTTPError) and exc.code in (403, 429)
             why = ("GitHub is rate-limiting this PC (60 checks an hour without a key): add a GitHub token under "
-                   "Settings > General > API keys, or try again later") if limited else "Couldn't reach the download server"
+                   "Settings > API keys > Updates, or try again later") if limited else "Couldn't reach the download server"
             self._status(f"{why} - using the downloaded {self.NAME}." if cached else f"{why} - select {self.NAME} manually.")
             return
         if cached and cached[0] == release.tag:

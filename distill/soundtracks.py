@@ -4,6 +4,7 @@
 Sources are pluggable `Provider`s. A provider only has to find albums and list their tracks; naming, numbering,
 disc folders, matching and the folder layout are done here once. Shipped providers:
 
+  KHInsiderProvider   searches downloads.khinsider.com (streams and downloads; FLAC when the album has it)
   ArchiveOrgProvider  searches archive.org's audio items for the game's soundtrack
   LinkProvider        a link you paste yourself (archive.org item, open directory, ...), re-filed into the game's folder
 
@@ -12,11 +13,15 @@ No Qt in here. Everything that touches the network goes through `fetch_json` / `
 from __future__ import annotations
 
 import dataclasses
+import concurrent.futures
 import difflib
+import html
+import html.parser
 import http.client
 import json
 import posixpath
 import re
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -534,6 +539,278 @@ class ArchiveOrgProvider:
         return tracks
 
 
+# --- khinsider -------------------------------------------------------------------------------------------
+KHI_HOST = "downloads.khinsider.com"
+KHI_URL = "https://" + KHI_HOST
+_KHI_ALBUM_PATH = "/game-soundtracks/album/"
+_KHI_AUDIO = re.compile(r"\.(?:mp3|flac|m4a|ogg|opus|wav)(?:$|\?)", re.IGNORECASE)
+_KHI_SIZE = re.compile(r"^\s*([\d.,]+)\s*(KB|MB|GB)\s*$", re.IGNORECASE)
+_KHI_TIME = re.compile(r"^\s*(?:(\d+):)?(\d{1,2}):(\d{2})\s*$")
+
+
+def fetch_text(url: str, timeout: float = 30) -> str:
+    """GET a page as text. LinkError (with a readable message) on any network problem."""
+    try:
+        with http_open(url, timeout=timeout) as resp:
+            raw = resp.read(6_000_000)
+            charset = resp.headers.get_content_charset() or "utf-8"
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise LinkError(describe_error(exc)) from exc
+    return raw.decode(charset, errors="replace")
+
+
+class _TableReader(html.parser.HTMLParser):
+    """Reads every table of a page into rows of cells: each cell keeps its text, its links and its pictures."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tables: list[dict] = []  # {"id", "class", "rows": [[cell, ...], ...]}
+        self._table: dict | None = None
+        self._row: list[dict] | None = None
+        self._cell: dict | None = None
+        self._link: list | None = None  # [href, text parts] of the link being read
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "table":
+            self._table = {"id": a.get("id", ""), "class": a.get("class", ""), "rows": []}
+            self.tables.append(self._table)
+        elif tag == "tr" and self._table is not None:
+            self._row = []
+            self._table["rows"].append(self._row)
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = {"text": [], "links": [], "imgs": [], "th": tag == "th"}
+            self._row.append(self._cell)
+        elif self._cell is not None and tag == "a" and a.get("href"):
+            self._link = [a["href"], []]
+            self._cell["links"].append(self._link)
+        elif self._cell is not None and tag == "img" and a.get("src"):
+            self._cell["imgs"].append(a["src"])
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._link = None
+        elif tag in ("td", "th"):
+            self._cell = None
+        elif tag == "tr":
+            self._row = None
+        elif tag == "table":
+            self._table = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell["text"].append(data)
+            if self._link is not None:
+                self._link[1].append(data)
+
+
+def _cell_text(cell: dict) -> str:
+    return re.sub(r"\s+", " ", "".join(cell["text"])).strip()
+
+
+def _read_tables(page: str) -> list[dict]:
+    reader = _TableReader()
+    try:
+        reader.feed(page)
+        reader.close()
+    except Exception:  # a broken page gives what it gave so far
+        pass
+    return reader.tables
+
+
+def _khi_bytes(text: str) -> int | None:
+    m = _KHI_SIZE.match(text)
+    if not m:
+        return None
+    try:
+        return int(float(m[1].replace(",", "")) * {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}[m[2].upper()])
+    except ValueError:
+        return None
+
+
+def _khi_seconds(text: str) -> int | None:
+    m = _KHI_TIME.match(text)
+    return int(m[1] or 0) * 3600 + int(m[2]) * 60 + int(m[3]) if m else None
+
+
+def _khi_abs(href: str, base: str = KHI_URL) -> str:
+    url = urllib.parse.urljoin(base, html.unescape(href.strip()))
+    return urllib.parse.quote(url, safe=":/%?&=+~#@!$',;[]()*")  # raw spaces etc. only; existing %xx stays
+
+
+def is_khinsider_page(url: str) -> bool:
+    """A khinsider track page (not yet a file): it has to be opened to find the real file address."""
+    parts = urllib.parse.urlsplit(url)
+    return (parts.hostname or "").lower() == KHI_HOST and _KHI_ALBUM_PATH in parts.path and bool(_KHI_AUDIO.search(parts.path))
+
+
+def parse_khinsider_search(page: str) -> list[dict]:
+    """[{slug, title, detail, art}] from a khinsider search page, in the order the site lists them."""
+    out, seen = [], set()
+    for table in _read_tables(page):
+        if "albumList" not in table["class"]:
+            continue
+        for row in table["rows"]:
+            link = next(((h, t) for cell in row for h, t in cell["links"] if _KHI_ALBUM_PATH in h
+                         and "".join(t).strip()), None)
+            if link is None:
+                continue
+            slug = urllib.parse.urlsplit(link[0]).path.rstrip("/").rpartition("/")[2]
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            art = next((src for cell in row for src in cell["imgs"]), "")
+            others = [_cell_text(c) for c in row if not any(_KHI_ALBUM_PATH in h for h, _ in c["links"])]
+            detail = " \u00b7 ".join(t for t in others if t)
+            out.append({"slug": slug, "title": html.unescape("".join(link[1])).strip(), "detail": detail,
+                        "art": _khi_abs(art) if art else ""})
+    return out
+
+
+def parse_khinsider_album(page: str, slug: str, prefer: str = "best") -> tuple[list[Track], str, dict]:
+    """(tracks, cover address, info) from an album page. Tracks keep their khinsider page address as the url: the
+    file address is only found when a track is played or saved (`resolve_url`). FLAC is chosen when the album
+    has it, unless `prefer` is 'mp3'."""
+    base = f"{KHI_URL}{_KHI_ALBUM_PATH}{slug}"
+    heads: list[str] = []
+    rows: list[list[dict]] = []
+    for table in _read_tables(page):
+        if table["id"] == "songlist":
+            for row in table["rows"]:
+                if row and all(c["th"] for c in row):
+                    if not heads:
+                        heads = [_cell_text(c).lower() for c in row]
+                else:
+                    rows.append(row)
+            break
+    has_flac = any("flac" in h for h in heads)
+    tracks: list[Track] = []
+    for row in rows:
+        song = next(((h, t) for cell in row for h, t in cell["links"] if _KHI_AUDIO.search(h)), None)
+        if song is None:
+            continue
+        title = html.unescape("".join(song[1])).strip() or posixpath.basename(urllib.parse.unquote(song[0]))
+        texts = [_cell_text(c) for c in row]
+        nums = [int(t.rstrip(".")) for t in texts if re.fullmatch(r"\d{1,3}\.?", t)]
+        sizes = [b for t in texts if (b := _khi_bytes(t)) is not None]
+        if not has_flac and len(sizes) >= 2:
+            has_flac = True
+        mp3 = sizes[0] if sizes else None
+        flac = sizes[1] if len(sizes) > 1 else None
+        use_flac = has_flac and prefer != "mp3"
+        disc, number = (nums[0], nums[1]) if len(nums) >= 2 else (None, nums[0] if nums else None)
+        ext = ".flac" if use_flac else ".mp3"
+        tracks.append(Track(_khi_abs(song[0], base + "/"), ext, title, number, flac if use_flac else mp3, None, "",
+                            use_flac, disc))
+    cover = ""
+    if m := re.search(r'class="albumImage"[^>]*>.*?<a[^>]+href="([^"]+)"', page, re.DOTALL | re.IGNORECASE):
+        cover = _khi_abs(m[1])
+    elif m := re.search(r'class="albumImage"[^>]*>.*?<img[^>]+src="([^"]+)"', page, re.DOTALL | re.IGNORECASE):
+        cover = _khi_abs(m[1])
+    info = {"title": "", "year": "", "platforms": ""}
+    if m := re.search(r"<h2[^>]*>(.*?)</h2>", page, re.DOTALL | re.IGNORECASE):
+        info["title"] = html.unescape(re.sub(r"<[^>]+>", "", m[1])).strip()
+    for key, label in (("year", "Year"), ("platforms", "Platforms?")):
+        if m := re.search(label + r":\s*(?:<[^>]*>\s*)*([^<\n]+)", page, re.IGNORECASE):
+            info[key] = html.unescape(m[1]).strip()
+    return tracks, cover, info
+
+
+_KHI_FILE_LINK = re.compile(r'(?:href|src)="(https?://[^"]+?\.(?:flac|mp3|m4a|ogg|opus|wav)(?:\?[^"]*)?)"', re.IGNORECASE)
+
+
+def parse_khinsider_track(page: str, prefer: str = "best") -> str | None:
+    """The file address on a track page: the FLAC link when there is one (and `prefer` allows it), else the MP3."""
+    links = [html.unescape(m[1]) for m in _KHI_FILE_LINK.finditer(page)]
+    if not links:
+        return None
+    flac = next((u for u in links if urllib.parse.urlsplit(u).path.lower().endswith(".flac")), None)
+    mp3 = next((u for u in links if urllib.parse.urlsplit(u).path.lower().endswith(".mp3")), None)
+    pick = (mp3 or links[0]) if prefer == "mp3" else (flac or mp3 or links[0])
+    return urllib.parse.quote(pick, safe=":/%?&=+~#@!$',;[]()*")
+
+
+_RESOLVED: dict[tuple[str, str], str] = {}
+_RESOLVE_LOCK = threading.Lock()
+
+
+def resolve_url(url: str, prefer: str = "best") -> str:
+    """The address a track really streams or downloads from. Anything that is not a khinsider track page is
+    already one. Raises LinkError when the page has no file on it."""
+    if not is_khinsider_page(url):
+        return url
+    key = (url, prefer)
+    with _RESOLVE_LOCK:
+        if key in _RESOLVED:
+            return _RESOLVED[key]
+    direct = parse_khinsider_track(fetch_text(url), prefer)
+    if not direct:
+        raise LinkError("khinsider: no file on that track's page")
+    with _RESOLVE_LOCK:
+        _RESOLVED[key] = direct
+    return direct
+
+
+def resolve_files(files: list[RemoteFile], prefer: str = "best", workers: int = 4,
+                  should_stop: Callable[[], bool] | None = None) -> tuple[list[RemoteFile], list[str]]:
+    """The same files with their real addresses. A few at a time (kind to the site). (files, problems): a file that
+    could not be resolved is left out and named in problems."""
+    todo = [f for f in files if is_khinsider_page(f.url)]
+    if not todo:
+        return list(files), []
+    direct: dict[int, str] = {}
+    problems: list[str] = []
+
+    def one(f: RemoteFile) -> None:
+        if should_stop and should_stop():
+            return
+        for attempt in range(3):
+            try:
+                direct[id(f)] = resolve_url(f.url, prefer)
+                return
+            except LinkError as exc:
+                last = str(exc)
+                time.sleep(0.5 * (attempt + 1))
+        problems.append(f"{posixpath.basename(f.name)}: {last}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(one, todo))
+    out = []
+    for f in files:
+        if not is_khinsider_page(f.url):
+            out.append(f)
+        elif id(f) in direct:
+            out.append(dataclasses.replace(f, url=direct[id(f)]))
+    return out, problems
+
+
+class KHInsiderProvider:
+    name = "khinsider"
+
+    def search(self, game: str) -> list[Album]:
+        text = search_name(game)
+        page = fetch_text(f"{KHI_URL}/search?" + urllib.parse.urlencode({"search": text}))
+        albums = []
+        for d in parse_khinsider_search(page):
+            score = max(match_score(game, d["title"]), 0.1)  # the site already judged it a hit
+            albums.append(Album(self.name, d["slug"], d["title"], d["detail"], score, d["art"]))
+        return albums
+
+    def tracks(self, album: Album, prefer: str = "best") -> list[Track]:
+        if prefer in album.cache:
+            return album.cache[prefer]
+        slug = urllib.parse.quote(album.ident, safe="")
+        tracks, cover, info = parse_khinsider_album(fetch_text(f"{KHI_URL}{_KHI_ALBUM_PATH}{slug}"), album.ident, prefer)
+        if not tracks:
+            raise LinkError(f"{album.title}: no audio files found in it")
+        if cover:
+            album.art = cover
+        if not album.detail:
+            album.detail = " \u00b7 ".join(x for x in (info["platforms"], info["year"]) if x)
+        album.cache[prefer] = tracks
+        return tracks
+
+
 # --- pasted links ----------------------------------------------------------------------------------------
 class LinkProvider:
     """Not searched: the person pastes the link. Anything the Download page understands works (archive.org item or
@@ -581,7 +858,7 @@ class LinkProvider:
 
 
 # --- putting it together ---------------------------------------------------------------------------------
-DEFAULT_PROVIDERS: tuple[Provider, ...] = (ArchiveOrgProvider(),)
+DEFAULT_PROVIDERS: tuple[Provider, ...] = (KHInsiderProvider(), ArchiveOrgProvider())  # streaming and first choice for saving: khinsider
 
 
 @dataclass(eq=False, slots=True)
@@ -737,6 +1014,22 @@ def files_for(game: str, album: Album, providers=DEFAULT_PROVIDERS, prefer: str 
         if provider is None:
             raise LinkError(f"No source called {album.provider}")
     return layout(game, provider.tracks(album, prefer), folder)
+
+
+def archive_fallback(game: str, album_title: str, prefer: str = "best") -> tuple[Album, list[RemoteFile]] | None:
+    """When an album cannot be saved from khinsider: the best archive.org match for the same title, with its files
+    laid out for `game`. None when archive.org has nothing that matches well."""
+    provider = ArchiveOrgProvider()
+    try:
+        hits = [a for a in provider.search(album_title) if a.score >= MATCH_MIN]
+    except LinkError:
+        return None
+    for album in hits[:VERIFY_TOP]:
+        try:
+            return album, layout(game, provider.tracks(album, prefer))
+        except LinkError:
+            continue
+    return None
 
 
 def already_there(dest: Path | None, game: str, mode: str = SAVE_STANDARD, entries: list[GameEntry] | None = None) -> int:
