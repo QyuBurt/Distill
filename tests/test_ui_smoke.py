@@ -2298,5 +2298,36 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(win._dl_dest_path(), Path.home() / "Elsewhere")
 
 
+    def test_games_hand_themselves_to_the_other_tools(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from distill import games as gm
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "Game.bin").write_bytes(b"x" * 2048)
+        (root / "Game.cue").write_text('FILE "Game.bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n', encoding="utf-8")
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Game.cue", system="PlayStation", kind="CUE", region="", size=1, modified=1.0, folder="", path=str(root / "Game.cue"))
+        win._gm_store.sync([rom], str(root))
+        gid = win._gm_store.games()[0].id
+        win._gm_reload()
+        win._gm_tool_convert([gid])  # a disc sheet: the CHD page, its source folder filled in
+        self.assertEqual(win.current_page, "chd")
+        self.assertEqual(Path(win.tabs["chd"].source.text()), root)
+        win._gm_tool_fix([gid])
+        self.assertEqual(win.current_page, "fix")
+        self.assertEqual(Path(win._org_sources[0].text()), root)
+        searched = []
+        with mock.patch.object(type(win), "_st_search", lambda self: searched.append(self.st_search.text())):
+            win._gm_tool_sound([gid])  # the grabber takes one name at a time: the game's name goes in its search box
+        self.assertEqual((win.current_page, searched), ("sound", ["Game"]))
+
+
 if __name__ == "__main__":
     unittest.main()

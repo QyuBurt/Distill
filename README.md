@@ -83,7 +83,7 @@ Work through the pages in order. Every change can be previewed first, and every 
 - `Ctrl+K` to jump to any page, `Ctrl+1` to `Ctrl+9` for the first nine pinned tools, `Ctrl+,` for Settings
 - **Compact sidebar** (`Ctrl+B`, the button beside the logo, or Settings > Sidebar): the sidebar tucks away to the left and the page uses the whole window. Move the mouse to the left edge and it eases out over the page; move away and it eases back
 - **Pin and unpin tools** under Settings > Sidebar to keep only the ones you use in the sidebar. Unpinned tools stay available from `Ctrl+K`
-- **Runs don't lock the window.** Start a conversion or download, then go anywhere in the app. A bar along the bottom shows what is running and its percentage; click it to return to that page
+- **Runs don't lock the window.** Start a conversion or download, then go anywhere in the app. A bar along the bottom shows what is running and its percentage; click it to return to that page. Conversions and other tool jobs go one at a time, but downloads (games, soundtracks) run on their own, so one can go while a conversion does; each page's Start, Pause and Stop control that page's own run. Organise still waits for either to finish, since it moves files.
 - Searchable, copyable log with coloured errors, warnings and verified lines
 - Window layout, folders and options remembered between runs
 - Taskbar progress and a notification when a long run finishes

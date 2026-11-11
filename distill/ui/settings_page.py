@@ -149,7 +149,7 @@ class SettingsMixin:
     def _set_reduce_motion(self, on: bool) -> None:
         Motion.reduce = on
         self._sync_dot_blink()
-        self.start_btn.set_state(bool(self.is_processing or self.org_busy), bool(self.is_paused and self.is_processing))
+        self.start_btn.set_state(*self._aura_state())
         self.update()
 
     def _settings_filter(self, text: str) -> None:
@@ -480,8 +480,7 @@ class SettingsMixin:
         self._pending_dl.discard(key)
         self._refresh_nav_dots()
         self._refresh_markers()
-        if not self._pending_tools and not self.is_processing and not self.org_busy:
-            self.start_btn.setEnabled(True)
+        self._sync_run_controls()  # Start comes alive once every tool check is in (and nothing on this page's side is running)
 
     def _missing_tool(self, path: str, text: str) -> bool:
         """True (after telling the person) when `path` isn't a runnable tool."""

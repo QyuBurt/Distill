@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..batch import BatchRunner
 from ..constants import PKG_LAYOUTS, PS3_OUTPUTS, RVZ_MAX_LEVEL
-from ..downloads import DownloadRunner
+from ..runview import DL, TOOL, bar_targets, view_of
 from ..switchconv import SwitchConfig, SwitchRunner
 from ..models import BatchSummary, Config, fmt_duration, space_report
 from ..system import resolve_tool_path
@@ -74,13 +74,25 @@ class RunMixin:
         self.pb_total.setTextVisible(True)
         self.pb_total.setFormat("%p%")
         self.pb_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pb_total.valueChanged.connect(self.run_bar.set_value)  # the bar along the bottom follows it
+        self.pb_total.valueChanged.connect(lambda v: self._bar_moved(TOOL, v))  # the bar along the bottom follows it
+        self.dl_pb = QProgressBar()  # the download run's own bar: it takes the conversion's place on the Download pages
+        self.dl_pb.setRange(0, 1000)
+        self.dl_pb.setTextVisible(True)
+        self.dl_pb.setFormat("%p%")
+        self.dl_pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.dl_pb.valueChanged.connect(lambda v: self._bar_moved(DL, v))
+        self.dl_pb.hide()
         prow.addWidget(self.lbl_total_prog)
         prow.addWidget(self.pb_total, 1)
+        prow.addWidget(self.dl_pb, 1)
         lay.addLayout(prow)
         self.lbl_eta = QLabel("")
         self.lbl_eta.setObjectName("muted")
         lay.addWidget(self.lbl_eta)
+        self.dl_eta = QLabel("")  # the download run's speed and time left
+        self.dl_eta.setObjectName("muted")
+        self.dl_eta.hide()
+        lay.addWidget(self.dl_eta)
         self.lbl_notice = StatusLabel("")  # the few messages that matter on pages that have no log (VPN dropped, errors)
         self.lbl_notice.setObjectName("notice")
         self.lbl_notice.setWordWrap(True)
@@ -98,32 +110,54 @@ class RunMixin:
         self._run_panel, self._log_shown, self._panel_mode = panel, True, "conv"
         return panel
 
-    def _run_target(self) -> tuple[str, str] | None:
-        """(page, what it is doing) of the job in progress, or None. A scan has no progress to show, so it doesn't count."""
+    def _tool_target(self) -> tuple[str, str] | None:
+        """(page, what it is doing) of the conversion or Organise job in progress, or None. A scan has no progress to show, so it doesn't count."""
         if self.is_processing:
             return getattr(self, "_run_page", self.current_page), getattr(self, "_run_label", "Working...")
         if self.org_busy and (label := getattr(self, "_org_label", "Working...")) != "Scanning...":
             return getattr(self, "_org_page", self.current_page), label
         return None
 
+    def _dl_target(self) -> tuple[str, str] | None:
+        """(page, what it is doing) of the download run, or None."""
+        return (self._dl_page, self._dl_label) if self.dl_runner is not None else None
+
+    def _run_target(self) -> tuple[str, str] | None:
+        """The job the bar along the bottom would stand for first: a conversion, else the download run."""
+        return self._tool_target() or self._dl_target()
+
     def _away_from_run(self) -> bool:
-        """A job is running and the page on screen is not the one it was started from."""
-        target = self._run_target()
+        """The run this page's log and bar belong to is going, but was started from another page. (A download going does not
+        take the conversion pages' log and bar away, and the other way round: they are separate runs.)"""
+        mode = self._current_mode()
+        target = (self._dl_target() if mode == "dl" else self._run_target() if mode in ("games", "recomps", "emus")
+                  else self._tool_target())
         return target is not None and target[0] != self.current_page
+
+    def _bar_moved(self, view: str, value: int) -> None:
+        """The bar along the bottom follows the progress of the job it stands for."""
+        if getattr(self, "_bar_view", None) == view:
+            self.run_bar.set_value(value)
 
     def _runbar_sync(self) -> None:
         """Show or hide the bar along the bottom, and say what it is for. It is up while a job runs and you are on another page."""
         bar = getattr(self, "run_bar", None)
         if bar is None or not hasattr(self, "_panel_mode"):
             return
-        target = self._run_target()
-        away = target is not None and target[0] != self.current_page
-        if target is not None:
-            key, label = target
-            count = re.search(r"\d+\s*/\s*\d+", self.lbl_total_prog.text())
-            state = "Paused" if self.is_paused and self.is_processing else label.rstrip(".")
-            bar.set_info(PAGE_INFO[key][0] if key in PAGE_INFO else key, state + (f"  |  {count.group(0)}" if count else ""))
-            bar.set_value(self.pb_total.value())
+        away_jobs = bar_targets(self._tool_target(), self._dl_target(), self.current_page)  # a conversion first, then the download
+        away = bool(away_jobs)
+        if away:
+            view, key, label = away_jobs[0]
+            if view == DL:
+                paused, text, value = self.dl_paused, self._dl_prog_text, self.dl_pb.value()
+            else:
+                paused, text, value = self.is_paused and self.is_processing, self.lbl_total_prog.text(), self.pb_total.value()
+            count = re.search(r"\d+\s*/\s*\d+", text)
+            state = "Paused" if paused else label.rstrip(".")
+            more = f"  (+{len(away_jobs) - 1} more)" if len(away_jobs) > 1 else ""
+            bar.set_info(PAGE_INFO[key][0] if key in PAGE_INFO else key, state + (f"  |  {count.group(0)}" if count else "") + more)
+            self._bar_view, self._bar_page = view, key
+            bar.set_value(value)
         motion.set_visible(bar, away)
         self._apply_panel_mode(self._current_mode())  # this page's own log and bar, or none while the job is elsewhere
         if hasattr(self, "start_btn"):
@@ -140,6 +174,9 @@ class RunMixin:
         before, self._panel_mode = self._panel_mode, kind
         conv = kind == "conv"
         self._log_shown = conv
+        dl = kind == "dl"  # the Download pages show the download run's own bar and speed line
+        for w, shown in ((self.pb_total, not dl), (self.lbl_eta, not dl), (self.dl_pb, dl), (self.dl_eta, dl)):
+            w.setVisible(shown)
         hides_panel = ("org", "games", "recomps", "emus", "away")
         self._panel_gen = gen = getattr(self, "_panel_gen", 0) + 1  # a change of mind cancels what the last one had pending
         if (running := getattr(self, "_panel_anim", None)) is not None:
@@ -201,6 +238,7 @@ class RunMixin:
         if events:
             self._apply_events(events)
         self._refresh_eta()
+        self._refresh_dl()
 
     # -- the live log: every line is a text block, and a task line is rewritten in place as it progresses
     def _log_write(self, text: str) -> None:
@@ -242,7 +280,7 @@ class RunMixin:
         newest = {ev[1]: i for i, ev in enumerate(events) if ev[0] == "update"}
         bar = self.log.verticalScrollBar()
         follow = bar.value() >= bar.maximum() - 4  # stay on the newest line unless the person scrolled up
-        finished, summary, dl_result, sizes_changed = False, None, None, False
+        finished, summary, dl_finished, dl_result, sizes_changed = False, None, False, None, False
         for i, ev in enumerate(events):
             match ev:
                 case ("log", msg):
@@ -333,21 +371,21 @@ class RunMixin:
                 case ("dl_speed", idx, text):
                     self.dl_model.set_speed(idx, text)
                 case ("dl_done", result):
-                    finished, dl_result = True, result
+                    dl_finished, dl_result = True, result
         if follow:
             bar.setValue(bar.maximum())
         if sizes_changed:
             self._dl_update_sel()
-        if finished:
-            self._dl_save_soon()  # the run is over: a restart must not think it was interrupted
-            was_download = isinstance(self.runner, DownloadRunner)
-            if was_download:
-                self._refresh_dl(True)  # land the bar on its final value before the cleanup text
+        if finished:  # a conversion (or other tool job) is over
             self._cleanup_ui()
-            if was_download and self._dl_after_run():
-                dl_result = None  # files were lined up behind this run: it starts now, and reports when it ends
             if summary:
                 QTimer.singleShot(0, lambda s=summary: self._show_summary(s))
+        if dl_finished:  # the download run is over (a conversion going alongside it is not touched)
+            self._dl_save_soon()  # a restart must not think it was interrupted
+            self._refresh_dl(True)  # land the bar on its final value before the cleanup text
+            self._dl_cleanup_ui()
+            if self._dl_after_run():
+                dl_result = None  # files were lined up behind this run: it starts now, and reports when it ends
             if dl_result is not None:
                 QTimer.singleShot(0, lambda r=dl_result: self._show_dl_summary(r))
 
@@ -366,9 +404,6 @@ class RunMixin:
             self._title_progress(value // 10)  # progress in the title bar, for when the window is behind another
 
     def _refresh_eta(self, force: bool = False) -> None:
-        if isinstance(self.runner, DownloadRunner):
-            self._refresh_dl(force)
-            return
         if not self.is_processing or self._t0 is None:
             return
         now = time.monotonic()
@@ -401,64 +436,57 @@ class RunMixin:
     def _cleanup_ui(self) -> None:
         secs = self._active_secs()
         stopped = self._stopping
-        was_download = isinstance(self.runner, DownloadRunner)
         self._title_progress(None)
         self.is_processing = False
-        self._update_start_text()  # back to "Start ..."
         self.runner = None
-        self.start_btn.setEnabled(True)
-        self.pause_btn.setEnabled(False)
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setText("Pause")
         self.lbl_phase.setText("Phase: Stopped" if self._stopping else "Phase: Complete")
         self.lbl_eta.setText(f"{'Stopped after' if self._stopping else 'Finished in'} {fmt_duration(self._active_secs())}")
         self._stopping = False
         self._t0 = None
-        if stopped and was_download:  # a stopped run didn't get anywhere: the bar starts over (partial files resume next time)
-            motion.ease_value(self.pb_total, 0)  # a reset jumps, and cancels a glide still in flight
-        self.dl_fetch_btn.setEnabled(True)
         self.lbl_run_info.setText("")
         self._set_settings_visible(True)
+        self._sync_run_controls()  # back to "Start ...", and Pause and Stop go quiet
         self._runbar_sync()  # the bar along the bottom goes, and this page's own panel comes back
         if not stopped:
             self._notify_run_done(secs)
 
     def _toggle_pause(self) -> None:
+        if view_of(self._current_mode()) == DL:  # the Download pages pause the download run, every other page the conversion
+            self._dl_toggle_pause()
+            return
         if self.is_paused:
             self.is_paused = False
             if self._pause_t is not None:
                 self._paused_total += time.monotonic() - self._pause_t
                 self._pause_t = None
             self.pause_event.set()
-            self.pause_btn.setText("Pause")
             self.ui_q.put(("log", "--- RESUMED: Pulling new jobs from queue ---"))
         else:
             self.is_paused = True
             self._pause_t = time.monotonic()
             self.pause_event.clear()
-            self.pause_btn.setText("Resume")
             self.ui_q.put(("log", "--- PAUSED: Active conversions will finish, but no new jobs will start ---"))
+        self._sync_run_controls()  # the button says Resume while paused
 
     def _stop_run(self) -> None:
         if self.org_busy:
             if not self._org_stop.is_set():
                 self._org_stop.set()  # checked between items: the current item finishes, the rest are left alone
-                self.stop_btn.setEnabled(False)
+                self._sync_run_controls()
                 self.lbl_phase.setText("Phase: Stopping...")
                 self.ui_q.put(("log", "--- STOP requested: finishing the current item ---"))
+            return
+        if view_of(self._current_mode()) == DL:  # the Download pages stop the download run, every other page the conversion
+            self._dl_stop_run()
             return
         runner = self.runner
         if not self.is_processing or runner is None or self._stopping:
             return
-        keeps = ("Partly downloaded files are kept and resume next time." if isinstance(runner, DownloadRunner)
-                 else "Active tools are killed and their partial output is deleted. Finished items are kept.")
+        keeps = "Active tools are killed and their partial output is deleted. Finished items are kept."
         if not self._ask("Stop", f"Stop the run now?\n\n{keeps}"):
             return
         self._stopping = True
-        if isinstance(runner, DownloadRunner):
-            self._dl_clear_next()  # stopping the run means files lined up behind it don't start either
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setEnabled(False)
+        self._sync_run_controls()
         self.lbl_phase.setText("Phase: Stopping...")
         self.ui_q.put(("log", "--- STOP requested ---"))
         threading.Thread(target=runner.shutdown, daemon=True).start()  # killing children can take a moment
@@ -472,20 +500,19 @@ class RunMixin:
         return text if len(text) <= 80 else text[:38] + "..." + text[-39:]
 
     def _start_processing(self) -> None:
+        mode = self._current_mode()
+        if view_of(mode) == DL:  # a download has its own run: a conversion going does not stop one starting, or the other way round
+            if self.dl_runner is None:
+                self._st_download() if self.current_page == "sound" else self._start_download()
+            return
         if self.is_processing:
             return
-        mode = self._current_mode()
         if mode == "switch":
             self._sw_start()
             return
         if mode in ("games", "recomps", "emus"):  # nothing to start here: installs are per project
             return
-        if self.current_page == "sound":  # the Soundtrack Grabber page: save the ticked soundtracks
-            self._st_download()
-            return
-        if mode == "dl":
-            self._start_download()
-        elif mode == "org":
+        if mode == "org":
             self._org_apply()
         elif cfg := self._build_config(mode):
             self._launch(cfg, self._drop_only(mode))  # a dropped file runs alone, not the rest of its folder
@@ -563,10 +590,7 @@ class RunMixin:
             self._update_start_text()
         self.is_paused = False
         self.pause_event.set()
-        self.start_btn.setEnabled(False)
-        self.pause_btn.setEnabled(True)
-        self.stop_btn.setEnabled(True)
-        self.pause_btn.setText("Pause")
+        self._sync_run_controls()  # Start goes quiet, Pause and Stop come alive
         self._update_ui_state("Initializing", 0, 1)
         self.lbl_run_info.setText(self._run_info(cfg))
         self._set_settings_visible(False)  # the log gets the window while a batch runs

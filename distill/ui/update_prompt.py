@@ -33,7 +33,7 @@ class UpdatePromptMixin:
         threading.Thread(target=lambda: self._upd.found.emit(updater.check()), daemon=True).start()
 
     def _update_offer(self, update) -> None:
-        if update is None or self._p_data.get("skip_update") == update.tag or getattr(self, "is_processing", False):
+        if update is None or self._p_data.get("skip_update") == update.tag or getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
             return
         can_install = bool(update.asset_url)
         choice, _tick = msgbox.ask(
@@ -49,8 +49,8 @@ class UpdatePromptMixin:
             self._update_install(update) if can_install else QDesktopServices.openUrl(QUrl(update.page))
 
     def _update_install(self, update) -> None:
-        if getattr(self, "is_processing", False):
-            return
+        if getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
+            return  # the update restarts the app, which would cut a running download short
         screen = UpdateScreen(self, f"{APP_NAME} {update.tag}")
         cancelled = threading.Event()
         screen.cancelled.connect(cancelled.set)

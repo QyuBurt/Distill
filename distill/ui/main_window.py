@@ -25,6 +25,7 @@ from ..downloads import DownloadRunner, load_logins, LOGINS
 from ..netrules import load_rules
 from ..ytdlp import load_settings as load_ytdlp_settings
 from ..orgpages import ORG_PAGES
+from ..runview import DL, RunFacts, bar_targets, controls, view_of
 from .update_prompt import UpdatePromptMixin
 from ..torbox import torbox_key
 from .. import debrid
@@ -111,12 +112,21 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._stopping = False
         self.pause_event = threading.Event()
         self.pause_event.set()
-        self.runner: BatchRunner | DownloadRunner | None = None
+        self.runner: BatchRunner | None = None  # the conversion (or other tool job) run: one at a time
         self._last_cfg: Config | None = None
         self._work = (0, 0)  # (bytes done, bytes to do) from the runner
         self._samples: deque[tuple[float, int]] = deque(maxlen=12)  # (active seconds, bytes done)
         self._t0: float | None = None
         self._paused_total, self._pause_t, self._eta_tick = 0.0, None, 0.0
+        # The download run (games, soundtracks) has a state of its own, so a download and a conversion can go at the same time.
+        self.dl_runner: DownloadRunner | None = None
+        self.dl_paused = False
+        self.dl_stopping = False
+        self.dl_pause_event = threading.Event()
+        self.dl_pause_event.set()
+        self._dl_t0: float | None = None
+        self._dl_paused_total, self._dl_pause_t, self._dl_eta_tick = 0.0, None, 0.0
+        self._dl_page, self._dl_label, self._dl_prog_text = "dl", "Downloading...", "Download Progress: 0 / 0"
         self._settings_visible = True
         self._theming = False
         self._qss = ""
@@ -348,17 +358,20 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
                                 "next time to reverse a half-finished run.)"):
             event.ignore()
             return
-        if self.is_processing:
-            if not self._ask(
-                    "Confirm Exit",
-                    "A batch is currently running!\n\nClosing now will instantly abort it. "
-                    + ("Partly downloaded files are kept and resume next time. Are you sure?"
-                       if isinstance(self.runner, DownloadRunner) else
-                       "Active conversions are stopped and partial files deleted. Are you sure?")):
-                event.ignore()
-                return
-            if self.runner:
-                self.runner.shutdown()
+        if self.is_processing and not self._ask(
+                "Confirm Exit", "A batch is currently running!\n\nClosing now will instantly abort it. "
+                                "Active conversions are stopped and partial files deleted. Are you sure?"):
+            event.ignore()
+            return
+        if self.dl_runner is not None and not self._ask(
+                "Confirm Exit", "A download is currently running!\n\nClosing now will stop it. "
+                                "Partly downloaded files are kept and resume next time. Are you sure?"):
+            event.ignore()
+            return
+        if self.is_processing and self.runner:  # both questions are asked first, so saying no to either leaves everything running
+            self.runner.shutdown()
+        if self.dl_runner is not None:
+            self.dl_runner.shutdown()
         self._settings_save()
         self._dl_save_session()
         event.accept()
@@ -808,8 +821,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             self._nav_click(pages[n - 1])
 
     def _run_bar_clicked(self) -> None:
-        if (target := self._run_target()) is not None:
-            self._show_page(target[0])
+        if jobs := bar_targets(self._tool_target(), self._dl_target(), self.current_page):
+            self._show_page(jobs[0][1])  # the job the bar is showing (a conversion first)
 
     def _nav_click(self, key: str) -> None:
         self._show_page(key)  # a run carries on in the background: its bar along the bottom leads back to it
@@ -1003,7 +1016,10 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if not hasattr(self, "start_btn"):
             return
         page, mode = self.current_page, self._current_mode()
-        if self.is_processing:
+        dl = view_of(mode) == DL  # the Download and Soundtrack pages speak for the download run, every other page for the tool run
+        if dl and self.dl_runner is not None:
+            text = self._dl_label
+        elif not dl and self.is_processing:
             text = getattr(self, "_run_label", "Working...")
         elif self.org_busy:
             text = getattr(self, "_org_label", "Working...")
@@ -1013,7 +1029,9 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
                     else self.org[page].tool.apply_label if mode == "org"
                     else START_LABELS.get(mode, "Start Batch"))
         self.start_btn.setText(text)
-        target = self._run_target()
+        target = self._dl_target() if dl else self._tool_target()
+        if target is None and self.org_busy:  # an Organise job blocks Start on every page
+            target = self._tool_target()
         away = target is not None and target[0] != page
         tip = (f"{PAGE_INFO[target[0]][0]} is running. Click the bar along the bottom to go back to it."
                if away and target[0] in PAGE_INFO else "Ctrl+Enter")
@@ -1023,12 +1041,30 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
     def _refresh_start_label(self) -> None:
         page, mode = self.current_page, self._current_mode()
         self._update_start_text()
-        if not self.is_processing and not self.org_busy:  # the idle label follows the page
-            self.lbl_total_prog.setText("Download Progress: 0 / 0" if mode == "dl" else
-                                        "Organise Progress: 0 / 0" if mode == "org" else "Batch Progress: 0 / 0")
+        if not self.is_processing and not self.org_busy and mode != "dl":  # the idle label follows the page
+            self.lbl_total_prog.setText("Organise Progress: 0 / 0" if mode == "org" else "Batch Progress: 0 / 0")
         motion.set_visible(self.perf, mode not in ("dl", "org", "games", "recomps", "emus"))
         motion.set_visible(self.bar_wrap, mode not in ("games", "recomps", "emus"))
         self._apply_panel_mode(mode)
+        self._sync_run_controls()
+
+    def _run_facts(self) -> RunFacts:
+        stop = getattr(self, "_org_stop", None)
+        return RunFacts(tool=self.is_processing, tool_paused=self.is_paused, tool_stopping=self._stopping,
+                        dl=self.dl_runner is not None, dl_paused=self.dl_paused, dl_stopping=self.dl_stopping,
+                        org=self.org_busy, org_stopping=bool(stop is not None and stop.is_set()), pending_tools=bool(self._pending_tools))
+
+    def _sync_run_controls(self) -> None:
+        """Start, Pause and Stop belong to the run of the page on screen (see runview), so they are set from the facts, not nudged one by one."""
+        if not (hasattr(self, "start_btn") and hasattr(self, "pause_btn") and hasattr(self, "stop_btn")):
+            return
+        c = controls(view_of(self._current_mode()), self._run_facts())
+        self.start_btn.setEnabled(c.start)
+        self.pause_btn.setEnabled(c.pause)
+        self.stop_btn.setEnabled(c.stop)
+        if self.pause_btn.text() != c.pause_text:
+            self.pause_btn.setText(c.pause_text)
+        self._update_start_text()
 
     def _build_tab(self, mode: str) -> QWidget:
         is_pkg_page = mode in ("pkg", "pkg5")
