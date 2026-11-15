@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Callable
 
 from . import games as gm
-from .constants import APP_DIR
+from . import paths
 
-BACKUP_DIR = APP_DIR / "save_backups"
+BACKUP_DIR = paths.data_dir() / "save_backups"
 MAX_BACKUPS = 20  # older ones of a game are dropped beyond this
 SAVE_NAME = re.compile(r"\.(state\d*|state\.auto|srm|rtc)$", re.IGNORECASE)  # the only files a restore will ever write
 
@@ -91,7 +91,7 @@ def create_backup(game_id: str, title: str, system: str, files: list[SaveFile], 
                 "files": [{"arc": f"{i:02d}_{f.path.name}", "origin": str(f.path), "kind": f.kind, "mtime": f.path.stat().st_mtime} for i, f in enumerate(files)]}
     part = dest.with_name(dest.name + ".part")
     try:
-        folder.mkdir(parents=True, exist_ok=True)
+        paths.ensure_dir(folder)
         with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
             for entry, f in zip(manifest["files"], files):
                 z.write(f.path, entry["arc"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import http.server
+import os
 import stat
 import struct
 import sys
@@ -15,6 +16,105 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+class WindowTestCase(unittest.TestCase):
+    """Own Qt objects, unattended dialogs and the window's hard-exit stub for one test."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+        from distill.ui import main_window, motion, now_playing
+        from distill.ui.theme import T
+
+        app = QApplication.instance()
+        self._qt_baseline = set(app.topLevelWidgets())
+        self._app_state = (app.styleSheet(), app.palette(), app.font(), motion.Motion.reduce)
+        self._theme_state = {key: value for key, value in vars(T).items() if key != "_bound"}
+        self._app_filters = {key: getattr(app, key, None)
+                             for key in ("_soft_popups", "_dialog_fade", "_scroll_everywhere")}
+        proxy = mock.Mock(wraps=os)
+        proxy._exit = mock.Mock()
+        self.window_exit = proxy._exit
+        patcher = mock.patch.object(main_window, "os", proxy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # A real preview still opens when a test clicks the cover. Dismiss it on
+        # the next event-loop turn so that it needs no person at the keyboard.
+        preview_exec = now_playing.ArtPreview.exec
+
+        def exec_preview(dialog):
+            QTimer.singleShot(0, dialog.accept)
+            return preview_exec(dialog)
+
+        preview = mock.patch.object(now_playing.ArtPreview, "exec", exec_preview)
+        preview.start()
+        self.addCleanup(preview.stop)
+        self.addCleanup(self.cleanup_widgets)
+
+    def _callCleanup(self, function, /, *args, **kwargs):
+        from unittest import mock
+        from distill.ui.main_window import DistillWindow
+
+        window = getattr(function, "__self__", None)
+        if isinstance(window, DistillWindow) and getattr(function, "__name__", "") == "close":
+            # Failed assertions may leave a stubbed job marked active. Cleanup
+            # takes the production Quit path; close calls in test bodies still ask.
+            with mock.patch.object(window, "_ask", return_value=True):
+                return super()._callCleanup(function, *args, **kwargs)
+        return super()._callCleanup(function, *args, **kwargs)
+
+    def cleanup_widgets(self):
+        import gc
+        import shiboken6
+        from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+        from PySide6.QtWidgets import QApplication
+        from distill.ui import motion
+        from distill.ui.theme import T
+        from distill.ui.ytdlp_picker import FormatRows
+
+        # Drain start-up singleShots while their receivers still exist, then stop
+        # repeating timers before deferred destruction. close() alone only hides.
+        QApplication.processEvents()
+        widgets = set(QApplication.topLevelWidgets()) - self._qt_baseline
+        for widget in widgets:
+            # Qt sends viewport events while destroying the table. Detach this
+            # Python filter before its table wrapper becomes invalid.
+            for rows in widget.findChildren(FormatRows):
+                rows.table.viewport().removeEventFilter(rows)
+            for timer in widget.findChildren(QTimer):
+                timer.stop()
+            widget.hide()
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        # Theme callbacks retain Python wrappers even after Qt destroys them.
+        # Release only bindings whose C++ receiver was deleted by this fixture.
+        for key, (ref, _) in list(T._bound.items()):
+            if ref() is None or not shiboken6.isValid(ref()):
+                T._bound.pop(key, None)
+        app = QApplication.instance()
+        for key, old in self._app_filters.items():
+            current = getattr(app, key, None)
+            if current is not old:
+                if current is not None:
+                    app.removeEventFilter(current)
+                    current.deleteLater()
+                if old is None:
+                    delattr(app, key)
+                else:
+                    setattr(app, key, old)
+        for key in set(vars(T)) - self._theme_state.keys() - {"_bound"}:
+            delattr(T, key)
+        vars(T).update(self._theme_state)
+        css, palette, font, motion.Motion.reduce = self._app_state
+        app.setStyleSheet(css)
+        app.setPalette(palette)
+        app.setFont(font)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        gc.collect()
 
 
 class IsolatedSoundtrackFiles(unittest.TestCase):
@@ -51,6 +151,12 @@ class IsolatedSoundtrackFiles(unittest.TestCase):
             patcher = mock.patch.object(persist, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        from distill.ui import download_page
+        # Window close saves the download queue too. Keep that per test, through
+        # Qt teardown, so the next window cannot restore a previous test's rows.
+        patcher = mock.patch.object(download_page, "SESSION_FILE", root / "downloads.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         from distill import updater  # no network check at window start-up
         patcher = mock.patch.object(updater, "CHECK_ENABLED", False)
         patcher.start()

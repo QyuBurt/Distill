@@ -26,7 +26,23 @@ Grab a build from the [Releases](../../releases/latest) page:
 | `Distill-portable.zip` | Folder build. Starts fastest and trips antivirus the least. Unzip anywhere and run `Distill.exe`. |
 | `Distill.exe` | Single file. Slower to start, since it unpacks itself to a temp folder each time. |
 
-Settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+On Windows, settings and downloaded tools are kept next to the `.exe`, so both builds are portable. Each release includes a `SHA256SUMS.txt` to verify your download.
+
+### Linux runtime files
+
+Linux uses per-user XDG locations: config in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`),
+installed tools, recomps and the Watch inbox in `$XDG_DATA_HOME/distill` (default `~/.local/share/distill`),
+state in `$XDG_STATE_HOME/distill` (default `~/.local/state/distill`), and caches in
+`$XDG_CACHE_HOME/distill` (default `~/.cache/distill`), including `game_media` artwork and achievements. Empty or non-absolute overrides use the defaults.
+Bundled assets stay with the application. This path layout does not imply complete Linux support.
+
+Set `DISTILL_PORTABLE=1` to keep runtime files beside the source launcher or frozen executable instead.
+An unwritable portable directory reports the existing write error; it never selects another location.
+At normal startup, missing XDG files are copied from legacy settings, emulator/recomp catalogs, forks,
+yt-dlp/torrent/soundtrack preferences, soundtrack saves, and known Organize undo histories. Existing XDG
+content wins and originals are preserved. Credentials are handled separately by the unified store described
+below. Rules (which may contain passwords), queue sessions and torrent directories, logs, caches, tools/recomps trees and user libraries
+are **not automatically migrated**; deferred files stay beside the app and remain usable in portable mode.
 
 **Updates:** Distill checks GitHub for a newer release when it starts and asks whether to install it. You can update in one click, skip a version, or ignore it. Your settings and tools are kept.
 
@@ -53,7 +69,7 @@ Settings and downloaded tools are kept next to the `.exe`, so both builds are po
 - **Files & Torrents** is a download queue for direct links, archive.org, torrents, debrid services (including TorBox) and video or audio sites through yt-dlp. It has speed limits, schedules and per-site limits, resumes partial files, and has a right-click menu for starting, stopping and deleting.
   - **Save to** can be left empty: downloads then go to your Downloads folder, which the box shows as its placeholder.
   - **Scan a page for links:** paste `scan:https://example.com/page` (or `scan[zip,7z]:https://...` to pick file types) and every download link on that page is listed: files, magnets and links to Drive, MediaFire, Dropbox, OneDrive, Pixeldrain, 1fichier and archive.org. Pixeldrain lists are expanded into their files.
-  - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into the `Watch` folder beside Distill and its links are listed. Taken files move into `Watch/queued`.
+  - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into `Watch` under the Linux XDG data directory, or beside Distill on Windows and in portable mode. Its links are listed; taken files move into `Watch/queued`.
   - **Unpacking:** multi-part sets (`.part1.rar`, `.7z.001`, `.rar` + `.r00`, `.zip` + `.z01`) are unpacked from the first part and, with "then delete them", every part goes afterwards. Password-protected archives are tried with each line of `distill_archive_passwords.txt` (next to Distill), then with ones worked out from the site the file came from (`www.site.com`, `site.com`, `site`), then with their own name.
   - **FTP:** paste an `ftp://` or `ftps://` address (`ftp://user:password@host/path` if it needs a login, or save one under Settings > API keys > Downloads). A folder is listed with everything under it; downloads resume. FTP does not use the proxy rules.
   - **Site headers:** under Settings > Downloads > per-site rules, a site can have a Referer (`auto` = its own front page), a User-Agent and extra `Name: value` headers. They are sent only to that site, never on a redirect to another one.
@@ -119,7 +135,11 @@ Distill works without any keys. They only raise rate limits, add artwork or sign
 | Downloads & file hosts | archive.org, 1fichier, TorBox and other debrid services, Prowlarr, any other site | Sign-ins for the Files & Torrents page, cached torrents, more torrent search |
 | Updates | GitHub | A read-only token raises GitHub's limit from 60 to 5,000 requests an hour (tool, emulator and recomp update checks) |
 
-Paste a key there and it is saved and used straight away, in a downloaded build too. All of them are kept in **one file, `distill_keys.json`**, next to the app: encrypted so only your Windows account can read it (with the system keyring on other platforms; plain text only where neither is available). Moving the file to another computer or account makes it unreadable on purpose. Keys from older versions (`distill_apikeys.json` and `distill_logins.json`) are moved into it the first time the app starts, and those two files are then removed.
+Paste a key there and it is saved and used straight away, in a downloaded build too. Keys and remembered logins share **one file, `distill_keys.json`**: in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`) on Linux, or next to the app on Windows and with `DISTILL_PORTABLE=1`. It is encrypted for your Windows account, or with the system keyring where available; otherwise it uses plain text with owner-only permissions. An encrypted file moved to another computer or account may be unreadable.
+
+On its first read, the store folds in the older `distill_apikeys.json` and `distill_logins.json` from the same directory; existing unified entries win, and custom logins merge by host. On Linux it also imports app-folder credentials (including an older `distill_keys.json`), preserving those originals. Migration is finalized once inside the sealed store after durable publication and verification; only verified, imported same-directory files can then be removed. Unreadable legacy files are left untouched, reported, and never imported later. An unreadable unified store blocks fallback imports; the current unified file is never replaced while unreadable. Finalization survives forgetting every credential, so retained files cannot restore forgotten sign-ins. Failed publication retains every original and retries only on the next start. The general startup path migration does not copy credential files.
+
+Credential updates and migration share an owner-only sibling lock file that serializes individual storage transactions. Multiple Distill instances or other writers editing the same credentials are not synchronized; the last save wins. Lock acquisition has a bounded wait; failure leaves stored credentials untouched. Only regular, non-symlink credential files up to 1 MiB are read; rejected files remain untouched.
 
 Otherwise set `GITHUB_TOKEN` / `SGDB_API_KEY` as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). A key saved in Settings is used first. Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
 
@@ -171,6 +191,19 @@ tests/                                unittest suite
 
 Rules the tests enforce: nothing outside `ui/` and `app.py` may import Qt, and modules never import each other in a circle.
 
+## Linux
+
+Run `python Distill.pyw` with Python 3.10+ and the dependencies in `requirements.txt` (including PySide6).
+Linux uses the XDG config, data, state and cache directories under `distill/`; downloaded tools live in
+`$XDG_DATA_HOME/distill/tools` (default `~/.local/share/distill/tools`). `DISTILL_PORTABLE=1` uses the app folder.
+Native tool downloads, Flatpak emulators, Project64 through Wine and an ares source-build action are supported.
+See [LINUX-BUILD.md](LINUX-BUILD.md) for packaging, runtime paths and tool requirements.
+
+**AppImage (x86_64):** build it with `bash packaging/build-in-docker.sh` (or take the `Distill-x86_64.AppImage` artifact from the
+*Linux AppImage* workflow), then `chmod +x Distill-x86_64.AppImage && ./Distill-x86_64.AppImage`. Verify it with the
+`Distill-x86_64.AppImage.sha256` file next to it. On systems without FUSE run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+Wayland is used when available. Flatpak and Wine are only needed for the emulators that use them.
+
 ## Credits
 
-Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License.
+Distill drives these tools and does not reimplement them: chdman (MAME), DolphinTool, maxcso, nscb_rust, nup, hactoolnet, xdvdfs, ZArchive, yt-dlp and ffmpeg. Fonts are Inter, Outfit and JetBrains Mono, used under the SIL Open Font License. Linux support (native tool downloads, Flatpak/Wine/source-build emulator installs and the AppImage packaging) builds on a Linux port by Niko.

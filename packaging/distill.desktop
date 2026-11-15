@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Distill
+GenericName=Game Library Manager
+Comment=Compress disc images, download games and soundtracks, install PC ports, and clean up your collection
+Exec=Distill
+Icon=distill
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=chd;rvz;cso;iso;rom;emulator;game;
+StartupWMClass=Distill

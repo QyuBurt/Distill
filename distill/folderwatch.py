@@ -13,9 +13,9 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import APP_DIR
+from . import paths
 
-WATCH_FOLDER = APP_DIR / "Watch"  # where the Settings option looks; made when the option is switched on
+WATCH_FOLDER = paths.data_dir() / "Watch"  # made when the Settings option is switched on
 WATCH_EXTENSIONS = (".txt", ".torrent", ".magnet", ".url")
 QUEUED_DIR = "queued"
 SETTLE_SECONDS = 2.0  # a file younger than this may still be copying in

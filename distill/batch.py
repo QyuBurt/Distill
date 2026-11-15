@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
+from . import paths
 from .constants import (
     APP_DIR, APP_NAME, APP_VERSION, ARCHIVE_EXTENSIONS,
     CHD_CODECS, CHD_DONE_RE, DVD_HUNK_SIZE, ILLEGAL_NAME_CHARS, LINE_SPLIT_RE,
@@ -45,6 +46,39 @@ from .system import (
     bind_to_app_lifetime, DiskGate, file_size, find_7zip, free_bytes,
     FINISH_GRACE, FLUSH_PATIENCE, IO_RETRY_ATTEMPTS, IO_RETRY_DELAY, KILL_GRACE, STALL_RETRIES, UNCONFIRMED_GRACE,
 )
+
+
+_PS3DEC_STYLE: dict[str, bool] = {}  # program path -> True when it takes flags rather than the "d key" sub-command
+
+
+def _ps3dec_takes_flags(exe: str) -> bool:
+    """Which PS3Dec this is. Asked once per program.
+
+    PS3Dec 1.x (the one PS3QDD ships) is driven as `d key <hex> <in> <out>`. The Rust 3.x rewrite that Linux and
+    macOS get takes flags (`-k <hex> -o <dir> -n <name>`). Linux probes for its --dk alias, including for a copy
+    selected by hand. Other platforms retain the original sub-command behavior without running a help probe.
+    """
+    if not sys.platform.startswith("linux"):
+        return False  # Windows keeps PS3QDD's original command line without probing the executable.
+    if exe not in _PS3DEC_STYLE:
+        flags = False
+        try:
+            res = subprocess.run([exe, "--help"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                                 creationflags=SUBPROCESS_FLAGS)
+            text = (res.stdout + res.stderr).decode(errors="replace")
+            flags = "--dk" in text or "ps3decrs" in text.lower()
+        except (OSError, subprocess.SubprocessError):
+            flags = False  # PS3QDD's 1.x sub-command form
+        _PS3DEC_STYLE[exe] = flags
+    return _PS3DEC_STYLE[exe]
+
+
+def ps3dec_args(exe: str, key: str, src: Path, out: Path) -> list[str]:
+    """The command line that decrypts one disc into exactly `out` with this PS3Dec."""
+    if _ps3dec_takes_flags(exe):
+        # -s skips its closing "press a key" prompt, which would hang a batch run; -n takes the name without .iso
+        return ["-k", key, "-s", "-o", str(out.parent), "-n", out.stem, str(src)]
+    return ["d", "key", key, str(src), str(out)]
 
 
 def plan_workers(budget: int, sources: int, one_at_a_time: bool, serialize: bool) -> tuple[int, int]:
@@ -780,10 +814,13 @@ class BatchRunner:
         if info:
             label = f"{label} ({info.kind}{f' v{info.version}' if info.version else ''})"
         self._set(tid, "[ EXTRACTING ]", f"(00.0%) {label}")
-        logs: Path | None = APP_DIR / "pkg_logs"  # an extractor may write debug_log.txt into its working folder
+        logs: Path | None = paths.state_dir() / "pkg_logs" if paths.layout() == "xdg" else APP_DIR / "pkg_logs"
         try:
-            logs.mkdir(parents=True, exist_ok=True)
-        except OSError:
+            paths.ensure_dir(logs)
+        except OSError as exc:
+            if sys.platform.startswith("linux") and not self.cfg.is_ps5_pkg:
+                return _ToolRun(1, f"Couldn't create package log directory {logs}: {exc}", label,
+                                lambda: False, needs_source=False)
             logs = None
         if self.cfg.is_ps5_pkg:  # pkg-to-anyps5 writes no log file into its working folder
             logs = None
@@ -1039,7 +1076,7 @@ class BatchRunner:
                     dec = temp_ws / "decrypted.iso"
                 self._set(tid, "[ DECRYPTING ]", f"(00.0%) {label}")
                 with self._watch_growth(tid, "[ DECRYPTING ]", label, dec, src_size):
-                    rc, output = self._run_gated(["d", "key", key, str(src_file), str(dec)], tid, "[ DECRYPTING ]", label,
+                    rc, output = self._run_gated(ps3dec_args(cfg.ps3dec, key, src_file, dec), tid, "[ DECRYPTING ]", label,
                                                  exe=cfg.ps3dec, disk=(src_file, dec), watch=dec, clean=dec,
                                                  progress_re=NO_PROGRESS_RE)
                 if rc != 0:

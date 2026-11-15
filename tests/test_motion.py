@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from tests.helpers import WindowTestCase
 
 try:
     import PySide6  # noqa: F401
@@ -20,7 +21,7 @@ FULL = 16777215
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class SetVisibleTests(unittest.TestCase):
+class SetVisibleTests(WindowTestCase):
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -28,6 +29,7 @@ class SetVisibleTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QHBoxLayout, QPushButton, QProgressBar, QWidget
 
         from distill.ui import motion
@@ -125,7 +127,7 @@ class SetVisibleTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class SlideTests(unittest.TestCase):
+class SlideTests(WindowTestCase):
     """slide(): children are clipped, never squeezed (the doubled-text artifact), and limits come back exactly."""
 
     @classmethod
@@ -135,6 +137,7 @@ class SlideTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
         from distill.ui import motion
@@ -220,7 +223,7 @@ class SlideTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class BounceTests(unittest.TestCase):
+class BounceTests(WindowTestCase):
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -228,6 +231,7 @@ class BounceTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QListWidget
 
         from distill.ui import motion
@@ -300,9 +304,13 @@ class BounceTests(unittest.TestCase):
         self.assertEqual(short.viewport().pos(), home)
 
     def test_it_is_off_unless_asked_for(self):
+        from PySide6.QtWidgets import QListWidget
         from distill.ui import motion
 
-        plain = motion.smooth_scroll(self.view)
+        # setUp's view already opted into bounce; smooth_scroll is idempotent.
+        view = QListWidget()
+        plain = motion.smooth_scroll(view)
+        self.assertIs(motion.smooth_scroll(view), plain)
         self.assertFalse(plain.bounce)
 
     def test_reduced_motion_never_moves_the_view(self):
@@ -313,7 +321,7 @@ class BounceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class StatusLabelTests(unittest.TestCase):
+class StatusLabelTests(WindowTestCase):
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -336,7 +344,7 @@ class StatusLabelTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class RowEffectTests(unittest.TestCase):
+class RowEffectTests(WindowTestCase):
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -344,6 +352,7 @@ class RowEffectTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 
         from distill.ui import motion
@@ -398,7 +407,7 @@ class RowEffectTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class PinnedPageTests(unittest.TestCase):
+class PinnedPageTests(WindowTestCase):
     """A tool page: cards in a SizedStack that is pinned to the page's height, and another card outside the stack
     beneath it. Every painted frame of a fold must have the card, the pinned stack and the card below in agreement."""
 
@@ -409,6 +418,7 @@ class PinnedPageTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
         from distill.ui import motion
@@ -444,13 +454,20 @@ class PinnedPageTests(unittest.TestCase):
         self.app.processEvents()
 
     def step(self, fraction):
-        """Move the fold to `fraction` of the way - and look at once, without letting any posted layout event run."""
+        """Observe intermediate frames immediately; only the initial frame dispatches pending layout events."""
         anim = self.card.body._slide_anim
         anim.setCurrentTime(round(anim.duration() * fraction))
+        if fraction == 0:
+            # At time zero no valueChanged need have fired. Dispatch the initial
+            # layout as the real event loop does before observing a painted frame.
+            self.app.processEvents()
 
     def agree(self):
         card, stack, below, page = self.card, self.stack, self.below, self.page
-        need = page.layout().totalHeightForWidth(page.width())
+        lay = page.layout()
+        # Qt returns -1 when no visible child has height-for-width (closed cards).
+        need = lay.totalHeightForWidth(stack.width()) if lay.hasHeightForWidth() else lay.totalSizeHint().height()
+        need = max(need, lay.totalMinimumSize().height())
         self.assertEqual(stack.height(), need, "the stack must be pinned to what the page needs, this very frame")
         self.assertLessEqual(card.geometry().bottom() + 1, page.height(), "the card must fit inside the page")
         self.assertGreaterEqual(below.geometry().top(), stack.geometry().bottom(),
@@ -487,7 +504,7 @@ class PinnedPageTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class ScrollAnchorTests(unittest.TestCase):
+class ScrollAnchorTests(WindowTestCase):
     """Closing a card on a page scrolled to its end must not scroll the page under it (everything above, and the
     header just clicked, slid down by the card's height - measured at 75 px in a recording)."""
 
@@ -498,6 +515,7 @@ class ScrollAnchorTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
         from distill.ui import motion
@@ -589,12 +607,15 @@ class ScrollAnchorTests(unittest.TestCase):
         for fraction in (0.0, 0.5, 1.0):
             with self.subTest(fraction=fraction):
                 self.step(card, fraction)
+                # QScrollArea updates its resizable content via LayoutRequest.
+                # Observe the frame after dispatch, when it could be painted.
+                self.app.processEvents()
                 self.assertEqual(self.bar.value(), value)
                 self.assertEqual(self.header_y(card), y_clicked)
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not installed (or DISTILL_SKIP_UI_TESTS is set)")
-class SmoothEverywhereTests(unittest.TestCase):
+class SmoothEverywhereTests(WindowTestCase):
     """Every scroll surface gets the glide when it first appears - except the ones it would break."""
 
     @classmethod
@@ -604,6 +625,7 @@ class SmoothEverywhereTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        super().setUp()
         from distill.ui import motion
 
         self.motion = motion

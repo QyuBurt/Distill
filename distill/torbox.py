@@ -12,7 +12,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 
-from .constants import APP_DIR
+from . import paths
 from .downloads import _OPENER, LinkError, LOGINS, RemoteFile, USER_AGENT
 from .torrents import ENGINE
 
@@ -106,7 +106,9 @@ def torbox_list_magnet(magnet: str) -> list[RemoteFile] | None:
     if not raw:
         return None
     with contextlib.suppress(OSError, TypeError, ValueError):  # for diagnosing odd replies
-        (APP_DIR / "distill_torbox_debug.json").write_text(json.dumps(info)[:200000], encoding="utf-8")
+        debug = paths.state_dir() / "distill_torbox_debug.json"
+        paths.ensure_parent(debug)
+        debug.write_text(json.dumps(info)[:200000], encoding="utf-8")
     group = str(info.get("name") or ih)
     names = [str(f.get("name") or "").replace("\\", "/").strip("/") for f in raw]
     prefix = len(names) > 1 and not all(n.startswith(group + "/") for n in names)  # a multi-file torrent sits in a folder

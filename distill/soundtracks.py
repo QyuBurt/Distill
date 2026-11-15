@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 from . import fuzzy
-from .constants import APP_DIR
+from . import paths
 from .netrules import RULES
 from .downloads import ARCHIVE_URL, describe_error, http_open, LinkError, parse_archive_url, RemoteFile
 from .formats import associated_files
@@ -1420,7 +1420,7 @@ def _rank_playable(albums: list[Album], providers) -> list[Album]:
     return head + good[VERIFY_TOP:] + [a for a in albums if a.score < MATCH_MIN]
 
 
-CACHE_FILE = APP_DIR / "distill_soundtrack_cache.json"
+CACHE_FILE = paths.cache_dir() / "distill_soundtrack_cache.json"
 CACHE_DAYS = 3
 CACHE_MAX = 400
 
@@ -1444,6 +1444,7 @@ def _save_cache(cache: dict) -> None:
     if len(cache) > CACHE_MAX:  # keep the newest
         cache = dict(sorted(cache.items(), key=lambda kv: kv[1].get("t", 0), reverse=True)[:CACHE_MAX])
     try:
+        paths.ensure_parent(CACHE_FILE)
         CACHE_FILE.write_text(json.dumps(cache), encoding="utf-8")
     except OSError:
         pass  # a convenience; never interrupt a search for it
@@ -1680,7 +1681,7 @@ def plan_save(items: list[tuple[str, list[RemoteFile]]], mode: str, dest: Path, 
 
 
 # --- remembered choices ----------------------------------------------------------------------------------
-PREFS_FILE = APP_DIR / "distill_soundtracks.json"
+PREFS_FILE = paths.config_dir() / "distill_soundtracks.json"
 
 
 def load_prefs() -> dict:
@@ -1693,13 +1694,14 @@ def load_prefs() -> dict:
 
 def save_prefs(prefs: dict) -> None:
     try:
+        paths.ensure_parent(PREFS_FILE)
         PREFS_FILE.write_text(json.dumps(prefs), encoding="utf-8")
     except OSError:
         pass  # a convenience; never interrupt a save for it
 
 
 # --- undoing a save --------------------------------------------------------------------------------------
-SAVES_FILE = APP_DIR / "distill_soundtrack_saves.json"
+SAVES_FILE = paths.state_dir() / "distill_soundtrack_saves.json"
 SAVES_KEEP = 10
 
 
@@ -1713,6 +1715,7 @@ def _read_saves() -> list[dict]:
 
 def _write_saves(saves: list[dict]) -> None:
     try:
+        paths.ensure_parent(SAVES_FILE)
         SAVES_FILE.write_text(json.dumps(saves[-SAVES_KEEP:]), encoding="utf-8")
     except OSError:
         pass

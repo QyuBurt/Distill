@@ -957,8 +957,9 @@ class RetroAchievementsDialog(FramelessDialog):
         self._say(problem or "That works.", good=not problem)
 
     def _save(self) -> None:
-        apikeys.set("ra_user", self.user.text())
-        apikeys.set("ra", self.key.text())
+        if not apikeys.set("ra_user", self.user.text()) or not apikeys.set("ra", self.key.text()):
+            self._say(apikeys.problem())
+            return
         self.accept()
 
 

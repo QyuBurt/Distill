@@ -35,6 +35,11 @@ class Isolated(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         (self.tmp / "recomps").mkdir()
+        p = mock.patch.object(rc, "cache_root", return_value=self.tmp / "recomps")
+        p.start()
+        self.addCleanup(p.stop)
+        # Directly seeded poster fixtures need their parent now that resolution is pure.
+        (self.tmp / "recomps" / "posters-v3").mkdir()
         from distill import apikeys  # saved API keys stay out of the real app folder
         p = mock.patch.object(apikeys, "FILE", self.tmp / "apikeys.json")
         p.start()

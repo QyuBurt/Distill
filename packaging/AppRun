@@ -1,0 +1,18 @@
+#!/bin/bash
+# AppImage entry point for Distill.
+#
+# The bundled app lives in $APPDIR/Distill (a one-folder PyInstaller build).
+# Runtime files use distill.paths: XDG config/data/state/cache directories, independently of bundle writability.
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+BIN="${HERE}/Distill/Distill"
+
+if [ ! -x "${BIN}" ]; then
+    echo "Distill: the bundled program is missing from this AppImage (${BIN})." >&2
+    exit 1
+fi
+
+# A headless box or a broken Qt backend should get the app's own error, not a wall of Qt warnings.
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.qpa.*=false}"
+
+exec "${BIN}" "$@"

@@ -26,6 +26,7 @@ from typing import Callable, Iterable
 
 from . import libretro_cores as lc
 from . import recomps as rc
+from . import paths
 from . import systems as sysmod
 from .formats import playlist_discs
 
@@ -167,6 +168,7 @@ class GameStore:
     @contextlib.contextmanager
     def _db(self):
         with self._lock:
+            paths.ensure_parent(self.path)
             db = sqlite3.connect(str(self.path), timeout=15)
             try:
                 yield db

@@ -1,4 +1,4 @@
-"""Remembering the window and every page's options between runs (one small JSON file next to the app)."""
+"""Remembering the window and every page's options in the runtime config directory."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,8 @@ from typing import Callable
 from PySide6.QtCore import QByteArray, QTimer
 from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QSpinBox
 
-from ..constants import APP_DIR, APP_VERSION
+from .. import paths
+from ..constants import APP_VERSION
 from ..system import resolve_tool_path
 from .state import TOOLS
 from .switch_page import SW_PERSIST
@@ -17,7 +18,7 @@ from .theme import T
 from .whatsnew import NOTES, WhatsNewDialog
 from .widgets import Expander, PathRow, StageSwitch
 
-SETTINGS_FILE = APP_DIR / "distill_settings.json"
+SETTINGS_FILE = paths.config_dir() / "distill_settings.json"
 SAVE_DELAY_MS = 800  # after the last change, so dragging a splitter writes once
 SHOW_WHATS_NEW = True  # tests switch this off
 
@@ -32,6 +33,7 @@ def read_settings() -> dict:
 
 def write_settings(data: dict) -> None:
     try:
+        paths.ensure_parent(SETTINGS_FILE)
         tmp = SETTINGS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
         tmp.replace(SETTINGS_FILE)

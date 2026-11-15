@@ -15,9 +15,9 @@ import time
 import unicodedata
 from pathlib import Path
 
-from .constants import APP_DIR
+from . import paths
 
-HISTORY_FILE = APP_DIR / "distill_search_history.json"
+HISTORY_FILE = paths.state_dir() / "distill_search_history.json"
 HISTORY_MAX = 600
 
 _PUNCT = re.compile(r"[^\w\s]|_")
@@ -194,6 +194,7 @@ class History:
 
     def _save(self) -> None:
         try:
+            paths.ensure_parent(self.path)
             self.path.write_text(json.dumps(self._items or []), encoding="utf-8")
         except OSError:
             pass

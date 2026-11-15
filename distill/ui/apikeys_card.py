@@ -138,8 +138,9 @@ class ApiKeysPanel(QWidget):
         self._timer.setInterval(800)
         self._timer.timeout.connect(self._save)
         self.edits: dict[str, QLineEdit] = {}
-        if problem := apikeys.problem():
-            lay.addWidget(hint(f"Saved keys couldn't be read: {problem}. Enter them again to replace them."))
+        self._save_problem = hint(apikeys.problem())
+        self._save_problem.setVisible(bool(self._save_problem.text()))
+        lay.addWidget(self._save_problem)
 
         self.games = KeyFolder("Games & artwork", "For the Games, PC Recomps and Emulators pages. Skip these and everything still works, "
                                                   "with plainer pictures.")
@@ -202,7 +203,11 @@ class ApiKeysPanel(QWidget):
         for name, edit in self.edits.items():
             text = edit.text().strip()
             if text != apikeys.get(name):
-                apikeys.set(name, text)
+                if not apikeys.set(name, text):
+                    self._save_problem.setText(apikeys.problem())
+                    self._save_problem.show()
+                    self.refresh()
+                    return
                 self.changed.emit(name)
         self.refresh()
 

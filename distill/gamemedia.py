@@ -9,6 +9,7 @@ ROMs), so a rename doesn't matter; otherwise, and when the hash is unknown to Re
 from __future__ import annotations
 
 import difflib
+import contextlib
 import hashlib
 import html as html_lib
 import json
@@ -25,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import recomps as rc
-from .constants import APP_DIR
+from . import paths
 
-MEDIA_DIR = APP_DIR / "game_media"
+MEDIA_DIR = paths.cache_dir() / "game_media"
 MISS_TTL = 7 * 86400  # how long "nothing online" is believed
 LIST_TTL = 7 * 86400  # how long a console's game list from RetroAchievements is kept
 PROGRESS_TTL = 6 * 3600  # how long a game's achievements are kept before being asked for again
@@ -42,8 +43,19 @@ class MediaError(Exception):
 
 
 def _dir() -> Path:
-    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    """The folder everything here is kept in, made when it isn't there yet. One that can't be made is not an error here: what is written
+    into it next says so (or is passed over, for something that is only remembered)."""
+    with contextlib.suppress(OSError):
+        paths.ensure_dir(MEDIA_DIR)
     return MEDIA_DIR
+
+
+def _write_text(path: Path, text: str) -> None:
+    try:
+        paths.ensure_parent(path)
+        path.write_text(text, encoding="utf-8")
+    except OSError:
+        pass  # an unavailable cache must not prevent using fetched media
 
 
 def _fresh(path: Path, ttl: float) -> bool:
@@ -74,10 +86,12 @@ def _download(url: str, dest: Path) -> bool:
         return False
     part = dest.with_name(dest.name + ".part")  # written aside and renamed, so a picture that is half there is never shown
     try:
+        paths.ensure_parent(part)
         part.write_bytes(data)
         part.replace(dest)
     except OSError:
-        part.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            part.unlink(missing_ok=True)
         return False
     return True
 
@@ -246,7 +260,7 @@ def lb_game_id(title: str, system: str) -> str:
     ids = lb_candidates(title, system)
     found = _best_entry(ids[:4], title, system) if ids else ""
     if found:
-        memo.write_text(found, encoding="utf-8")
+        _write_text(memo, found)
     return found
 
 
@@ -262,8 +276,11 @@ def launchbox_images(lb_id: str) -> dict[str, list[str]]:
 
 # ---- background art and screenshots --------------------------------------------------------------------------------
 def cached_backdrop(game_id: str) -> Path | None:
-    p = _dir() / f"back_{game_id}.jpg"
-    return p if p.is_file() else None
+    try:
+        p = MEDIA_DIR / f"back_{game_id}.jpg"  # (not _dir(): looking for a picture does not make the folder)
+        return p if p.is_file() else None
+    except OSError:
+        return None
 
 
 def fetch_backdrop(game_id: str, title: str, lb_platform: str, sgdb_key: str = "", retry: bool = False) -> Path | None:
@@ -288,7 +305,7 @@ def fetch_backdrop(game_id: str, title: str, lb_platform: str, sgdb_key: str = "
     for url in images["fanart"][:3]:
         if _download(url, dest):
             return dest
-    miss.write_text(MISS_MARK, encoding="utf-8")
+    _write_text(miss, MISS_MARK)
     return None
 
 
@@ -352,7 +369,7 @@ def fetch_media_art(game_id: str, kind: str, title: str, lb_platform: str, retry
     for url in launchbox_images(lb_game_id(title, lb_platform)).get(kind, [])[:3]:
         if _download(url, dest):
             return dest
-    miss.write_text(MISS_MARK, encoding="utf-8")
+    _write_text(miss, MISS_MARK)
     return None
 
 
@@ -688,7 +705,14 @@ def _is_preview_of(small: Path, big: Path) -> bool:
 def cached_screenshots(game_id: str) -> list[Path]:
     """The game's saved screenshots (their big-picture paths; for one still downloading only the small preview exists). Screenshots saved
     before previews were kept apart, where a small copy sits beside each big one, are tidied up here without downloading anything."""
-    d = _dir()
+    try:
+        return _cached_screenshots(game_id)
+    except OSError:
+        return []
+
+
+def _cached_screenshots(game_id: str) -> list[Path]:
+    d = MEDIA_DIR  # (not _dir(): looking for pictures does not make the folder)
     fulls = sorted(d.glob(f"shot_{game_id}_[0-9][0-9].jpg"))
     prev = None
     for p in fulls:
@@ -752,7 +776,7 @@ def fetch_screenshots(game_id: str, title: str, lb_platform: str, limit: int = 8
             on_update(cached_screenshots(game_id))
     autos = found_here()[:limit]
     if not autos:
-        miss.write_text(MISS_MARK, encoding="utf-8")
+        _write_text(miss, MISS_MARK)
     return autos + mine()
 
 
@@ -871,7 +895,7 @@ def ra_game_list(console: int, user: str, key: str) -> list[dict]:
     games = [g for g in data if isinstance(g, dict)] if isinstance(data, list) else []
     if games:
         try:
-            cache.write_text(json.dumps([{k: g.get(k) for k in ("ID", "Title", "NumAchievements", "Hashes")} for g in games]), encoding="utf-8")
+            _write_text(cache, json.dumps([{k: g.get(k) for k in ("ID", "Title", "NumAchievements", "Hashes")} for g in games]))
         except OSError:
             pass
     return games
@@ -978,14 +1002,14 @@ def ra_progress(system: str, title: str, user: str, key: str, path: str = "") ->
     hit = ra_hash_hit(md5, games) or ra_best(title, games)
     if hit is None:
         try:
-            cache.write_text("{}", encoding="utf-8")
+            _write_text(cache, "{}")
         except OSError:
             pass
         return None
     data = _ra("API_GetGameInfoAndUserProgress.php", user, key, u=user, g=int(hit["ID"]), a=1)
     if isinstance(data, dict):
         try:
-            cache.write_text(json.dumps(data), encoding="utf-8")
+            _write_text(cache, json.dumps(data))
         except OSError:
             pass
     return parse_ra_progress(data)

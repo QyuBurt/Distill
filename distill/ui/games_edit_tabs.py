@@ -325,7 +325,7 @@ class MediaTab(QWidget):
     def _build_screenshots(self) -> QFrame:
         row = _Row("Screenshots", "Pictures of the game, shown in a strip on its page. Click one to see it larger; right-click one to remove it.")
         row.preview.clicked.connect(lambda: self.zoom_shots(0))
-        row.find_btn.setToolTip("Find screenshots online and pick the ones you want")
+        row.find_btn.setToolTip("Look up screenshots online and pick the ones you want")
         row.file_btn.setToolTip("Add screenshots from this computer")
         row.none_btn.setToolTip("Remove every screenshot")
         row.find_btn.clicked.connect(self.find_shots)

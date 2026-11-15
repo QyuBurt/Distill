@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tempfile
+import stat
 import unittest
 import urllib.error
 from pathlib import Path
@@ -34,6 +35,45 @@ class MediaCase(unittest.TestCase):
 
 
 class LaunchBoxImageTests(MediaCase):
+    def test_cache_readers_do_not_create_missing_or_unwritable_directories(self):
+        missing = Path(mm.MEDIA_DIR) / "missing/media"
+        with mock.patch.object(mm, "MEDIA_DIR", missing), \
+                mock.patch.object(mm.paths, "ensure_parent", side_effect=PermissionError("fixture read-only")):
+            self.assertIsNone(mm.cached_backdrop("fixture"))
+            self.assertIsNone(mm.cached_recomp_banner("Fixture"))
+            self.assertEqual(mm.cached_screenshots("fixture"), [])
+        self.assertFalse(missing.exists())
+        blocker = Path(mm.MEDIA_DIR) / "blocker"
+        blocker.write_text("fixture")
+        with mock.patch.object(mm, "MEDIA_DIR", blocker / "media"):
+            self.assertIsNone(mm.cached_recomp_banner("Fixture"))
+            self.assertEqual(mm.cached_screenshots("fixture"), [])
+
+    def test_media_writers_create_missing_cache_parents(self):
+        base = Path(mm.MEDIA_DIR)
+        target = base / "images/new/back_fixture.jpg"
+        with mock.patch.object(rc, "_get", return_value=JPEG):
+            self.assertTrue(mm._download("https://fixture.invalid/image", target))
+        self.assertEqual(target.read_bytes(), JPEG)
+        if mm.paths.layout() == "xdg":
+            self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o700)
+        with mock.patch.object(mm, "MEDIA_DIR", base / "miss/new"), \
+                mock.patch.object(mm, "lb_game_id", return_value=""), \
+                mock.patch.object(mm, "launchbox_images", return_value={"fanart": [], "screenshots": []}):
+            self.assertIsNone(mm.fetch_backdrop("fixture", "Fixture", "SNES"))
+            self.assertTrue((mm.MEDIA_DIR / "back_fixture.miss").is_file())
+
+    def test_thumbnail_tidy_failure_is_an_unavailable_cache_not_a_ui_exception(self):
+        first, second = (Path(mm.MEDIA_DIR) / f"shot_fixture_{i:02d}.jpg" for i in range(2))
+        for path in (first, second):
+            path.write_bytes(JPEG)
+        with mock.patch.object(mm, "_image_size", return_value=(1000, 600)), \
+                mock.patch.object(mm, "_is_preview_of", return_value=True), \
+                mock.patch.object(Path, "replace", side_effect=PermissionError("fixture read-only")):
+            self.assertEqual(mm.cached_screenshots("fixture"), [])
+        self.assertEqual(first.read_bytes(), JPEG)
+        self.assertEqual(second.read_bytes(), JPEG)
+
     def test_pictures_are_sorted_by_the_words_around_them(self):
         got = mm.parse_launchbox_images(LB_IMAGES)
         self.assertEqual(len(got["screenshots"]), 2)

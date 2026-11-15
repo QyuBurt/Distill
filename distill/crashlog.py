@@ -2,7 +2,7 @@
 
 Distill runs as a windowed .pyw: there is no console, so an exception in a Qt slot or a worker thread would otherwise
 vanish without a trace and a bug report would have nothing to go on. Every unhandled error - main thread, worker
-thread, or a hard crash in native code - is appended to distill_crash.txt beside the program.
+thread, or a hard crash in native code - is appended to distill_crash.txt in the runtime state directory.
 """
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, TextIO
 
-from .constants import APP_DIR, APP_NAME, APP_VERSION
+from . import paths
+from .constants import APP_NAME, APP_VERSION
 
-CRASH_FILE = APP_DIR / "distill_crash.txt"
+CRASH_FILE = paths.state_dir() / "distill_crash.txt"
 MAX_BYTES = 256 * 1024  # older entries are dropped past this, so the file can't grow without limit
 
 _fault_stream: TextIO | None = None  # faulthandler needs the file to stay open for the life of the process
@@ -36,6 +37,7 @@ def record(exc_type: type[BaseException], exc: BaseException, tb, where: str = "
         if len(text.encode("utf-8")) > MAX_BYTES:
             text = text[-MAX_BYTES // 2:]
             text = text[text.find("\n=== ") + 1:] if "\n=== " in text else entry  # start on a whole entry
+        paths.ensure_parent(CRASH_FILE)
         CRASH_FILE.write_text(text, encoding="utf-8")
         return CRASH_FILE
     except OSError:
@@ -67,5 +69,6 @@ def install(on_crash: Callable[[Path | None, BaseException], None] | None = None
     if faults:
         global _fault_stream
         with contextlib.suppress(OSError, RuntimeError, ValueError):
+            paths.ensure_parent(CRASH_FILE)
             _fault_stream = open(CRASH_FILE, "a", encoding="utf-8")  # noqa: SIM115 - kept open on purpose
             faulthandler.enable(_fault_stream)

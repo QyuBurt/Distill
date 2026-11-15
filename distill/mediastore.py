@@ -7,6 +7,7 @@ snapshot budget is full (the album stays in the library and is listed again the 
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
@@ -17,10 +18,10 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import APP_DIR
+from . import paths
 from .soundtracks import Album, LOCAL_SOURCE, split_detail, Track  # noqa: F401  (split_detail is re-exported)
 
-DB_FILE = APP_DIR / "distill_media.db"
+DB_FILE = paths.data_dir() / "distill_media.db"
 SCHEMA_VERSION = 1
 
 MB = 1024 * 1024
@@ -89,6 +90,8 @@ class LibraryEntry:
 class MediaStore:
     def __init__(self, path: Path | str | None = None):
         self.path = str(path or DB_FILE)
+        with contextlib.suppress(OSError):  # (a folder that can't be made shows as SQLite's own error just below)
+            paths.ensure_parent(Path(self.path))
         self._lock = threading.RLock()  # one connection shared by the page and its worker threads
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row

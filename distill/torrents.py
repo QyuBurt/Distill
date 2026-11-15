@@ -14,14 +14,14 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .constants import APP_DIR
+from . import paths
 from .downloads import LinkError, RemoteFile
 
 
-TORRENT_FILE = APP_DIR / "distill_torrent_settings.json"
+TORRENT_FILE = paths.config_dir() / "distill_torrent_settings.json"
 
 
-TORRENT_DIR = APP_DIR / "distill_torrents"  # a copy of each torrent's details, so a restored list can resume
+TORRENT_DIR = paths.state_dir() / "distill_torrents"  # a copy of each torrent's details, so a restored list can resume
 
 
 TORRENT_DEFAULTS = {"adapter": "", "require_vpn": True, "dht": True}
@@ -71,6 +71,7 @@ def load_torrent_settings() -> dict:
 
 def save_torrent_settings(settings: dict) -> None:
     with contextlib.suppress(OSError):
+        paths.ensure_parent(TORRENT_FILE)
         TORRENT_FILE.write_text(json.dumps({k: settings.get(k, v) for k, v in TORRENT_DEFAULTS.items()}), encoding="utf-8")
 
 
@@ -210,7 +211,7 @@ def torrent_files_from_bytes(lt, data: bytes) -> list[RemoteFile]:
     except (RuntimeError, ValueError, TypeError):
         raise LinkError("That isn't a valid torrent.") from None
     ih = torrent_hash(info)
-    TORRENT_DIR.mkdir(parents=True, exist_ok=True)
+    paths.ensure_dir(TORRENT_DIR)
     (TORRENT_DIR / f"{ih}.torrent").write_bytes(data)  # kept so a restored list can resume
     storage, group, files, skipped = info.files(), info.name(), [], 0
     for i in range(info.num_files()):

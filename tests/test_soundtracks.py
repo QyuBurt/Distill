@@ -125,7 +125,7 @@ class ArchiveProviderTests(IsolatedSoundtrackFiles):
             {"identifier": "p5", "title": "Persona 5 Original Soundtrack", "creator": ["Shoji Meguro"]},
             {"identifier": "", "title": "broken"}]}}
         with self.provider_with(docs) as fetch:
-            res = st.find_albums([st.GameRequest("Persona 5")], pause=0)
+            res = st.find_albums([st.GameRequest("Persona 5")], providers=(st.ArchiveOrgProvider(),), pause=0)
         self.assertIn("advancedsearch.php", fetch.call_args_list[0][0][0])
         self.assertEqual(res[0].albums[0].ident, "p5")
         self.assertEqual(res[0].albums[0].detail, "Shoji Meguro")
@@ -134,7 +134,7 @@ class ArchiveProviderTests(IsolatedSoundtrackFiles):
     def test_search_runs_phrase_and_any_order_queries_merged_without_duplicates(self):
         docs = {"response": {"docs": [{"identifier": "sm64", "title": "Super Mario 64 OST"}]}}
         with self.provider_with(docs) as fetch:
-            res = st.find_albums([st.GameRequest("Mario 64")], pause=0)
+            res = st.find_albums([st.GameRequest("Mario 64")], providers=(st.ArchiveOrgProvider(),), pause=0)
         urls = [c[0][0] for c in fetch.call_args_list if "advancedsearch" in c[0][0]]
         self.assertEqual(len(urls), 2)
         self.assertIn("%22Mario+64%22", urls[0])
@@ -155,26 +155,26 @@ class ArchiveProviderTests(IsolatedSoundtrackFiles):
             return next(v for k, v in items.items() if f"/metadata/{k}" in url)
 
         with mock.patch.object(st, "fetch_json", side_effect=fake):
-            res = st.find_albums([st.GameRequest("Persona 5")], pause=0)
+            res = st.find_albums([st.GameRequest("Persona 5")], providers=(st.ArchiveOrgProvider(),), pause=0)
         self.assertEqual([a.ident for a in res[0].albums], ["split", "single"])
         self.assertEqual([a.playable for a in res[0].albums], [2, 1])
 
     def test_albums_carry_their_cover_address(self):
         docs = {"response": {"docs": [{"identifier": "my item", "title": "Persona 5 Original Soundtrack"}]}}
         with self.provider_with(docs):
-            res = st.find_albums([st.GameRequest("Persona 5")], pause=0)
+            res = st.find_albums([st.GameRequest("Persona 5")], providers=(st.ArchiveOrgProvider(),), pause=0)
         self.assertEqual(res[0].albums[0].art, "https://archive.org/services/img/my%20item")
 
     def test_poor_match_is_offered_but_not_chosen(self):
         docs = {"response": {"docs": [{"identifier": "ff8", "title": "Final Fantasy VIII Soundtrack"}]}}
         with self.provider_with(docs):
-            res = st.find_albums([st.GameRequest("Final Fantasy VII")], pause=0)
+            res = st.find_albums([st.GameRequest("Final Fantasy VII")], providers=(st.ArchiveOrgProvider(),), pause=0)
         self.assertEqual(len(res[0].albums), 1)
         self.assertIsNone(res[0].best)
 
     def test_network_failure_is_reported_not_raised(self):
         with mock.patch.object(st, "fetch_json", side_effect=LinkError("Network error: down")):
-            res = st.find_albums([st.GameRequest("X")], pause=0)
+            res = st.find_albums([st.GameRequest("X")], providers=(st.ArchiveOrgProvider(),), pause=0)
         self.assertIn("Network error", res[0].error)
 
     def test_best_quality_prefers_flac_then_original_mp3(self):

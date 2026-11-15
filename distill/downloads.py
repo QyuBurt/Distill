@@ -23,8 +23,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
-from . import apikeys, debrid, ftpclient, ytdlp
-from .constants import APP_DIR, APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
+from . import apikeys, debrid, ftpclient, paths, ytdlp
+from .constants import APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
 from .models import fmt_size
 from .netrules import GATE, PAUSED, RULES, THROTTLE, host_of
 from .system import _Aborted
@@ -86,7 +86,7 @@ class RemoteFile:
     seconds: int | None = None  # a track's length, when the listing says (shown under its title in Distill Resonance)
 
 
-SESSION_FILE = APP_DIR / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
+SESSION_FILE = paths.state_dir() / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
 
 
 # Sites with their own sign-in: key -> (name, hostnames, ((field, label, hidden), ...), where to find the key, required)
@@ -162,7 +162,7 @@ def auth_headers(url: str) -> dict[str, str]:
             return {"Authorization": f"Bearer {cred['secret']}"}
         if cred.get("kind") == CUSTOM_KINDS[2]:
             return {"Cookie": cred["secret"]}
-        token = base64.b64encode(f"{cred.get('user', '')}:{cred['secret']}".encode("utf-8")).decode("ascii")
+        token = base64.b64encode(f"{cred.get('user', '')}:{cred['secret']}".encode()).decode("ascii")
         return {"Authorization": f"Basic {token}"}
     return {}  # 1fichier: the API key is only used against its own API, never on file downloads
 
@@ -192,10 +192,18 @@ def load_logins() -> bool:
     return any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom"))
 
 
-def save_logins(remember: bool) -> None:
+def save_logins(remember: bool) -> bool:
     """Keep the logins in the keys file (sealed, see secretstore.py) only while 'Remember' is ticked; the API keys stay either way."""
+    global LOGIN_PROBLEM
     keep = remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom"))
-    apikeys.save_logins(LOGINS if keep else None)
+    if not apikeys.save_logins(LOGINS if keep else None):
+        load_logins()
+        return False
+    custom = LOGINS.get("custom")
+    if isinstance(custom, list):
+        custom.sort(key=lambda entry: -len(entry["host"]))
+    LOGIN_PROBLEM = apikeys.problem()
+    return True
 
 
 def logins_missing(urls: list[str], required_only: bool = False) -> list[str]:

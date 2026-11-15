@@ -81,7 +81,7 @@ class LoginsDialog(FramelessDialog):
             intro.setWordWrap(True)
             lay.addWidget(intro)
         if _dl.LOGIN_PROBLEM and not embedded:  # inside Settings the API keys page says it once, at the top
-            warn = hint(f"Saved logins couldn't be read: {_dl.LOGIN_PROBLEM}. Enter them again to replace them.")
+            warn = hint(_dl.LOGIN_PROBLEM)
             lay.addWidget(warn)
         self.fields: dict[tuple[str, str], QLineEdit] = {}
 
@@ -171,6 +171,9 @@ class LoginsDialog(FramelessDialog):
         self.remember = AnimCheckBox(f"Remember on this computer ({describe()})")
         self.remember.setChecked(remember)
         lay.addWidget(self.remember)
+        self._save_problem = hint("")
+        self._save_problem.hide()
+        lay.addWidget(self._save_problem)
 
         if embedded:  # nothing to press: edits are saved as they are made
             self.remember.toggled.connect(lambda *_: self._timer.start(0))
@@ -298,7 +301,12 @@ class LoginsDialog(FramelessDialog):
         rows = self._collect_custom()
         LOGINS["custom"] = sorted(rows, key=lambda e: -len(e["host"]))  # most specific site is looked up first
         self.remember_value = self.remember.isChecked()
-        save_logins(self.remember_value)
+        if not save_logins(self.remember_value):
+            self.ok = False
+            self._save_problem.setText(_dl.LOGIN_PROBLEM)
+            self._save_problem.show()
+            return
+        self._save_problem.hide()
         SKIPPED_LOGINS.update(k for k in self.needed if login_for(f"https://{LOGIN_SITES[k][1][0]}/") is None)
         self.ok = True
         if self._embedded:
