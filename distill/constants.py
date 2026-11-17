@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .version import __version__ as _VERSION
+
 
 # No flashing console windows, and child processes (chdman / 7-Zip) run at BELOW_NORMAL priority.
 # chdman can use every core without making the PC sluggish: priority only matters when another
@@ -17,7 +19,7 @@ SUBPROCESS_FLAGS = (
 
 # Identity: shown in the title bar, the window header and the log banner.
 APP_NAME = "Distill"  # the name people see, and the identity of settings folders, registry keys and the user agent
-APP_VERSION = "v1.0"  # keep in step with `version` in pyproject.toml (tests/test_structure.py checks) and with release tags
+APP_VERSION = f"v{_VERSION}"  # the display form of distill/version.py, which is the only place the number is written
 
 
 # GameCube/Wii-only containers. A plain .iso is told apart from PS1/PS2/PSP images by its header.

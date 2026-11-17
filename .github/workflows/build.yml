@@ -134,15 +134,13 @@ jobs:
           tag = os.environ["GITHUB_REF_NAME"]
           if not re.fullmatch(r"v\d+(\.\d+)*", tag):
               raise SystemExit(f"Tag {tag} must look like v1.2 or v1.2.3")
-          for path, pattern, new in (
-              ("distill/constants.py", r'APP_VERSION = "[^"]*"', f'APP_VERSION = "{tag}"'),
-              ("pyproject.toml", r'(?m)^version = "[^"]*"', f'version = "{tag[1:]}"'),
-          ):
-              text = open(path, encoding="utf-8", newline="").read()
-              text, n = re.subn(pattern, new, text, count=1)
-              if n != 1:
-                  raise SystemExit(f"Could not stamp {path}")
-              open(path, "w", encoding="utf-8", newline="").write(text)
+          # The one place the version is written: pyproject.toml and distill/constants.py both derive from this file.
+          path = "distill/version.py"
+          text = open(path, encoding="utf-8", newline="").read()
+          text, n = re.subn(r'__version__ = "[^"]*"', f'__version__ = "{tag[1:]}"', text, count=1)
+          if n != 1:
+              raise SystemExit(f"Could not stamp {path}")
+          open(path, "w", encoding="utf-8", newline="").write(text)
           print("Version set to", tag)
           PY
       - run: python -m pip install -r requirements-dev.txt

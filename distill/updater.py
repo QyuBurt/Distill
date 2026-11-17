@@ -1,4 +1,5 @@
-"""Checks GitHub for a newer Distill release and installs it (Windows builds). Qt-free; the prompt lives in ui/update_prompt.py."""
+"""Checks GitHub for a newer Distill release and installs it (packaged Windows builds; on Linux the release's own build is
+downloaded and checked, then installed by hand). Qt-free; the prompt lives in ui/update_prompt.py."""
 from __future__ import annotations
 
 import hashlib
@@ -23,16 +24,21 @@ CHECK_ENABLED = os.environ.get("DISTILL_NO_UPDATE_CHECK") != "1"  # tests and CI
 PREVIEW = os.environ.get("DISTILL_UPDATE_PREVIEW") == "1"  # show the update screen with a made-up download (no release needed)
 USER_AGENT = f"{APP_NAME}-updater"
 
+WINDOWS_ASSETS = {"portable": "Distill-portable.zip", "onefile": "Distill.exe"}  # installed in place, by the helper script
+LINUX_ASSET_TYPES = (".appimage", ".tar.gz", ".tar.xz", ".zip")  # what a release could publish as its Linux build
+
 
 @dataclass(frozen=True, slots=True)
 class Update:
     tag: str
     notes: str
     page: str  # the release's web page
-    asset_url: str  # "" when this kind of install can't update itself
+    asset_url: str  # "" when this release has nothing for this platform
     asset_name: str
     asset_size: int
     sha256: str | None
+    installable: bool = False  # whether apply() can swap it in place: the packaged Windows builds
+    message: str = ""  # what to tell the user when this platform can't install it itself
 
 
 def parse_version(text: str) -> tuple[int, ...]:
@@ -50,14 +56,65 @@ def is_newer(tag: str, current: str = APP_VERSION) -> bool:
 
 
 def install_kind() -> str:
-    """'portable' (folder build), 'onefile' (single exe) or 'source' (run from a checkout: no self-update)."""
-    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+    """'portable' (folder build) and 'onefile' (single exe) on Windows, 'appimage' for a packaged Linux build, 'source'
+    when this is a checkout: only the Windows builds can swap themselves."""
+    if not getattr(sys, "frozen", False):
         return "source"
-    return "portable" if (APP_DIR / "_internal").is_dir() else "onefile"
+    if sys.platform == "win32":
+        return "portable" if (APP_DIR / "_internal").is_dir() else "onefile"
+    if sys.platform.startswith("linux"):
+        return "appimage"
+    return "source"
 
 
 def _wanted_asset(kind: str) -> str:
-    return {"portable": "Distill-portable.zip", "onefile": "Distill.exe"}.get(kind, "")
+    return WINDOWS_ASSETS.get(kind, "")
+
+
+def _linux_asset(assets: dict) -> dict | None:
+    """The release's own Linux build, if it published one: an AppImage first, then a tarball or a zip."""
+    linux = {name: asset for name, asset in assets.items()
+             if name and "linux" in name.lower() and name.lower().endswith(LINUX_ASSET_TYPES)}
+    for suffix in LINUX_ASSET_TYPES:
+        for name in sorted(linux):
+            if name.lower().endswith(suffix):
+                return linux[name]
+    return None
+
+
+def _release_asset(assets: dict, kind: str) -> dict | None:
+    """The one asset this kind of install may use; a Windows build is never picked for anything else."""
+    if kind in WINDOWS_ASSETS:
+        name = _wanted_asset(kind)
+        return assets.get(name) if name else None
+    if kind == "appimage":
+        return _linux_asset(assets)
+    return None
+
+
+def _checksum(assets: dict, name: str) -> str | None:
+    """The release's published SHA-256 for `name`, out of its SHA256SUMS.txt; None when there is none to be had."""
+    sums = assets.get("SHA256SUMS.txt")
+    if not name or not sums:
+        return None
+    try:
+        for line in _get(sums["browser_download_url"], "application/octet-stream").decode("utf-8", "replace").splitlines():
+            digest, _, listed = line.strip().partition(" ")
+            if listed.strip(" *") == name:
+                return digest.lower()
+    except Exception:
+        return None
+    return None
+
+
+def _message(kind: str, asset: dict | None) -> str:
+    """The line the prompt shows when this platform cannot install the release by itself."""
+    if kind != "appimage":
+        return ""
+    if asset is None:
+        return "This release has no Linux build, so there is nothing to install automatically."
+    return (f"{asset['name']} is attached to this release: it downloads and is checked against the release's published "
+            "checksum, then you install it yourself.")
 
 
 def _get(url: str, accept: str = "application/vnd.github+json", timeout: int = 10) -> bytes:
@@ -75,21 +132,16 @@ def check(current: str = APP_VERSION) -> Update | None:
         tag = str(data.get("tag_name") or "")
         if data.get("draft") or data.get("prerelease") or not is_newer(tag, current):
             return None
-        want = _wanted_asset(install_kind())
-        assets = {a.get("name"): a for a in data.get("assets") or []}
-        asset = assets.get(want) if want else None
-        sha = None
-        if asset and (sums := assets.get("SHA256SUMS.txt")):
-            try:
-                for line in _get(sums["browser_download_url"], "application/octet-stream").decode("utf-8", "replace").splitlines():
-                    digest, _, name = line.strip().partition(" ")
-                    if name.strip(" *") == want:
-                        sha = digest.lower()
-            except Exception:
-                sha = None
-        return Update(tag=tag, notes=str(data.get("body") or ""), page=str(data.get("html_url") or f"https://github.com/{REPO}/releases"),
-                      asset_url=asset["browser_download_url"] if asset else "", asset_name=want,
-                      asset_size=int(asset.get("size") or 0) if asset else 0, sha256=sha)
+        kind = install_kind()
+        assets = {str(a.get("name")): a for a in data.get("assets") or [] if a.get("name")}
+        asset = _release_asset(assets, kind)
+        name = str(asset.get("name") or "") if asset else ""
+        return Update(tag=tag, notes=str(data.get("body") or ""),
+                      page=str(data.get("html_url") or f"https://github.com/{REPO}/releases"),
+                      asset_url=str(asset.get("browser_download_url") or "") if asset else "", asset_name=name,
+                      asset_size=int(asset.get("size") or 0) if asset else 0,
+                      sha256=_checksum(assets, name) if asset else None,
+                      installable=kind in WINDOWS_ASSETS and asset is not None, message=_message(kind, asset))
     except Exception:
         return None
 
@@ -186,8 +238,8 @@ def apply(payload: Path, tag: str = "", splash: dict | None = None) -> Path | No
     window can carry on from it. Returns the marker file that appears once that window is on screen (the app waits for it
     before quitting, so there is no gap), or None when there is no install window."""
     kind = install_kind()
-    if kind == "source":
-        raise RuntimeError("Self-update works in the packaged Windows builds only.")
+    if kind not in WINDOWS_ASSETS:
+        raise RuntimeError("Self-update installs the packaged Windows builds only; on Linux, install the downloaded file yourself.")
     staged = _stage_splash(splash, payload, kind) if splash else None
     spec_path, ready = staged if staged else (None, None)
     script = payload.parent / "apply_update.bat"

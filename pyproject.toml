@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "distill"
-version = "1.0.0"
+dynamic = ["version"]  # read from distill/version.py: that module is the only place the number is written
 description = "Batch disc image compressor, extractor and organiser"
 requires-python = ">=3.10"
 dependencies = ["PySide6>=6.7", "py7zr>=0.21"]
@@ -11,6 +15,12 @@ dev = ["pyinstaller>=6.6", "pytest>=8", "ruff>=0.5"]
 
 [project.gui-scripts]
 distill = "distill.__main__:run"
+
+[tool.setuptools.dynamic]
+version = {attr = "distill.version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["distill*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
