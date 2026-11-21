@@ -12,6 +12,7 @@ from .widgets import AnimCheckBox, CheckTree, PathRow, RevealDelegate, StepCard,
 if TYPE_CHECKING:
     from ..organize import Finding
     from ..orgpages import OrgPage, OrgTool
+    from .review_bar import ReviewBar
 
 
 # --- The window -----------------------------------------------------------------------------------
@@ -97,6 +98,7 @@ class OrgState:
         self.reveal: RevealDelegate | None = None  # new scan results ripple in, row by row
         self.slide: TreeSlide | None = None  # a finding's details are written in when it is opened
         self.status: QLabel | None = None
+        self.review: ReviewBar | None = None  # the chips over the results: what is selected, what it frees
         self.scan_btn: QPushButton | None = None
         self.undo_btn: QPushButton | None = None
         self.report_btn: QPushButton | None = None

@@ -6,9 +6,11 @@ tool run. These two functions are the whole rule, so it can be tested without a 
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
-TOOL, DL = "tool", "dl"
+TOOL, DL, ART = "tool", "dl", "art"  # ART: the Games page fetching covers and details in the background
 
 
 def view_of(mode: str) -> str:
@@ -55,3 +57,31 @@ def bar_targets(tool: tuple[str, str] | None, dl: tuple[str, str] | None, curren
     if dl is not None:
         found.append((DL, *dl))
     return [t for t in found if t[1] != current_page]
+
+
+def bar_jobs(tool: tuple[str, str] | None, dl: tuple[str, str] | None, art: tuple[str, str] | None = None) -> list[tuple[str, str, str]]:
+    """The jobs the bar along the bottom stands for: every one that is running, whichever page is on screen, a conversion first, then the
+    download, then the Games page's cover and details fetch. Each is (view, page, what it is doing); `tool`, `dl` and `art` are (page, what it
+    is doing) or None. The bar is the one progress bar in the window: it shows while any job runs, and clicking it goes to the page that is
+    doing the work."""
+    found = [(TOOL, *tool)] if tool is not None else []
+    if dl is not None:
+        found.append((DL, *dl))
+    if art is not None:
+        found.append((ART, *art))
+    return found
+
+
+_SPEED = re.compile(r"(\d[\d,]*(?:\.\d+)?\s[KMGT]?B/s)")
+_LEFT = re.compile(r"Est\. remaining: ~([^|]+?)\s*(?:\||$)")
+
+
+def eta_bits(text: str) -> str:
+    """The short form of a run's time line for the bar along the bottom: "3.20 MB/s  |  ~12m left" out of "Elapsed: 4m  |  1.2 GB of
+    9.8 GB  |  3.20 MB/s  |  Est. remaining: ~12m". Empty while it has nothing to say yet (still estimating, or paused)."""
+    bits = []
+    if speed := _SPEED.search(text):
+        bits.append(speed.group(1))
+    if left := _LEFT.search(text):
+        bits.append(f"~{left.group(1).strip()} left")
+    return "  |  ".join(bits)

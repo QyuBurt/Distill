@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QF
                                QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import apikeys
-from .. import gameexport, gameimport, streaming
+from .. import gameexport, gameimport, launchprofile as lp, streaming
 from .. import games as gm
 from .. import gamemedia
 from .. import recomps as rc
@@ -43,7 +43,8 @@ class EditGameDialog(FramelessDialog):
     _found = Signal(int, object, str)  # (lookup number, [gm.Match] or None, what went wrong), sent from the worker thread
 
     def __init__(self, parent: QWidget, game: gm.Game, systems: list[str], sgdb_key: str = "", cover: QPixmap | None = None, *, media_key: str = "",
-                 emu_info: Callable[[str], gm.EmulatorOptions] | None = None, manage: Callable[[], None] | None = None):
+                 emu_info: Callable[[str], gm.EmulatorOptions] | None = None, manage: Callable[[], None] | None = None,
+                 tag_choices: list[str] | None = None, profile: lp.Profile | None = None):
         """`media_key` (the name the game's pictures are kept under) adds the Media tab; `emu_info` (what can play a platform) adds the Emulator tab,
         and `manage` opens the Platform setup window from it."""
         super().__init__(parent, "Edit game", "edit", (820, 760), (700, 560))
@@ -52,6 +53,7 @@ class EditGameDialog(FramelessDialog):
         self.emulator: str | None = None  # the launch choice Save was pressed with ('' = automatic); None = unchanged
         self.chosen_emulator = ""  # the launch choice the Emulator tab shows when Save is pressed ('' = automatic)
         self.make_default = False  # make that choice the platform's default
+        self.profile: lp.Profile | None = None  # the game's own launch settings if they were changed (None = unchanged)
         self.launch_args: dict[str, str] = {}  # launch options changed on the Emulator tab: emulator id -> options ('' = Distill's own)
         self.media_tab: MediaTab | None = None
         self.emu_tab: EmulatorTab | None = None
@@ -63,6 +65,7 @@ class EditGameDialog(FramelessDialog):
         self._serial = 0  # the lookup whose answer is wanted; older ones are ignored
         self._looked_for = game.name  # the name last searched (or opened with): leaving the box unchanged doesn't search again
         self._matches: list[gm.Match] = []
+        self.picked: gm.Match | None = None  # the entry the player chose in the lookup list, if they did: the game is linked to it for good
         self._touched: set[str] = set()  # fields the person typed into: a lookup never overwrites them
         self.setWindowTitle(f"Edit {game.name}")
         outer = self.content
@@ -173,6 +176,20 @@ class EditGameDialog(FramelessDialog):
         self.notes.setPlaceholderText("Your own notes: where you got to, tips, what to try next")
         self.notes.setFixedHeight(78)
         right.addLayout(_stack("Notes", self.notes))
+        self.tag_choices = list(tag_choices or [])  # tags the library already uses, offered under the box (most used first)
+        self.tags = QLineEdit(", ".join(gm.split_tags(game.tags)))
+        self.tags.setPlaceholderText("co-op, couch, kids")
+        self.tags.setClearButtonEnabled(True)
+        self.tags.setToolTip("Your own labels for the game, separated by commas. They can be searched and filtered on.")
+        right.addLayout(_stack("Tags", self.tags))
+        self.tag_hint = QLabel()
+        self.tag_hint.setWordWrap(True)
+        self.tag_hint.setTextFormat(Qt.TextFormat.RichText)
+        self.tag_hint.linkActivated.connect(self._add_tag)
+        T.bind_css(self.tag_hint, lambda: f"color: {T.fg3.name()}; font-size: 12px; background: transparent;")
+        self.tags.textChanged.connect(lambda _t: self._suggest_tags())
+        right.addWidget(self.tag_hint)
+        self._suggest_tags()
         right.addWidget(hint(f"File: {game.path}"))
         right.addStretch(1)
 
@@ -186,7 +203,7 @@ class EditGameDialog(FramelessDialog):
             self.media_tab.set_cover(cover)
             self.tabs.addTab(self.media_tab, "Media")
         if emu_info is not None:
-            self.emu_tab = EmulatorTab(game.emulator, lambda: self.system.currentText().strip(), emu_info, manage)
+            self.emu_tab = EmulatorTab(game.emulator, lambda: self.system.currentText().strip(), emu_info, manage, profile)
             self.tabs.addTab(self.emu_tab, "Emulator")
         self._tabs_timer = QTimer(self)  # the platform changing (typed, picked, or filled in by a lookup) updates the other tabs, once typing pauses
         self._tabs_timer.setSingleShot(True)
@@ -231,6 +248,18 @@ class EditGameDialog(FramelessDialog):
         if self.media_tab is not None:
             self.media_tab.closing()
         super().done(result)
+
+    def _suggest_tags(self) -> None:
+        """Under the Tags box: the library's tags this game doesn't have yet, to click."""
+        have = {t.casefold() for t in gm.split_tags(gm.clean_tags(self.tags.text()))}
+        offer = [t for t in self.tag_choices if t.casefold() not in have][:10]
+        colour = T.accent_text.name()
+        self.tag_hint.setText("Add: " + "  ".join(f'<a href="{t}" style="color: {colour}; text-decoration: none;">{t}</a>' for t in offer) if offer else "")
+        self.tag_hint.setVisible(bool(offer))
+
+    def _add_tag(self, tag: str) -> None:
+        text = self.tags.text().strip().rstrip(",").strip()
+        self.tags.setText(f"{text}, {tag}" if text else tag)
 
     def _refresh_tabs(self) -> None:
         for tab in (self.media_tab, self.emu_tab):
@@ -373,6 +402,7 @@ class EditGameDialog(FramelessDialog):
     def _pick(self, item: QListWidgetItem) -> None:
         row = self.results.row(item)
         if 0 <= row < len(self._matches):
+            self.picked = self._matches[row]
             self._apply(self._matches[row], overwrite=True)
 
     def _apply(self, m: gm.Match, overwrite: bool) -> None:
@@ -410,6 +440,7 @@ class EditGameDialog(FramelessDialog):
             "system": None if system == self.game.system else system,  # not pinned unless the person changed it
             "developer": self.developer.text(), "publisher": self.publisher.text(), "year": year, "genre": self.genre.text(),
             "rating": self.stars.value(), "status": str(self.status_box.currentData() or ""), "notes": self.notes.toPlainText(),
+            "tags": self.tags.text(),
         }
         if self.emu_tab is not None:
             choice = self.emu_tab.choice()
@@ -417,6 +448,8 @@ class EditGameDialog(FramelessDialog):
             self.emulator = choice if choice != (self.game.emulator or "") else None
             self.make_default = bool(choice) and self.emu_tab.default_requested()
             self.launch_args = self.emu_tab.launch_args()
+            changed = self.emu_tab.profile()
+            self.profile = changed if changed != self.emu_tab.start_profile else None
         self.accept()
 
 

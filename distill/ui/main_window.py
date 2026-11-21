@@ -25,7 +25,8 @@ from ..downloads import DownloadRunner, load_logins, LOGINS
 from ..netrules import load_rules
 from ..ytdlp import load_settings as load_ytdlp_settings
 from ..orgpages import ORG_PAGES
-from ..runview import DL, RunFacts, bar_targets, controls, view_of
+from ..pagesummary import workflow_summary
+from ..runview import DL, RunFacts, bar_jobs, controls, view_of
 from .update_prompt import UpdatePromptMixin
 from ..torbox import torbox_key
 from .. import debrid
@@ -48,6 +49,9 @@ from .emu_cards import TwoColumn
 from .nav import NAV_GROUPS, PAGE_CHIP, PAGE_DETAIL, PAGE_INFO
 from .organize_page import OrganizeMixin
 from .patch_view import PatchViewMixin
+from ..preview import TARGETS as PREVIEW_MODES
+from .convert_hub import ConvertHubMixin
+from .preview_row import PreviewMixin
 from .emulator_page import EmulatorMixin
 from .games_page import GamesMixin
 from .recomp_page import RecompMixin
@@ -64,7 +68,7 @@ from .theme import T
 from .tooltips import TooltipWrapper
 from . import icons, motion
 from .widgets import (ThemeWipe, AuraButton, Banner, Card, EdgeHotZone, Expander, GearButton, hint, IconButton, Logo, NavButton,
-                      NavHeader, PathRow, PressButton, RunBar, SideHost, SideShadow, SizedStack, ToolMarkers, ToolRow)
+                      NavHeader, PathRow, PressButton, RunBar, SideCard, SideHost, SideShadow, SizedStack, ToolMarkers, ToolRow)
 
 if TYPE_CHECKING:
     from ..batch import BatchRunner
@@ -85,7 +89,7 @@ BUSY_LABELS = {
 }
 
 
-class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, GamesMixin, RecompMixin, EmulatorMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin, UpdatePromptMixin,
+class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, DownloadMixin, SoundtrackMixin, GamesMixin, RecompMixin, EmulatorMixin, ConvertHubMixin, PreviewMixin, SwitchMixin, SettingsMixin, FeedbackMixin, PersistMixin, UpdatePromptMixin,
                      QMainWindow):
     MODES = ("chd", "rvz", "cso", "pkg", "pkg5", "zar", "ps3", "xbox")  # pkg5: the PS5 page, which runs the "pkg" engine mode
     SIDEBAR_WIDTH = 268
@@ -404,7 +408,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._side.setParent(body)
         self._side_setup(body)
 
-        content = QWidget()
+        content = self._page_host = QWidget()  # the page column; the frosted sidebar blurs what this shows behind it
         col = QVBoxLayout(content)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
@@ -455,6 +459,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.pages["games"] = self._build_games_page()
         self.pages["recomps"] = self._build_recomp_page()
         self.pages["emus"] = self._build_emulator_page()
+        self.pages["convert"] = self._build_convert_page()  # after the Settings tool rows exist: its cards read their state
         for page in self.pages.values():
             self.stack.addWidget(page)
         self.perf = self._build_perf_card()
@@ -518,7 +523,6 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         bar_lay.addWidget(bar)
         self.bar_wrap = bar_wrap  # the PC Recomps page has no batch to start, so it hides the bar
         col.addWidget(bar_wrap)
-        self._st_link_dock()
         col.addWidget(self.st_dock)  # Distill Resonance's own bottom bar: select / save buttons over the download progress
         for seq, button in (("Ctrl+Return", self.start_btn), ("Ctrl+P", self.pause_btn), ("Ctrl+.", self.stop_btn)):
             QShortcut(QKeySequence(seq), self, activated=lambda b=button: None if self.current_page == "sound" else b.click())  # click() is a no-op while disabled; the Distill Resonance page has no bar, so no keys either
@@ -545,7 +549,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.settings_btn.setText("Hide options" if visible else "Show options")
 
     def _build_sidebar(self) -> QWidget:
-        side = QWidget()
+        side = SideCard()
         side.setObjectName("sidebar")
         side.setFixedWidth(self.SIDEBAR_WIDTH)
         outer = QVBoxLayout(side)
@@ -694,6 +698,9 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._watch = QTimer(self)  # while the sidebar is out: has the mouse gone away from it?
         self._watch.setInterval(120)
         self._watch.timeout.connect(self._side_watch_tick)
+        self._glass_timer = QTimer(self)  # keeps the frosted backdrop live while the sidebar is out
+        self._glass_timer.setInterval(40)
+        self._glass_timer.timeout.connect(self._glass_tick)
         body.resized.connect(self._place_sidebar)
 
     def _side_raise(self) -> None:
@@ -760,6 +767,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if on == self._compact:
             return
         self._compact = on
+        self._side.set_glass(on)
+        self._glass_timer.stop()
         self._hot_timer.stop()
         self._watch.stop()
         self._glide_dock(0 if on else self.CARD_GAP + self.SIDEBAR_WIDTH)
@@ -770,10 +779,27 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
     def _sync_compact_ui(self) -> None:
         self.side_toggle.setToolTip("Keep the sidebar open (Ctrl+B)" if getattr(self, "_compact", False) else "Hide the sidebar until the mouse touches the left edge (Ctrl+B)")
 
+    def _snap_backdrop(self) -> None:
+        """Photograph the page where the sidebar will sit, for the frosted-glass look."""
+        try:
+            host, side = self._page_host, self._side
+            rect = QRect(self.CARD_GAP, 0, side.width(), max(1, side.height() or host.height()))
+            side.set_backdrop(host.grab(rect))
+        except Exception:
+            self._side.set_backdrop(None)
+
+    def _glass_tick(self) -> None:
+        if not self._compact or self._side_open <= 0.001:
+            self._glass_timer.stop()
+            return
+        self._snap_backdrop()
+
     def _reveal_side(self) -> None:
         if not self._compact:
             return
         self._away_ticks = 0
+        self._snap_backdrop()
+        self._glass_timer.start()
         self._glide_side(1.0, 240)
         self._watch.start()
 
@@ -781,6 +807,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._watch.stop()
         if self._compact:
             self._glide_side(0.0, 220)
+            QTimer.singleShot(260, self._glass_tick)  # runs until the slide-away finishes, then stops itself
 
     def _side_watch_tick(self) -> None:
         """The sidebar stays out while the mouse is over it (or a menu is open, or a button is held, as when dragging a scrollbar)
@@ -831,8 +858,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             self._nav_click(pages[n - 1])
 
     def _run_bar_clicked(self) -> None:
-        if jobs := bar_targets(self._tool_target(), self._dl_target(), self.current_page):
-            self._show_page(jobs[0][1])  # the job the bar is showing (a conversion first)
+        if jobs := bar_jobs(self._tool_target(), self._dl_target(), self._art_target()):
+            self._show_page(jobs[0][1])  # the page doing the work the bar is showing (a conversion first); a click on its own page does nothing
 
     def _nav_click(self, key: str) -> None:
         self._show_page(key)  # a run carries on in the background: its bar along the bottom leads back to it
@@ -965,6 +992,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if key not in self.pages:
             return
         order, before = self.pages_order(), self.current_page
+        if before == "games" and key != "games":
+            self._gm_on_hide()
         self.current_page = key
         # the old page drifts up when the new one is further down the sidebar, down when it is further up
         further_up = key in order and before in order and order.index(key) < order.index(before)
@@ -1000,6 +1029,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             self._rc_on_show()
         elif key == "emus":
             self._em_on_show()
+        elif key == "convert":
+            self._cv_refresh()
 
     def _place_perf(self, key: str) -> None:
         """Move the one Performance card into the right column of the page being shown (below that page's own settings)."""
@@ -1011,7 +1042,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
     def _current_mode(self) -> str:
         page = self.current_page
         return (page if page in self.MODES else "dl" if page in ("dl", "sound") else "recomps" if page == "recomps"
-                else "games" if page == "games" else "emus" if page == "emus" else "switch" if page == "switch" else "org")
+                else "games" if page == "games" else "emus" if page in ("emus", "convert") else "switch" if page == "switch" else "org")  # the hub has no run panel or Start, like Emulators
 
     def _busy_label(self, page: str) -> str:
         """What the Start button says while the run begun from this page is going."""
@@ -1080,6 +1111,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if self.pause_btn.text() != c.pause_text:
             self.pause_btn.setText(c.pause_text)
         self._update_start_text()
+        self._refresh_tool_info()  # Update now on the Tools page is off while a job runs, and back on when it ends
 
     def _build_tab(self, mode: str) -> QWidget:
         is_pkg_page = mode in ("pkg", "pkg5")
@@ -1115,6 +1147,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if mode == "ps3":
             dirs.add(self.ps3_keys)  # a folder pick: full width with the others
         dirs.add(self._drop_note_row(mode))  # 'only this dropped file will run', when a drop picked one out
+        if mode in PREVIEW_MODES:
+            dirs.add(self._pv_row(mode))  # Estimate savings: sample the folder, nothing is converted
 
         main = QWidget()  # below the folders: this tool's workflow on the left, its settings and the performance budget on the right
         main_lay = QVBoxLayout(main)
@@ -1127,7 +1161,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.perf_slots[mode] = side_lay
         main_lay.addWidget(dirs)  # the folders card is half width like the rest
 
-        opts = Expander("Workflow", expanded=True)
+        opts = Expander("Workflow", expanded=False)  # folded to a line saying what it is set to (see pagesummary)
         if mode != "zar":  # folders are packed as they are
             opts.add(tv.extract)
         tv.verify.setText({
@@ -1144,6 +1178,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
                           else "Delete original files after successful conversion/verification")
         opts.add(tv.verify)
         opts.add(tv.delete)
+        opts.set_summary(lambda: workflow_summary(tv.extract.isChecked() if mode != "zar" else None, tv.verify.isChecked(), tv.delete.isChecked(),
+                                                  always_verified=mode in ("pkg", "pkg5", "ps3")))
         main_lay.addWidget(opts)
 
         def form(card: Card, label: str, widget: QWidget, note: str = "", label_w: int = LABEL_W) -> None:

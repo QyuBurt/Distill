@@ -386,13 +386,21 @@ def tint(colour: QColor, alpha: int) -> str:
     return f"rgba({colour.red()}, {colour.green()}, {colour.blue()}, {alpha})"
 
 
+def discard_widget(w: QWidget) -> None:
+    """Take a widget out of its parent and delete it. Once it has no parent it is a top-level window, so a fade or fold that is still
+    running on it (and calls setVisible(True) when it ends) would flash it up as a small Distill window: it is told never to show."""
+    w.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    w.hide()
+    w.setParent(None)
+    w.deleteLater()
+
+
 def clear_layout(lay: QLayout) -> None:
     """Remove and delete everything in a layout (widgets and nested layouts)."""
     while lay.count():
         item = lay.takeAt(0)
         if (w := item.widget()) is not None:
-            w.setParent(None)
-            w.deleteLater()
+            discard_widget(w)
         elif (inner := item.layout()) is not None:
             clear_layout(inner)
 

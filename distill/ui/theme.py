@@ -210,9 +210,10 @@ QLabel#chip {{ background: {c(self.chip_bg)}; color: {c(self.accent_text)}; bord
     padding: 3px 10px; font-size: 9pt; font-weight: 700; }}
 QLabel#pathLabel {{ color: {c(self.fg2)}; font-size: 9pt; font-weight: 500; }}
 QLabel#mono {{ font-family: {mono}; }}
-QWidget#sidebar {{ background: {c(self.side)}; border: 1px solid {c(self.card_border)}; border-radius: 16px; }}
+QWidget#sidebar {{ background: transparent; border: none; }}
 QWidget#sideFooter {{ border-top: 1px solid {c(self.card_border)}; }}
 QWidget#navWell {{ background: {c(self.bg)}; border: 1px solid {c(self.card_border)}; border-radius: 12px; }}
+QWidget#sidebar[glass="true"] QWidget#navWell {{ background: rgba({self.bg.red()}, {self.bg.green()}, {self.bg.blue()}, 110); border: 1px solid {c(self.card_border)}; border-radius: 12px; }}
 QWidget#navWell QScrollBar:vertical {{ margin: 8px 2px 8px 0; }}
 QWidget#commandBar {{ background: {c(self.side)}; border: 1px solid {c(self.card_border)}; border-radius: 16px; }}
 QWidget#nowPlaying {{ background: transparent; }}

@@ -7,18 +7,19 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import (QColor, QFont, QGradient, QIcon, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
-                           QFontMetrics, QPixmap, QWheelEvent)
+from PySide6.QtGui import (QBrush, QColor, QFont, QGradient, QIcon, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
+                           QFontMetrics, QFontMetricsF, QKeySequence, QPixmap, QShortcut, QWheelEvent)
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QCheckBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy,
-    QScrollArea, QStackedWidget, QStyledItemDelegate, QTableView, QToolButton, QTreeWidget,
+    QScrollArea, QStackedWidget, QStyledItemDelegate, QTableView, QToolButton, QToolTip, QTreeWidget,
     QVBoxLayout, QWidget,
 )
 
+from .. import ripplemath
 from ..constants import APP_DIR
 from ..system import resolve_tool_path
-from . import framemath, icons, motion
+from . import fillmath, framemath, icons, motion
 from .icon import app_icon_pixmap
 from .theme import AlignL, AlignR, AlignV, T
 
@@ -760,6 +761,22 @@ class ExpanderHeader(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(48)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._summary_fn: Callable[[], tuple[str, bool]] | None = None  # what the card is set to, said while it is folded
+
+    def set_summary(self, fn: Callable[[], tuple[str, bool]] | None) -> None:
+        """`fn` returns (text, warn): a line shown beside the title while the card is folded, amber when `warn`. It is asked each time
+        the header paints, so it is always the controls' current state."""
+        self._summary_fn = fn
+        self.update()
+
+    def _summary(self) -> tuple[str, bool]:
+        if self._summary_fn is None:
+            return "", False
+        try:
+            text, warn = self._summary_fn()
+        except RuntimeError:  # a control it reads has gone
+            return "", False
+        return text, bool(warn)
 
     def sizeHint(self) -> QSize:
         return QSize(220, 48)
@@ -781,7 +798,17 @@ class ExpanderHeader(QAbstractButton):
         font.setPointSizeF(10.5)
         p.setFont(font)
         p.setPen(T.title)
+        title_w = QFontMetricsF(font).horizontalAdvance(self.text())
         p.drawText(QRectF(x, r.top(), r.width() - x - 44, r.height()), AlignL | AlignV, self.text())
+        text, warn = ("", False) if self.isChecked() else self._summary()  # folded: say what is inside, right-aligned before the chevron
+        if text:
+            small = QFont(self.font())
+            small.setPointSizeF(9.0)
+            p.setFont(small)
+            p.setPen(T.warn if warn else T.fg3)
+            left = x + title_w + 24
+            box = QRectF(left, r.top(), max(0.0, r.right() - 44 - left), r.height())
+            p.drawText(box, AlignR | AlignV, QFontMetricsF(small).elidedText(text, Qt.TextElideMode.ElideRight, int(box.width())))
         chevron = icons.pixmap("chevron-up" if self.isChecked() else "chevron-down", T.fg3, 18)
         p.drawPixmap(int(r.right() - 34), int(r.center().y() - 9), chevron)
 
@@ -815,6 +842,10 @@ class Expander(Card):
         self.body_lay.setSpacing(10)
         self.lay.addWidget(self.body)
         self._toggled(expanded)
+
+    def set_summary(self, fn: Callable[[], tuple[str, bool]] | None) -> None:
+        """A line on the header, while folded, saying what the card is set to (see ExpanderHeader.set_summary)."""
+        self.header.set_summary(fn)
 
     def add(self, item) -> None:
         """Same as Card.add, but into the foldable body (so Expander and Card are interchangeable)."""
@@ -933,8 +964,39 @@ class ToolRow(QWidget):
         lay.setSpacing(2)
         self.path = PathRow(label, folder=False, label_width=label_width)
         self.status = hint("", live=True)
+        self.chip = QLabel("")  # Ready / Checking / Updating / Missing: the state at a glance, the status line says why
+        self.chip.setVisible(False)
+        foot = QHBoxLayout()
+        foot.setSpacing(10)
+        self.version = QLabel("")  # what it is running: "mame0270  ·  MAME", "Your own copy", "Not downloaded yet"
+        self.version.setObjectName("hint")
+        self.version.setVisible(False)
+        self.update_btn = QPushButton("Update now")
+        self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_btn.setFixedHeight(24)
+        self.update_btn.setVisible(False)
+        foot.addWidget(self.status, 1)
+        foot.addWidget(self.version, 0, Qt.AlignmentFlag.AlignTop)
+        foot.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignTop)
+        foot.addWidget(self.update_btn, 0, Qt.AlignmentFlag.AlignTop)
         lay.addWidget(self.path)
-        lay.addWidget(self.status)
+        lay.addLayout(foot)
+
+    def set_info(self, version: str, can_update: bool, tip: str) -> None:
+        """The version line, and whether Update now can be pressed (with the reason in its tooltip when it can't)."""
+        self.version.setText(version)
+        self.version.setVisible(True)
+        self.update_btn.setVisible(True)
+        self.update_btn.setEnabled(can_update)
+        self.update_btn.setToolTip(tip)
+
+    def set_state(self, text: str, colour: Callable[[], QColor]) -> None:
+        """Tag the tool. `colour` is asked again whenever the theme changes, so the tag follows light and dark."""
+        self.chip.setText(text)
+        self.chip.setVisible(True)
+        T.bind_css(self.chip, lambda: (f"background: rgba({colour().red()}, {colour().green()}, {colour().blue()}, 40); "
+                                       f"color: {colour().name()}; border-radius: 9px; padding: 2px 9px; "
+                                       "font-size: 9pt; font-weight: 600;"))
 
 
 class ToolMarkers(QWidget):
@@ -1517,6 +1579,70 @@ class EdgeHotZone(QWidget):
         pass
 
 
+class SideCard(QWidget):
+    """The sidebar card. Pinned, it is a solid card. In compact mode (floating over the page) it turns to frosted glass: a blurred
+    snapshot of the page behind it, tinted with the sidebar colour, so the page shows through."""
+
+    RADIUS = 16
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._glass = False
+        self._backdrop: QPixmap | None = None
+
+    def glass(self) -> bool:
+        return self._glass
+
+    def set_glass(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._glass:
+            return
+        self._glass = on
+        self.setProperty("glass", on)
+        for w in self.findChildren(QWidget, "navWell"):  # let the style sheet's [glass] rule reach the nav well
+            w.style().unpolish(w)
+            w.style().polish(w)
+        self.update()
+
+    def set_backdrop(self, shot: QPixmap | None) -> None:
+        """`shot` is the page as it looks behind the card, same size as the card. It is blurred here (shrunk, then stretched back)."""
+        if shot is None or shot.isNull():
+            self._backdrop = None
+        else:
+            img = shot.toImage()
+            w, h = max(1, img.width() // 14), max(1, img.height() // 14)
+            small = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            mid = small.scaled(max(1, w * 3), max(1, h * 3), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self._backdrop = QPixmap.fromImage(mid.scaled(img.size(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.RADIUS, self.RADIUS)
+        if not self._glass:
+            p.fillPath(path, T.side)
+        else:
+            p.save()
+            p.setClipPath(path)
+            if self._backdrop is not None:
+                p.drawPixmap(self.rect(), self._backdrop)
+            tint = QColor(T.side)
+            tint.setAlpha(150 if T.dark else 165)
+            if self._backdrop is None:
+                tint.setAlpha(205)
+            p.fillRect(self.rect(), tint)
+            p.restore()
+        edge = QColor(T.card_border)
+        if self._glass:
+            edge.setAlpha(170)
+        p.setPen(QPen(edge, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+
+
 class SideShadow(QWidget):
     """A soft shadow on the right of the sidebar while it floats over the page (the page is not pushed aside then)."""
 
@@ -1543,16 +1669,21 @@ class RunBar(QAbstractButton):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.title, self.detail, self.value = "", "", 0  # value is 0..1000, like the run panel's bar
+        self._phase = 0.0  # the ripple on the fill's edge: the wave from the update screen's filling logo (see ripplemath.py)
+        self._shown = 0.0  # the fill as drawn, 0..1: it glides towards the value instead of stepping to it
+        self._clock = motion.FrameClock()
+        self._timer = motion.frame_timer(self)
+        self._timer.timeout.connect(self._tick)
         self.setFixedHeight(self.HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def set_info(self, title: str, detail: str) -> None:
-        if (title, detail) == (self.title, self.detail):
+    def set_info(self, title: str, detail: str, tip: str = "") -> None:
+        if (title, detail, tip) == (self.title, self.detail, getattr(self, "_tip", "")):
             return
-        self.title, self.detail = title, detail
-        self.setToolTip(f"Back to {title}")
+        self.title, self.detail, self._tip = title, detail, tip
+        self.setToolTip(tip or f"Back to {title}")
         self.setAccessibleName(f"{title}: {detail}. Click to go back to it.")
         self.update()
 
@@ -1561,6 +1692,40 @@ class RunBar(QAbstractButton):
         if value != self.value:
             self.value = value
             self.update()
+            self._sync()
+
+    def _moving(self) -> bool:
+        return self._shown < self.value / 1000 - ripplemath.FILL_EPS
+
+    def _sync(self) -> None:
+        """Run the timer only while the strip is showing, motion is not reduced, and the fill is part-way (the ripple) or still
+        gliding to its value. When it cannot animate, or the value went backwards (a reset), the fill just shows the value."""
+        animate = motion.on() and self.isVisible()
+        if not animate or self.value / 1000 < self._shown:
+            self._shown = self.value / 1000
+        live = animate and (ripplemath.is_rippling(self._shown) or ripplemath.is_rippling(self.value / 1000) or self._moving())
+        if live and not self._timer.isActive():
+            self._clock.reset()
+            self._timer.start(motion.frame_ms(self))
+        elif not live and self._timer.isActive():
+            self._timer.stop()
+            self.update()
+
+    def _tick(self) -> None:
+        dt = self._clock.dt()
+        self._phase = ripplemath.next_phase(self._phase, dt)
+        self._shown = ripplemath.chase(self._shown, self.value / 1000, dt)
+        self.update()
+        if not (ripplemath.is_rippling(self._shown) or self._moving()):
+            self._sync()  # arrived (or finished): stop the timer
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._sync()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._sync()
 
     def enterEvent(self, event) -> None:
         self.update()
@@ -1577,13 +1742,20 @@ class RunBar(QAbstractButton):
         p.fillRect(self.rect(), T.side)
         p.setPen(QPen(T.card_border, 1))
         p.drawLine(0, 0, w, 0)
-        fill = w * self.value / 1000
+        shown = self._shown if (self._timer.isActive() or self._moving()) else self.value / 1000
+        fill = w * shown
         if fill > 0:
             start, end = T.wash(70, 26)
             wash = QLinearGradient(0, 0, max(w, 1), 0)
             wash.setColorAt(0.0, start)
             wash.setColorAt(1.0, end)
-            p.fillRect(QRectF(0, 1, fill, h - 1), wash)
+            amp = fillmath.wave_amplitude(shown, 4.0) if motion.on() else 0.0
+            body = QPainterPath(QPointF(0, 1))  # the wash, with the brand's ripple down its leading edge (flat at 0% and 100%)
+            for x, y in ripplemath.edge_points(fill, 1, h, amp, self._phase, h * ripplemath.STRIP_WAVE):
+                body.lineTo(x, y)
+            body.lineTo(0, h)
+            body.closeSubpath()
+            p.fillPath(body, QBrush(wash))
             line = QLinearGradient(0, 0, max(w, 1), 0)
             for stop, col in zip((0.0, 0.5, 1.0), T.grad):
                 line.setColorAt(stop, col)
@@ -2259,10 +2431,38 @@ class _CornerCap(QWidget):
         QPainter(self).drawImage(0, 0, self._img)
 
 
+class _Chevron(QAbstractButton):
+    """A bare chevron (no background), floating beside a modal card to step to the previous (-1) or next (+1) one."""
+
+    def __init__(self, direction: int, parent: QWidget):
+        super().__init__(parent)
+        self.direction = direction
+        self.setFixedSize(44, 44)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # the arrow keys belong to the card; a click here must not take them away
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(255, 255, 255, 255 if self.underMouse() else 190), 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        d = 6.5
+        tip = -d if self.direction < 0 else d
+        cx, cy = self.width() / 2 + tip / 2, self.height() / 2  # the apex sits half a chevron off centre, so the glyph itself is centred
+        p.drawLine(QPointF(cx - tip, cy - d * 1.35), QPointF(cx, cy))
+        p.drawLine(QPointF(cx, cy), QPointF(cx - tip, cy + d * 1.35))
+
+
 class _ModalOverlay(QWidget):
-    """The blurred, dimmed photo of the app with a detail card floating on it. A click on the dim area (or Esc) asks to close."""
+    """The blurred, dimmed photo of the app with a detail card floating on it. A click on the dim area (or Esc) asks to close.
+    With stepping on, chevrons either side of the card (and the Left / Right arrow keys) ask for the previous / next card, and `slide`
+    animates the change as a swipe."""
 
     closeRequested = Signal()
+    stepRequested = Signal(int)  # -1: the previous card, +1: the next
+    SLIDE_MS = 280
+    suppresses_tooltips = True  # read by TooltipWrapper: no hover tooltips on the card or its chevrons
 
     def __init__(self, parent: QWidget, detail: QWidget):
         super().__init__(parent)
@@ -2282,16 +2482,86 @@ class _ModalOverlay(QWidget):
         self.scroll.setWidget(detail)
         detail.setAutoFillBackground(False)
         lay.addWidget(self.scroll)
+        self._clip = QWidget(self)  # while a swipe runs: holds the two snapshots of the card and clips them to it
+        self._clip.hide()
         self._cap = _CornerCap(self)  # smooths the card's rounded corners over the square content
+        self._stepping = False
+        self._swipe: QVariantAnimation | None = None
+        self._prev, self._next = _Chevron(-1, self), _Chevron(1, self)
+        for button in (self._prev, self._next):
+            button.hide()
+            button.clicked.connect(lambda _c=False, b=button: self._step(b.direction))
+        for key, direction in (("Left", -1), ("Right", 1)):  # (a shortcut, not keyPressEvent: the scroll area would take the arrows)
+            QShortcut(QKeySequence(key), self, activated=lambda d=direction: self._step(d), context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.hide()
+
+    def set_stepping(self, on: bool) -> None:
+        self._stepping = on
+        for button in (self._prev, self._next):
+            button.setVisible(on and self.isVisible())
+        self._place()
+
+    def _step(self, direction: int) -> None:
+        if self._stepping:
+            self.stepRequested.emit(direction)
+
+    def _finish_swipe(self) -> None:
+        if self._swipe is not None:
+            swipe, self._swipe = self._swipe, None
+            swipe.stop()
+            for child in self._clip.findChildren(QLabel):
+                child.deleteLater()
+            self._clip.hide()
+
+    def slide(self, direction: int, change: Callable[[], None]) -> None:
+        """Run `change` (which fills the card with the other game) as a swipe: the card as it was slides away to the left (direction +1, the
+        next card) or right (-1) while the new one comes in from the opposite side."""
+        self._finish_swipe()
+        QToolTip.hideText()
+        w, h = self.card.width(), self.card.height()
+        if not (motion.on() and self.isVisible() and w > 40 and h > 40):
+            change()
+            return
+        old = self.card.grab()
+        change()
+        self.scroll.verticalScrollBar().setValue(0)
+        new = self.card.grab()
+        self._clip.setGeometry(self.card.geometry())
+        labels = []
+        for shot in (old, new):
+            label = QLabel(self._clip)
+            label.setPixmap(shot)
+            label.setGeometry(0, 0, w, h)
+            label.show()
+            labels.append(label)
+        self._clip.show()
+        self._clip.raise_()
+        self._cap.raise_()
+        for button in (self._prev, self._next):
+            button.raise_()
+        swipe = self._swipe = QVariantAnimation(self, duration=self.SLIDE_MS, startValue=0.0, endValue=1.0)
+        swipe.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def step(t) -> None:
+            t = float(t)
+            labels[0].move(round(-direction * w * t), 0)
+            labels[1].move(round(direction * w * (1 - t)), 0)
+
+        step(0.0)
+        swipe.valueChanged.connect(step)
+        swipe.finished.connect(self._finish_swipe)
+        swipe.start()
 
     def open(self, shot: QPixmap, animate: bool = True) -> None:
         w, h = shot.width(), shot.height()
         small = shot.scaled(max(1, w // 14), max(1, h // 14), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self._shot = small.scaled(small.width() * 2, small.height() * 2, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._finish_swipe()
         self._place()
         self.show()
+        for button in (self._prev, self._next):
+            button.setVisible(self._stepping)
         self.raise_()
         self.setFocus()
         self.scroll.verticalScrollBar().setValue(0)
@@ -2307,7 +2577,13 @@ class _ModalOverlay(QWidget):
         h = max(240, self.height() - 56)
         self.card.setGeometry((self.width() - w) // 2, (self.height() - h) // 2, w, h)
         self._cap.setGeometry(self.card.geometry())
+        self._clip.setGeometry(self.card.geometry())
         self._cap.raise_()
+        mid = self.card.y() + (self.card.height() - self._prev.height()) // 2
+        self._prev.move(max(4, self.card.x() - self._prev.width() - 10), mid)
+        self._next.move(min(self.width() - self._next.width() - 4, self.card.geometry().right() + 11), mid)
+        self._prev.raise_()
+        self._next.raise_()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2447,12 +2723,27 @@ class ModalStack(QStackedWidget):
     currentIndex() is 1 while the card is up."""
 
     dismissed = Signal()
+    stepped = Signal(int)  # the card's chevrons or arrow keys: -1 for the previous card, +1 for the next
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._detail: QWidget | None = None
         self._overlay: _ModalOverlay | None = None
         self._open = False
+        self._stepping = False
+
+    def set_stepping(self, on: bool) -> None:
+        """Show chevrons beside the card (and take the Left / Right keys) to go to the previous / next card."""
+        self._stepping = on
+        if self._overlay is not None:
+            self._overlay.set_stepping(on)
+
+    def slide(self, direction: int, change: Callable[[], None]) -> None:
+        """Make `change` (which fills the card with another item) as a swipe: the old card goes off one side, the new comes from the other."""
+        if self._overlay is not None and self._open:
+            self._overlay.slide(direction, change)
+        else:
+            change()
 
     def addWidget(self, widget: QWidget) -> int:
         if self.count() == 1 and self._detail is None:
@@ -2487,6 +2778,8 @@ class ModalStack(QStackedWidget):
         if self._overlay is None or self._overlay.parentWidget() is not host:
             self._overlay = _ModalOverlay(host, self._detail)
             self._overlay.closeRequested.connect(self.dismissed)
+            self._overlay.stepRequested.connect(self.stepped)
+            self._overlay.set_stepping(self._stepping)
         shot = host.grab()
         self._overlay.open(shot, animate)
 

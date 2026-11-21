@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 from .. import afteractions, magnet
 from ..clipwatch import links_in_text
 from ..folderwatch import FolderWatcher, WATCH_FOLDER
+from ..dltally import after_summary, list_chips
+from ..linebox import box_height
 from ..dlfiles import (
     compact_plan, delete_files, explorer_select_command, files_on_disk, magnet_for,
     nearest_folder, per_item_for, wait_until,
@@ -40,9 +42,12 @@ from ..torrents import ENGINE, import_libtorrent, is_torrent_token, load_torrent
 from .dialogs import LoginsDialog, TorrentDialog
 from .state import LABEL_W
 from .torrent_search import TorrentSearchDialog
+from .after_fold import AfterFold
 from .emu_cards import hairline, labelled, section_header, TwoColumn
+from .review_bar import ReviewBar
 from .widgets import (accent_button, AnimCheckBox, Card, Expander, hint, link_expanders, PathRow, ToggleTable)
-from .ytdlp_picker import DlDelegate, FormatRows
+from .dl_progress import ProgressDelegate
+from .ytdlp_picker import FormatRows
 
 
 class DownloadMixin:
@@ -73,9 +78,10 @@ class DownloadMixin:
         # -- left: the links
         links = Expander("Links", expanded=True)
         links.add(hint('Paste archive.org items, file listings, magnets or .torrent files, one per line.', tip='Paste one or more archive.org item links (or a link to a plain file listing), one per line. Magnet links and .torrent files work too - drop them anywhere on this page.'))
-        self.dl_url_text = QPlainTextEdit()
-        self.dl_url_text.setFixedHeight(96)
+        self.dl_url_text = QPlainTextEdit()  # one line to begin with, one more for each link pasted (see _dl_fit_url_box)
         self.dl_url_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)  # else its card hogs spare height
+        self.dl_url_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # a long link scrolls with the cursor, with no bar to eat the line
+        self.dl_url_text.textChanged.connect(self._dl_fit_url_box)
         self.dl_url_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         mono = QFont(T.mono_font)  # links and magnets read best in a fixed-width face with a clear 0/O and 1/l
         mono.setPointSizeF(9)
@@ -83,8 +89,8 @@ class DownloadMixin:
         self.dl_url_text.setFont(mono)
         self.dl_url_text.setPlaceholderText("https://archive.org/details/...")
         self.dl_url_text.setAcceptDrops(False)  # a drop falls through to the window, which understands torrents
-        links.add(self.dl_url_text)
         self.dl_fetch_btn = accent_button("Fetch file list")
+        self.dl_fetch_btn.setMinimumWidth(140)
         self.dl_fetch_btn.clicked.connect(self._dl_fetch)
         self.dl_torrent_btn = QPushButton("Open .torrent...")
         self.dl_torrent_btn.setToolTip("Pick .torrent files to add (you can also drop them on the window)")
@@ -97,17 +103,20 @@ class DownloadMixin:
         self.dl_clear_btn.setToolTip("Empty the Links box")
         self.dl_clear_btn.clicked.connect(self.dl_url_text.clear)
         self.dl_status = hint("", live=True)
-        go = QHBoxLayout()  # the one thing to press, with the quiet way to start over beside it
-        go.setSpacing(8)
-        go.addWidget(self.dl_fetch_btn, 1)
-        go.addWidget(self.dl_clear_btn)
-        links.add(go)
-        other = QHBoxLayout()  # the other two ways in share the width evenly
-        other.setSpacing(8)
-        other.addWidget(self.dl_torrent_btn, 1)
-        other.addWidget(self.dl_search_btn, 1)
-        links.add(other)
+        top = QHBoxLayout()  # one slim row: the box, and the one thing to press beside it
+        top.setSpacing(8)
+        top.addWidget(self.dl_url_text, 1, Qt.AlignmentFlag.AlignTop)
+        top.addWidget(self.dl_fetch_btn, 0, Qt.AlignmentFlag.AlignTop)
+        links.add(top)
+        more = QHBoxLayout()  # the other ways in, small, with the quiet way to start over at the far end
+        more.setSpacing(8)
+        more.addWidget(self.dl_torrent_btn)
+        more.addWidget(self.dl_search_btn)
+        more.addStretch(1)
+        more.addWidget(self.dl_clear_btn)
+        links.add(more)
         links.add(self.dl_status)
+        self._dl_fit_url_box()
 
         # -- right: where it goes, and what happens when it is done
         self.dl_dest = PathRow("Save to", label_width=LABEL_W)
@@ -151,11 +160,15 @@ class DownloadMixin:
         dest.setProperty("settings_id", "Save Location")  # the fold state saved under its old name carries over
         dest.add(self.dl_dest)
         dest.add(hairline())
-        dest.add(labelled("When finished", self.dl_post))
-        dest.add(self.dl_organize)
-        dest.add(labelled("Run a command when finished", self.dl_command))
-        dest.add(labelled("Computer, when finished", self.dl_power))
-        dest.add(self.dl_autoresume)
+        self.dl_after = AfterFold("After downloads")  # chosen once and left: folded to a line that says what it will do
+        for item in (labelled("When finished", self.dl_post), self.dl_organize, labelled("Run a command when finished", self.dl_command),
+                     labelled("Computer, when finished", self.dl_power), self.dl_autoresume):
+            self.dl_after.body_lay.addWidget(item)
+        dest.add(self.dl_after)
+        for signal in (self.dl_post.currentIndexChanged, self.dl_organize.toggled, self.dl_command.textChanged,
+                       self.dl_power.currentIndexChanged, self.dl_autoresume.toggled):
+            signal.connect(lambda *_: self._dl_after_line())  # the line follows the boxes, whoever changes them (a restored session too)
+        self._dl_after_line()
 
         main = QWidget()
         main_lay = QVBoxLayout(main)
@@ -179,6 +192,8 @@ class DownloadMixin:
         tip.setObjectName("hint")
         head.addWidget(tip)
         files.add(head)
+        self.dl_review = ReviewBar()  # what is ticked, and how the run is going: over the list, where you are deciding
+        files.add(self.dl_review)
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self.dl_filter = QLineEdit()
@@ -208,7 +223,7 @@ class DownloadMixin:
         table.placeholder_icon = "download"
         table.setModel(self.dl_proxy)
         # the same cascade as the other result lists, plus the chevron / chosen format of a video row
-        self._dl_reveal = DlDelegate(table, lambda ix: self.dl_formats.info(ix) if hasattr(self, "dl_formats") else None)
+        self._dl_reveal = ProgressDelegate(table, lambda ix: self.dl_formats.info(ix) if hasattr(self, "dl_formats") else None)
         table.setItemDelegate(self._dl_reveal)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -506,15 +521,33 @@ class DownloadMixin:
     def _dl_update_sel(self) -> None:
         shown = len(self.dl_files) - len(self.dl_model.removed)
         if shown <= 0:
+            self.dl_review.set_chips([])
             if self._dl_cleared:  # the person emptied the list (at start-up an empty list just keeps its first hint)
                 self.dl_sel_label.setText("The list is empty. Paste a link above and press Fetch file list.")
                 self._dl_save_soon()
             return
-        picks = [self.dl_files[i] for i in self.dl_checked if i < len(self.dl_files)]
         self._dl_save_soon()
-        total = sum(rf.size or 0 for rf in picks)
-        more = "+" if any(rf.size is None for rf in picks) else ""
-        self.dl_sel_label.setText(f"{len(picks)} of {shown} file(s) selected ({fmt_size(total)}{more})")
+        self._dl_chips()
+        self.dl_sel_label.setText("")  # the counts are in the chips over the list; this line is for hints about an empty one
+
+    def _dl_fit_url_box(self) -> None:
+        """The Links box is one line tall for an empty box or a single link, and grows a line for each link pasted (to six, then it
+        scrolls). The overhead is the shared text box style's: a 1 px border, 8 px padding and the document's own 4 px margin, either side."""
+        box = self.dl_url_text
+        overhead = 2 + 16 + round(2 * box.document().documentMargin())
+        box.setFixedHeight(box_height(box.toPlainText(), box.fontMetrics().lineSpacing(), overhead))
+
+    def _dl_chips(self) -> None:
+        """The chips over the list: selected (with size), and while files are on the move, how many are going, done, failed."""
+        model = self.dl_model
+        self.dl_review.set_chips(list_chips([rf.size for rf in self.dl_files], self.dl_checked, model.removed, model.status,
+                                            FINISHED))
+
+    def _dl_after_line(self) -> None:
+        """The one line shown while 'After downloads' is folded."""
+        text, warn = after_summary(self.dl_post.currentText(), self.dl_organize.isChecked(), self.dl_command.text(),
+                                   self.dl_power.currentText(), self.dl_autoresume.isChecked())
+        self.dl_after.set_summary(text, warn)
 
     def _dl_toggle(self, indices: list[int]) -> None:
         self.dl_model.toggle(indices)
@@ -965,6 +998,7 @@ class DownloadMixin:
         if stopped:  # a stopped run didn't get anywhere: the bar starts over (partial files resume next time)
             motion.ease_value(self.dl_pb, 0)  # a reset jumps, and cancels a glide still in flight
         self.dl_fetch_btn.setEnabled(True)
+        self._dl_chips()  # the final count of what finished and what failed
         self._sync_run_controls()  # back to "Start Download"
         self._runbar_sync()  # the bar along the bottom goes
         if not stopped:
@@ -984,6 +1018,7 @@ class DownloadMixin:
         if not force and now - self._dl_eta_tick < 0.5:
             return
         self._dl_eta_tick = now
+        self._dl_chips()  # how many are going, done, failed (twice a second while a run is on)
         self._st_refresh_status()
         done, total = r.bytes_done, r.bytes_total
         self._set_dl_bar(min(done, total), max(1, total))

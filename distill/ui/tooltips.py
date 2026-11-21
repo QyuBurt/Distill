@@ -14,6 +14,12 @@ class TooltipWrapper(QObject):
     def eventFilter(self, obj, event) -> bool:
         if event.type() != QEvent.Type.ToolTip or not isinstance(obj, QWidget):
             return False
+        w = obj
+        while w is not None:  # no hover tooltips inside a modal card: they pop up under the pointer while it steps between games
+            if getattr(w, "suppresses_tooltips", False):
+                QToolTip.hideText()
+                return True
+            w = w.parentWidget()
         view = obj.parentWidget()
         if isinstance(view, QAbstractItemView) and obj is view.viewport():
             index = view.indexAt(event.pos())

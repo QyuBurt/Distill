@@ -38,3 +38,5 @@ keys/
 
 # Dev-tool output
 /devtools/khinsider_probe_report.txt
+
+zip_project.bat

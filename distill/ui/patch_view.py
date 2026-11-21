@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QMenu, QTreeWidgetItem
 
 from .. import organize as org
+from ..orgreview import patch_chips
 from . import msgbox
 from .theme import T
 
@@ -119,10 +120,8 @@ class PatchViewMixin:
         st = self.org[key]
         games = {i for i, _j in st.patch_ticks}
         made = sum(len(self._patch_plan(key, i)) for i in games)
-        text = f"{len(st.patch_ticks)} patch(es) selected on {len(games)} game(s)  |  {made} patched file(s) will be made"
-        if st.message:
-            text += f"  |  {st.message}"
-        st.status.setText(text + ".")
+        st.review.set_chips(patch_chips(len(st.patch_ticks), len(games), made))
+        st.status.setText(f"{st.message}." if st.message else "")  # the counts are in the chips above the list
         st.checked = games  # the apply button and the page's counters read this
 
     # ---- ticking -----------------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from PySide6.QtCore import QByteArray, QTimer
 from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QSpinBox
 
 from ..constants import APP_DIR, APP_VERSION
+from ..pagesummary import FOLD_TITLES, LAYOUT, calm_pending
 from ..system import resolve_tool_path
 from .state import TOOLS
 from .switch_page import SW_PERSIST
@@ -96,7 +97,7 @@ class PersistMixin:
         for i, box in enumerate(self._org_recursive):
             self._persist_bind(f"org.recursive.{i}", box)
         for name in ("chd_compression", "cso_speed", "rvz_scrub", "rvz_level", "thread_budget", "io_mode", "temp_dir",
-                     "ps3_output", "pkg_layout", "pkg_merge", "pkg_zar", "ps5_kyty", "notify_check", "reduce_motion", "compact_box", "em_view_cards", "dl_watch", "dl_command", *SW_PERSIST):
+                     "ps3_output", "pkg_layout", "pkg_merge", "pkg_zar", "ps5_kyty", "notify_check", "reduce_motion", "cover_region_1", "cover_region_2", "cover_region_3", "cover_region_4", "compact_box", "em_view_cards", "dl_watch", "dl_command", *SW_PERSIST):
             if (widget := getattr(self, name, None)) is not None:
                 self._persist_bind(name, widget)
         for key, box in getattr(self, "_pin_boxes", {}).items():  # which tools are pinned to the sidebar
@@ -141,6 +142,11 @@ class PersistMixin:
             for card in page.findChildren(Expander):
                 if (state := folded.get(self._card_id(key, card))) is not None:
                     card.header.setChecked(bool(state))
+        if calm_pending(data):  # the first start with the calmer layout: fold the cards that hold the options, once
+            for page in self.pages.values():
+                for card in page.findChildren(Expander):
+                    if card.header.text() in FOLD_TITLES:
+                        card.header.setChecked(False)
         geometry = data.get("geometry")
         if isinstance(geometry, str):
             self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
@@ -171,6 +177,7 @@ class PersistMixin:
         data["values"] = values
         data["cards"] = {self._card_id(key, card): card.header.isChecked()
                          for key, page in self.pages.items() for card in page.findChildren(Expander)}
+        data["layout"] = LAYOUT  # the calmer layout has been applied: from here what is open stays open
         data["geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
         if getattr(self, "_panel_mode", "conv") == "conv":
             data["splitter"] = self._p_splitter = list(self.splitter.sizes())

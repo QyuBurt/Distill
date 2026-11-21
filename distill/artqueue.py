@@ -19,8 +19,10 @@ class ArtQueue:
 
     def __init__(self, fetch: Callable[..., Any], deliver: Callable[[Any, Any], None], *, workers: int = 6,
                  busy: type[BaseException] | tuple[type[BaseException], ...] = (), on_busy: Callable[[Any], None] | None = None,
-                 pause: float = 0.05, backoff: float = 3.0, sleep: Callable[[float], None] = time.sleep):
+                 pause: float = 0.05, backoff: float = 3.0, sleep: Callable[[float], None] = time.sleep,
+                 on_start: Callable[[Any], None] | None = None, max_pending: int = 0, on_drop: Callable[[list[Any]], None] | None = None):
         self._fetch, self._deliver, self._on_busy = fetch, deliver, on_busy
+        self._on_start, self._max_pending, self._on_drop = on_start, max_pending, on_drop
         self._workers, self._busy, self._pause, self._backoff, self._sleep = workers, busy, pause, backoff, sleep
         self._items: deque[tuple[Any, tuple]] = deque()
         self._lock = threading.Lock()
@@ -37,13 +39,33 @@ class ArtQueue:
             return self._running
 
     def add(self, item: Any, *args: Any) -> None:
+        dropped: list[Any] = []
         with self._lock:
             self._items.append((item, args))
+            while self._max_pending and len(self._items) > self._max_pending:  # scrolled far past: the oldest asks (the least likely on screen) go
+                dropped.append(self._items.popleft()[0])
             start = self._running < self._workers
             if start:
                 self._running += 1
+        self._dropped(dropped)
         if start:
             threading.Thread(target=self._work, daemon=True).start()
+
+    def clear(self) -> list[Any]:
+        """Take everything that has not begun off the queue (what is being fetched this moment finishes). Returns the items, so a caller can
+        forget it asked for them and ask again if they are still wanted."""
+        with self._lock:
+            gone = [item for item, _args in self._items]
+            self._items.clear()
+        self._dropped(gone)
+        return gone
+
+    def _dropped(self, items: list[Any]) -> None:
+        if items and self._on_drop is not None:
+            try:
+                self._on_drop(items)
+            except Exception:
+                pass
 
     def _work(self) -> None:
         while True:
@@ -52,6 +74,11 @@ class ArtQueue:
                     self._running -= 1
                     return
                 item, args = self._items.pop()
+            if self._on_start is not None:
+                try:
+                    self._on_start(item)
+                except Exception:
+                    pass
             try:
                 found = self._fetch(item, *args)
             except self._busy:

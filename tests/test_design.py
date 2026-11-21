@@ -12,7 +12,8 @@ ASSETS = Path(__file__).resolve().parent.parent / "distill" / "assets"
 class NavTests(unittest.TestCase):
     def test_sidebar_groups_and_names_follow_the_design(self):
         names = {group: [text for _key, text in items] for group, items in NAV_GROUPS}
-        self.assertEqual(list(names), ["GAMES", "DOWNLOADS", "CONVERT & COMPRESS", "ORGANISE LIBRARY"])
+        self.assertEqual(list(names), ["GAMES", "DOWNLOADS", "TOOLS", "CONVERT & COMPRESS", "ORGANISE LIBRARY"])
+        self.assertEqual(names["TOOLS"], ["All Tools"])
         self.assertEqual(names["CONVERT & COMPRESS"], [
             "CHD Compression", "CSO (PSP Images)", "PS3 ISO / Folder", "PS4 PKG Manager", "PS5 PKG Manager",
             "RVZ (Dolphin)", "Switch NSZ / NUP", "Xbox ISO / XEX", "ZAR Archive Tool"])
@@ -23,7 +24,7 @@ class NavTests(unittest.TestCase):
 
     def test_every_page_has_a_title_blurb_detail_and_chip(self):
         keys = [key for _g, items in NAV_GROUPS for key, _t in items]
-        self.assertEqual(len(keys), 19)
+        self.assertEqual(len(keys), 20)
         for key in keys:
             self.assertTrue(PAGE_INFO[key][0] and PAGE_INFO[key][1], key)
             self.assertTrue(PAGE_DETAIL[key], key)
@@ -32,7 +33,7 @@ class NavTests(unittest.TestCase):
     def test_page_titles_are_consistent(self):
         titles = {key: info[0] for key, info in PAGE_INFO.items()}
         self.assertEqual(titles, {
-            "chd": "CHD Compression", "cso": "CSO Compression (PSP)", "ps3": "PS3 ISO & Folder Converter",
+            "convert": "All Tools", "chd": "CHD Compression", "cso": "CSO Compression (PSP)", "ps3": "PS3 ISO & Folder Converter",
             "pkg": "PS4 PKG Manager", "pkg5": "PS5 PKG Manager", "rvz": "RVZ Compression (Dolphin)",
             "switch": "Switch NSZ / NUP Converter", "xbox": "Xbox ISO / XEX Repacker", "zar": "ZAR Archive Compressor", "fix": "Fix Names & Discs",
             "extras": "Remove Extras & Junk", "patch": "Patch ROMs", "bysystem": "Sort by System", "report": "Library Report",

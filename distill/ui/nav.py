@@ -7,6 +7,7 @@ from ..orgpages import ORG_PAGES
 NAV_GROUPS = (
     ("GAMES", (("games", "Games"), ("recomps", "PC Recomps"), ("emus", "Emulators"))),
     ("DOWNLOADS", (("dl", "Files & Torrents"), ("sound", "Distill Resonance"))),
+    ("TOOLS", (("convert", "All Tools"),)),  # every converter and organiser on one page, each with a pin for the sidebar
     ("CONVERT & COMPRESS", (("chd", "CHD Compression"), ("cso", "CSO (PSP Images)"), ("ps3", "PS3 ISO / Folder"),
                             ("pkg", "PS4 PKG Manager"), ("pkg5", "PS5 PKG Manager"), ("rvz", "RVZ (Dolphin)"),
                             ("switch", "Switch NSZ / NUP"), ("xbox", "Xbox ISO / XEX"), ("zar", "ZAR Archive Tool"))),
@@ -16,6 +17,7 @@ NAV_GROUPS = (
 
 # (title, blurb) under each page's name, as designed
 PAGE_INFO = {
+    "convert": ("All Tools", "Every converter and library organiser in one place. Open one, and pin the ones you use to the sidebar."),
     "chd": ("CHD Compression", "Convert CD and DVD images (PS1, PS2, Saturn, Dreamcast, CD-i and more) to compressed "
                               "CHD with chdman."),
     "cso": ("CSO Compression (PSP)", "Compress PlayStation Portable ISO dumps into smaller .cso files with "
@@ -56,6 +58,9 @@ PAGE_INFO = {
 
 # what each page actually does, in the app's own words: shown when hovering the page's description
 PAGE_DETAIL = {
+    "convert": "One card for each converter and library organiser, grouped by what it does, with what goes in, what comes out and whether "
+               "its tool is ready. Click a card to open its page. The pin at the top right of a card puts that page in the sidebar "
+               "(or takes it out); Settings > Sidebar does the same.",
     "chd": PAGE_INFO["chd"][1],
     "cso": "Convert PSP discs to compressed CSO with maxcso.",
     "pkg": "Extract PS4 .pkg files into game folders with ShadPS4Plus PKG_Extractor. Can merge each game's updates in "
@@ -88,6 +93,7 @@ PAGE_DETAIL = {
 
 # the small label above each page's title
 PAGE_CHIP = {
+    "convert": "TOOLS",
     "chd": "CHD", "cso": "PSP", "pkg": "PS4", "pkg5": "PS5", "ps3": "PS3", "rvz": "GAMECUBE / WII",
     "xbox": "XBOX", "switch": "SWITCH", "zar": "UTILITY", "fix": "ORGANISE", "extras": "ORGANISE", "patch": "ORGANISE", "bysystem": "ORGANISE",
     "report": "ANALYTICS", "dl": "DOWNLOAD", "sound": "AUDIO", "games": "GAMES", "recomps": "GAMES", "emus": "GAMES",

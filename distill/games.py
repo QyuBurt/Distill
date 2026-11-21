@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import launchprofile as lp
 from . import libretro_cores as lc
 from . import recomps as rc
 from . import systems as sysmod
@@ -93,6 +94,10 @@ class Game:
     remote_name: str = ""  # its file name there
     remote_files: int = 0  # how many files it has there (more than 1: installing unpacks a zip)
     cover_url: str = ""  # where the server keeps its cover
+    tags: str = ""  # the player's own labels ('co-op', 'couch', 'kids'), joined with '|' (see clean_tags)
+    lb_id: str = ""  # the LaunchBox Games Database entry this game was matched to ('' = none yet): its art and details come from there
+    lb_match: str = ""  # how: 'auto' (a clear match), 'confirmed' (the player picked it), 'review' (several fit: waits for the player), 'none' (nothing fits), '' (not tried)
+    lb_tried: float = 0.0  # when it was last looked for (a game with no match is looked for again after a week)
 
     @property
     def remote(self) -> bool:
@@ -109,6 +114,27 @@ class Game:
         return self.custom_title or self.title
 
 
+# ---- tags ---------------------------------------------------------------------------------------------------------------
+MAX_TAGS, MAX_TAG_LEN = 30, 40
+
+
+def split_tags(stored: str) -> list[str]:
+    """A game's tags as a list, from the form they are stored in."""
+    return [t for t in (stored or "").split("|") if t]
+
+
+def clean_tags(text: str | Iterable[str]) -> str:
+    """Tags as they are stored: what the player typed (separated by commas, semicolons or new lines) with spaces tidied, empty ones dropped
+    and a tag written twice (in any case) kept once, the first spelling winning; at most MAX_TAGS, each at most MAX_TAG_LEN long."""
+    parts = re.split(r"[,;\n|]", text) if isinstance(text, str) else [p for t in text for p in re.split(r"[,;\n|]", t)]
+    seen: dict[str, str] = {}
+    for part in parts:
+        tag = " ".join(part.split())[:MAX_TAG_LEN].strip()
+        if tag and tag.casefold() not in seen:
+            seen[tag.casefold()] = tag
+    return "|".join(list(seen.values())[:MAX_TAGS])
+
+
 # ---- the saved library ------------------------------------------------------------------------------------------------
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, path TEXT NOT NULL, title TEXT NOT NULL, system TEXT NOT NULL, kind TEXT,
@@ -116,7 +142,7 @@ CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, path TEXT NOT NULL, title
 CREATE TABLE IF NOT EXISTS user (id TEXT PRIMARY KEY, custom_title TEXT DEFAULT '', favorite INTEGER DEFAULT 0,
     last_played REAL DEFAULT 0, play_count INTEGER DEFAULT 0, emulator TEXT DEFAULT '', custom_system TEXT DEFAULT '', developer TEXT DEFAULT '',
     publisher TEXT DEFAULT '', year TEXT DEFAULT '', genre TEXT DEFAULT '', hidden INTEGER DEFAULT 0, play_seconds REAL DEFAULT 0, last_session REAL DEFAULT 0,
-    rating INTEGER DEFAULT 0, status TEXT DEFAULT '', notes TEXT DEFAULT '');
+    rating INTEGER DEFAULT 0, status TEXT DEFAULT '', notes TEXT DEFAULT '', tags TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS collection_games (cid INTEGER NOT NULL, gid TEXT NOT NULL, PRIMARY KEY (cid, gid));
@@ -127,7 +153,8 @@ CREATE INDEX IF NOT EXISTS collection_games_gid ON collection_games (gid);  -- a
 """
 _USER_COLUMNS = {"custom_system": "TEXT DEFAULT ''", "developer": "TEXT DEFAULT ''", "publisher": "TEXT DEFAULT ''", "year": "TEXT DEFAULT ''",
                  "genre": "TEXT DEFAULT ''", "hidden": "INTEGER DEFAULT 0", "play_seconds": "REAL DEFAULT 0", "last_session": "REAL DEFAULT 0",
-                 "rating": "INTEGER DEFAULT 0", "status": "TEXT DEFAULT ''", "notes": "TEXT DEFAULT ''"}  # added after the first release: older games.db files get them on open
+                 "rating": "INTEGER DEFAULT 0", "status": "TEXT DEFAULT ''", "notes": "TEXT DEFAULT ''", "tags": "TEXT DEFAULT ''",
+                 "lb_id": "TEXT DEFAULT ''", "lb_match": "TEXT DEFAULT ''", "lb_tried": "REAL DEFAULT 0"}  # added after the first release: older games.db files get them on open
 _GAME_COLUMNS = {"discs": "INTEGER DEFAULT 0", "source": "TEXT DEFAULT ''", "remote_id": "TEXT DEFAULT ''", "remote_name": "TEXT DEFAULT ''",
                  "remote_files": "INTEGER DEFAULT 0", "cover_url": "TEXT DEFAULT ''"}  # the same for the scan's own table
 _SYS = "COALESCE(NULLIF(u.custom_system, ''), g.system)"  # the platform the player chose, else the one the scan found
@@ -137,14 +164,15 @@ _SELECT = (f"SELECT g.id, g.title, {_SYS}, g.path, g.kind, g.region, g.size, g.m
            "COALESCE(u.custom_title, ''), COALESCE(u.developer, ''), COALESCE(u.publisher, ''), COALESCE(u.year, ''), COALESCE(u.genre, ''), "
            "COALESCE(u.custom_system, ''), COALESCE(g.added, 0), COALESCE(u.play_seconds, 0), COALESCE(u.last_session, 0), COALESCE(g.discs, 0), "
            "COALESCE(u.rating, 0), COALESCE(u.status, ''), COALESCE(u.notes, ''), "
-           "COALESCE(g.source, ''), COALESCE(g.remote_id, ''), COALESCE(g.remote_name, ''), COALESCE(g.remote_files, 0), COALESCE(g.cover_url, '') "
+           "COALESCE(g.source, ''), COALESCE(g.remote_id, ''), COALESCE(g.remote_name, ''), COALESCE(g.remote_files, 0), COALESCE(g.cover_url, ''), COALESCE(u.tags, ''), "
+           "COALESCE(u.lb_id, ''), COALESCE(u.lb_match, ''), COALESCE(u.lb_tried, 0) "
            "FROM games g LEFT JOIN user u ON u.id = g.id")
 
 
 def _game(row: tuple) -> Game:
     return Game(row[0], row[1], row[2], row[3], row[4] or "", row[5] or "", int(row[6] or 0), float(row[7] or 0), row[8] or "",
                 bool(row[9]), float(row[10]), int(row[11]), row[12], row[13], row[14], row[15], row[16], row[17], row[18], float(row[19]), float(row[20]), float(row[21]), int(row[22]),
-                int(row[23] or 0), row[24] or "", row[25] or "", row[26] or "", row[27] or "", row[28] or "", int(row[29] or 0), row[30] or "")
+                int(row[23] or 0), row[24] or "", row[25] or "", row[26] or "", row[27] or "", row[28] or "", int(row[29] or 0), row[30] or "", row[31] or "", row[32] or "", row[33] or "", float(row[34] or 0))
 
 
 class GameStore:
@@ -253,15 +281,15 @@ class GameStore:
         favourite, the play time and count added up, the latest play, and a title, platform or details they set; and a place in the same
         collections."""
         rows = [r for o in old if (r := db.execute("SELECT custom_title, favorite, last_played, play_count, emulator, custom_system, developer, publisher, "
-                                                    "year, genre, hidden, play_seconds, last_session, rating, status, notes FROM user WHERE id = ?", (o,)).fetchone())]
+                                                    "year, genre, hidden, play_seconds, last_session, rating, status, notes, tags FROM user WHERE id = ?", (o,)).fetchone())]
         if rows:
             first = lambda i: next((r[i] for r in rows if r[i]), "")  # noqa: E731
             db.execute("INSERT OR IGNORE INTO user (id) VALUES (?)", (gid,))
             db.execute("UPDATE user SET custom_title=?, favorite=?, last_played=?, play_count=?, emulator=?, custom_system=?, developer=?, publisher=?, "
-                       "year=?, genre=?, hidden=?, play_seconds=?, last_session=?, rating=?, status=?, notes=? WHERE id = ?",
+                       "year=?, genre=?, hidden=?, play_seconds=?, last_session=?, rating=?, status=?, notes=?, tags=? WHERE id = ?",
                        (first(0), max(r[1] or 0 for r in rows), max(r[2] or 0 for r in rows), sum(r[3] or 0 for r in rows), first(4), first(5), first(6),
                         first(7), first(8), first(9), max(r[10] or 0 for r in rows), sum(r[11] or 0 for r in rows),
-                        max(rows, key=lambda r: r[2] or 0)[12] or 0, max(r[13] or 0 for r in rows), first(14), first(15), gid))
+                        max(rows, key=lambda r: r[2] or 0)[12] or 0, max(r[13] or 0 for r in rows), first(14), first(15), clean_tags([r[16] or "" for r in rows]), gid))
         for o in old:
             db.execute("INSERT OR IGNORE INTO collection_games (cid, gid) SELECT cid, ? FROM collection_games WHERE gid = ?", (gid, o))
             db.execute("DELETE FROM collection_games WHERE gid = ?", (o,))
@@ -295,7 +323,7 @@ class GameStore:
             games = [_game(r) for r in db.execute(sql, args)]
         if query.strip():
             words = [w for w in re.split(r"\s+", query.casefold().strip()) if w]
-            games = [g for g in games if all(w in g.name.casefold() or w in g.system.casefold() or w in g.developer.casefold() or w in g.publisher.casefold() or w in g.notes.casefold()
+            games = [g for g in games if all(w in g.name.casefold() or w in g.system.casefold() or w in g.developer.casefold() or w in g.publisher.casefold() or w in g.notes.casefold() or w in g.tags.casefold()
                                              for w in words)]
         if filters:
             games = [g for g in games if matches_filters(g, filters)]
@@ -435,12 +463,12 @@ class GameStore:
 
     def update_details(self, gid: str, *, title: str | None = None, system: str | None = None, developer: str | None = None,
                        publisher: str | None = None, year: str | None = None, genre: str | None = None, rating: int | None = None,
-                       status: str | None = None, notes: str | None = None) -> None:
+                       status: str | None = None, notes: str | None = None, tags: str | None = None) -> None:
         """Save what the edit window collected. A field left as None is not touched; '' clears it (the title and platform then go back to what
         the file name and the scan say). The rating is clamped to 0-5 and an unknown status is stored as none."""
         fields = {"custom_title": title, "custom_system": system, "developer": developer, "publisher": publisher, "year": year, "genre": genre,
                   "status": None if status is None else (status.strip() if status.strip() in STATUSES else ""),
-                  "notes": None if notes is None else notes.strip()}
+                  "notes": None if notes is None else notes.strip(), "tags": None if tags is None else clean_tags(tags)}
         fields = {k: v.strip() if isinstance(v, str) and k != "notes" else v for k, v in fields.items() if v is not None}
         if "custom_system" in fields:
             fields["custom_system"] = canonical_system(fields["custom_system"])
@@ -450,7 +478,16 @@ class GameStore:
             return
         with self._db() as db:
             self._touch(db, gid)
+            had = db.execute("SELECT COALESCE(custom_title, ''), COALESCE(custom_system, '') FROM user WHERE id = ?", (gid,)).fetchone() or ("", "")
             db.execute(f"UPDATE user SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", [*fields.values(), gid])
+            if fields.get("custom_title", had[0]) != had[0] or fields.get("custom_system", had[1]) != had[1]:  # renamed, or put on another platform
+                db.execute("UPDATE user SET lb_id = '', lb_match = '', lb_tried = 0 WHERE id = ? AND COALESCE(lb_match, '') != 'confirmed'", (gid,))
+
+    def set_match(self, gid: str, lb_id: str, state: str, tried: float | None = None) -> None:
+        """Remember what looking the game up in the LaunchBox Games Database found: its entry ('' for none) and how sure that is."""
+        with self._db() as db:
+            self._touch(db, gid)
+            db.execute("UPDATE user SET lb_id = ?, lb_match = ?, lb_tried = ? WHERE id = ?", (lb_id, state, time.time() if tried is None else tried, gid))
 
     def set_system_many(self, ids: Iterable[str], system: str) -> None:
         """Put games on a platform ('' = back to the one the scan found)."""
@@ -476,6 +513,29 @@ class GameStore:
                 self._touch(db, gid)
                 db.execute(sql, [*fields.values(), gid])
         return len(ids)
+
+    def profile(self, gid: str) -> lp.Profile:
+        """The game's own launch settings (an empty profile when it has none)."""
+        return lp.Profile.from_json(self.setting(f"profile:{gid}", ""))
+
+    def set_profile(self, gid: str, profile: lp.Profile) -> None:
+        self.set_setting(f"profile:{gid}", profile.to_json())
+
+    def tag_many(self, ids: Iterable[str], add: str = "", remove: str = "") -> int:
+        """Add tags to many games at once, and/or take tags off them (compared without regard to case). Returns how many games changed."""
+        adding, removing = split_tags(clean_tags(add)), {t.casefold() for t in split_tags(clean_tags(remove))}
+        ids = list(dict.fromkeys(ids))
+        changed = 0
+        with self._db() as db:
+            for gid in ids:
+                row = db.execute("SELECT COALESCE(tags, '') FROM user WHERE id = ?", (gid,)).fetchone()
+                before = row[0] if row else ""
+                after = clean_tags([t for t in split_tags(before) if t.casefold() not in removing] + adding)
+                if after != before:
+                    self._touch(db, gid)
+                    db.execute("UPDATE user SET tags = ? WHERE id = ?", (after, gid))
+                    changed += 1
+        return changed
 
     def set_favorite_many(self, ids: Iterable[str], on: bool) -> None:
         with self._db() as db:
@@ -640,6 +700,8 @@ def matches_filters(g: Game, f: dict) -> bool:
         return False
     if f.get("region") and g.region.casefold() != f["region"].casefold():
         return False
+    if f.get("tag") and f["tag"].casefold() not in (t.casefold() for t in split_tags(g.tags)):
+        return False
     if f.get("status") == "none" and g.status in STATUSES:
         return False
     if f.get("status") in STATUSES and g.status != f["status"]:
@@ -686,7 +748,7 @@ def clean_rules(rules: dict | None) -> dict:
 
 def facets(games: Iterable[Game]) -> dict[str, list[tuple[str, int]]]:
     """For each filter, the values the games have and how many games have each (most first; decades newest first)."""
-    counts: dict[str, dict[str, int]] = {k: {} for k in ("genre", "decade", "developer", "publisher", "region")}
+    counts: dict[str, dict[str, int]] = {k: {} for k in ("genre", "decade", "developer", "publisher", "region", "tag")}
 
     def bump(kind: str, value: str) -> None:
         if value:
@@ -695,6 +757,8 @@ def facets(games: Iterable[Game]) -> dict[str, list[tuple[str, int]]]:
     for g in games:
         for genre in _split_genres(g.genre):
             bump("genre", genre)
+        for tag in split_tags(g.tags):
+            bump("tag", tag)
         bump("decade", decade_of(g.year))
         bump("developer", g.developer.strip())
         bump("publisher", g.publisher.strip())
@@ -1113,6 +1177,11 @@ class LaunchPlan:
     cmd: list[str]
     cwd: str
     label: str  # 'RetroArch · mGBA'
+    env: dict[str, str] | None = None  # extra environment variables for the program (from the game's launch settings)
+    pre: str = ""  # a command to run and wait for before starting it
+    post: str = ""  # a command to run after it closes
+    game_path: str = ""  # the game's file, for {rom} {dir} {name} in `pre` and `post`
+    admin: bool = False  # start it as administrator (Windows)
 
 
 @dataclass(slots=True)
@@ -1190,8 +1259,45 @@ def standalone_plan(game: Game, s: Standalone) -> LaunchPlan:
     return LaunchPlan([str(exe), *launch_args(template, game)], str(exe.parent), s.name)
 
 
+def _fill(template: str, game: Game) -> str:
+    """{rom}, {dir} and {name} filled in, as they are (for a folder or words that are split afterwards)."""
+    path = Path(game.path)
+    return template.replace("{rom}", str(path)).replace("{dir}", str(path.parent)).replace("{name}", path.stem)
+
+
+def apply_profile(plan: LaunchPlan, profile: lp.Profile | None, game: Game, standalone: bool) -> LaunchPlan:
+    """The plan changed by the game's own launch settings (see launchprofile.py): its options (replacing an emulator of its own's, added to
+    RetroArch's), working folder, environment, commands before and after, and administrator."""
+    if profile is None or profile.empty():
+        return plan
+    cmd = list(plan.cmd)
+    if profile.args.strip():
+        if standalone:
+            cut = cmd.index("--args") + 1 if cmd and cmd[0] == "open" and "--args" in cmd else 1  # (everything after the program is replaced)
+            cmd = [*cmd[:cut], *launch_args(profile.args, game)]
+        else:
+            try:
+                cmd += [_fill(word, game) for word in shlex.split(profile.args)]
+            except ValueError as exc:
+                raise GameError(f"This game's launch options have a quote that isn't closed: {exc}") from exc
+    cwd = plan.cwd
+    if profile.cwd.strip():
+        cwd = _fill(profile.cwd.strip(), game)
+        if not Path(cwd).is_dir():
+            raise GameError(f"The working folder set for this game doesn't exist: {cwd}")
+    return replace(plan, cmd=cmd, cwd=cwd, env=lp.parse_env(profile.env) or None, pre=profile.pre.strip(), post=profile.post.strip(), game_path=game.path,
+                   admin=profile.admin and sys.platform == "win32")
+
+
 def plan_launch(game: Game, choice: str, setup: RetroSetup | None, default: str = "", emus: dict[str, Standalone] | None = None,
-                resume: bool = False) -> LaunchPlan:
+                resume: bool = False, profile: lp.Profile | None = None) -> LaunchPlan:
+    """What to run for a game, changed by the game's own launch settings when it has them (`profile`). See `_plan_launch`."""
+    plan = _plan_launch(game, choice, setup, default, emus, resume)
+    return apply_profile(plan, profile, game, not plan.label.startswith("RetroArch"))
+
+
+def _plan_launch(game: Game, choice: str, setup: RetroSetup | None, default: str = "", emus: dict[str, Standalone] | None = None,
+                 resume: bool = False) -> LaunchPlan:
     """What to run for a game. `choice` is the game's own pick, `default` the system's; with neither, the best installed RetroArch core, or
     else an installed emulator of its own that plays the platform. With `resume` the game starts from its newest save state (RetroArch only).
     Raises GameError with something the player can act on."""
@@ -1409,8 +1515,9 @@ def fmt_playtime(seconds: float) -> str:
 MIN_SESSION = 10.0  # seconds: shorter than this is a launcher handing over to another program, not a game being played
 
 
-def watch_session(proc, on_done: Callable[[float], None]) -> threading.Thread:
-    """Wait (in the background) for the emulator to close, then report how long it ran, unless that was too short to be a game."""
+def watch_session(proc, on_done: Callable[[float], None], after: Callable[[], None] | None = None) -> threading.Thread:
+    """Wait (in the background) for the emulator to close, then report how long it ran, unless that was too short to be a game. `after` is
+    called first, however short the session (the game's own "run after" command)."""
     start = time.time()
 
     def run() -> None:
@@ -1418,6 +1525,11 @@ def watch_session(proc, on_done: Callable[[float], None]) -> threading.Thread:
             proc.wait()
         except Exception:  # a process that can't be waited on just isn't timed
             return
+        if after is not None:
+            try:
+                after()
+            except Exception:  # a command that fails after the game is nobody's business but its own
+                pass
         took = time.time() - start
         if took >= MIN_SESSION:
             on_done(took)
@@ -1427,17 +1539,43 @@ def watch_session(proc, on_done: Callable[[float], None]) -> threading.Thread:
     return thread
 
 
-def spawn(plan: LaunchPlan, detach: bool = True) -> subprocess.Popen:
+def spawn(plan: LaunchPlan, detach: bool = True) -> subprocess.Popen | None:
     """Start the emulator on its own, so closing Distill doesn't close the game. With `detach` off it stays in the caller's process tree
-    instead (what `distill --launch` wants: Sunshine ends the game by ending that tree when the stream stops)."""
+    instead (what `distill --launch` wants: Sunshine ends the game by ending that tree when the stream stops). The game's "run before" command
+    goes first (a failing one stops the game starting). Started as administrator there is no process to give back: None."""
+    if plan.pre:
+        try:
+            lp.run_hook(plan.pre, plan.game_path, plan.cwd, True, what="The command to run before the game")
+        except lp.HookError as exc:
+            raise GameError(str(exc)) from exc
+    if plan.admin and sys.platform == "win32":
+        return _spawn_admin(plan)
     flags = 0
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if sys.platform == "win32" and detach:
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    env = {**os.environ, **plan.env} if plan.env else None
     try:
-        return subprocess.Popen(plan.cmd, cwd=plan.cwd, creationflags=flags, close_fds=True, start_new_session=(detach and sys.platform != "win32"), **quiet)
+        return subprocess.Popen(plan.cmd, cwd=plan.cwd, env=env, creationflags=flags, close_fds=True, start_new_session=(detach and sys.platform != "win32"), **quiet)
     except OSError as exc:
         raise GameError(f"Couldn't start it: {exc}") from exc
+
+
+def _spawn_admin(plan: LaunchPlan) -> None:  # pragma: no cover - Windows only
+    """Ask Windows to start the program elevated (it shows its own permission prompt). Nothing is handed back to wait on, so the session
+    can't be timed, and environment variables can't be passed."""
+    import ctypes  # noqa: PLC0415
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", plan.cmd[0], subprocess.list2cmdline(plan.cmd[1:]), plan.cwd or None, 1)
+    if result <= 32:
+        raise GameError("Windows didn't start it as administrator (the permission prompt may have been declined).")
+    return None
+
+
+def post_hook(plan: LaunchPlan) -> Callable[[], None] | None:
+    """What to call when the game has closed: the game's "run after" command, or None when it has none."""
+    if not plan.post:
+        return None
+    return lambda: lp.run_hook(plan.post, plan.game_path, plan.cwd, wait=False)
 
 
 # ---- details and covers (LaunchBox Games Database) -------------------------------------------------------------------
@@ -1467,7 +1605,7 @@ class GameShim:
 
 
 def shim(game: Game) -> GameShim:
-    return GameShim(game.id, game.name, LB_PLATFORM_NAMES.get(game.system, "" if game.system == UNKNOWN else game.system))
+    return GameShim(game.id, game.name, LB_PLATFORM_NAMES.get(game.system, "" if game.system == UNKNOWN else game.system), launchbox_id=game.lb_id)
 
 
 def fetch_cover(game: Game, sgdb_key: str = "", retry: bool = False) -> Path | None:
@@ -1580,6 +1718,15 @@ def launchbox_details(game: Game, store: rc.Store | None = None, force: bool = F
     key = f"lbg1:{game.id}"
     if store and not force and (hit := store.cache_get(key, rc.OVERVIEW_TTL)) is not None and isinstance(hit, dict):
         return Details(**{k: str(hit.get(k, "")) for k in Details.__slots__})
+    if game.lb_id:  # matched: read that entry's page itself, no search
+        try:
+            detail = rc._get(rc._LB_DETAIL + game.lb_id, timeout=15).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError):
+            detail = ""
+        if detail and not (parsed := parse_launchbox_details(detail)).empty():
+            if store:
+                store.cache_put(key, parsed.as_dict())
+            return parsed
     s = shim(game)
     result, reached = Details(), False
     for title in rc._title_fallbacks(s.game):
@@ -1661,6 +1808,9 @@ def parse_launchbox_match(page: str, lb_id: str = "", slug: str = "") -> Match:
     lines = _page_lines(page)
     for i, line in enumerate(lines[:-1]):  # the last one: 'Platform' can also be a genre, which comes earlier on the page
         if line.rstrip(":").strip().lower() == "platform":
+            nlow = lines[i + 1].rstrip(":").strip().lower()
+            if nlow in _LABELS or nlow in _STOPS or nlow.startswith("alternate names"):
+                continue  # the genre called 'Platform' (a label follows it), not the Platform label
             platform = lines[i + 1]
     title = _page_title(page) or slug.replace("-", " ").title()
     year = (m[1] if (m := _YEAR.search(d.released)) else "")

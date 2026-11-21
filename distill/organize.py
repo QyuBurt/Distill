@@ -24,6 +24,7 @@ from .fingerprint import find_same_content
 from .frontends import PRESET_NONE, folder_for
 from .formats import associated_files, playlist_discs
 from .library import LibraryEntry
+from .ps3games import is_ps3_folder, read_ps3_folder
 from .models import fmt_size
 from .onegr import DEFAULT_PRIORITY, choose as onegr_choose, parse_priority
 from .system import file_size
@@ -1216,7 +1217,18 @@ def find_library(root: Path, recursive: bool, opts: dict, stop: threading.Event)
     playlists: list[tuple[Path, Path, list[Path]]] = []  # (folder, an .m3u, the discs it lists)
     claimed: set[str] = set()  # the discs that have a playlist: they are one game together, not a game each
     key = lambda p: os.path.normcase(os.path.normpath(str(p)))  # noqa: E731
-    for folder, _subdirs, names in _walk(root, recursive, stop):
+    ps3_dirs: list[str] = []  # PS3 game folders found so far: what is inside one (its INSTALL.PKG, its updates) is not a game of its own
+    for folder, subdirs, names in _walk(root, recursive, stop):
+        here = key(folder) + os.sep
+        if any(here.startswith(d) for d in ps3_dirs):
+            continue
+        if is_ps3_folder(folder, subdirs, names) and (ps3 := read_ps3_folder(folder)) is not None:
+            ps3_dirs.append(here)
+            entries.append(LibraryEntry(
+                ps3.title, "PlayStation 3", "FOLDER", ps3.region or region_of(ps3.root.name), file_size(ps3.root), ps3.modified,
+                str(ps3.root.parent.relative_to(root)) if ps3.root != root and _inside(ps3.root.parent, root) and ps3.root.parent != root else "",
+                str(ps3.eboot)))
+            continue
         mains, _owned = _disc_mains(folder, names)
         mains = [m for m in mains if _is_game_file(m, LIBRARY_EXTENSIONS)]
         mains += [folder / n for n in names if Path(n).suffix.lower() not in ORGANIZE_EXTENSIONS

@@ -347,3 +347,56 @@ def fetch_library(url: str, credential: str, folder: Path, note: Callable[[str],
     """Every game on the server as catalog entries, with the paths they would be saved at."""
     client = Client(url, credential)
     return [to_entry(r, client.base, folder) for r in client.roms(note, stop)]
+
+
+# ---- taking an installed game off this computer ------------------------------------------------------------------------
+@dataclass(slots=True)
+class Footprint:
+    """What an installed RomM game takes up on disk: what an uninstall would delete (a file, or a game's own folder), and how big that is."""
+    target: Path
+    size: int
+    is_folder: bool
+
+
+def footprint(path: str | Path, files: int, root: str | Path) -> Footprint | None:
+    """Where a RomM game lives on disk, or None when it isn't installed or isn't inside `root` (the RomM install folder), so that nothing
+    outside it is ever sized or deleted. A game of several files has its own folder, <root>/<platform>/<game>/ (all of it goes); a
+    single-file game is just its file, and the platform folder around it stays."""
+    path, root = Path(path), Path(root)
+    try:
+        resolved, base = path.resolve(), root.resolve()
+    except OSError:
+        return None
+    if base not in resolved.parents or not path.is_file():
+        return None
+    if files > 1:
+        folder = resolved.parent
+        if folder.parent != base and base in folder.parents:  # a folder below <root>/<platform>: the game's own
+            total = 0
+            for p in folder.rglob("*"):
+                try:
+                    total += p.stat().st_size if p.is_file() else 0
+                except OSError:
+                    pass
+            return Footprint(folder, total, True)
+    try:
+        return Footprint(resolved, resolved.stat().st_size, False)
+    except OSError:
+        return None
+
+
+def uninstall(path: str | Path, files: int, root: str | Path) -> int:
+    """Delete an installed game's files (never the game's entry in the library). Returns the bytes freed. Raises RommError, in words, when
+    the game isn't inside the install folder or can't be deleted (in use by an emulator, say)."""
+    fp = footprint(path, files, root)
+    if fp is None:
+        raise RommError("That game isn't in the RomM install folder, so Distill won't delete it.")
+    try:
+        if fp.is_folder:
+            import shutil  # noqa: PLC0415
+            shutil.rmtree(fp.target)
+        else:
+            fp.target.unlink()
+    except OSError as exc:
+        raise RommError(f"Couldn't delete {fp.target.name}: {exc.strerror or exc}") from exc
+    return fp.size

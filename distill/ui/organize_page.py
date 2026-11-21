@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..constants import APP_NAME, APP_VERSION
-from ..models import fmt_size
+from ..orgreview import is_destination, note_tone, OK, review_chips
+from ..pagesummary import options_summary
 from ..library import write_report
 from ..organize import (
     apply_findings, Finding, report_rows, run_log_file, save_report, undo_depth, undo_last,
 )
 from ..orgpages import newest_undo_step, ORG_PAGES, ORG_TOOLS, OrgPage, OrgTool, scan_page
+from .review_bar import ReviewBar
 from .state import LABEL_W, OrgState
 from .theme import T
 from . import motion
@@ -177,15 +179,20 @@ class OrganizeMixin:
                             self._org_add_option(st, card.lay, option)
                 lay.addWidget(card)
         elif names:
-            card = Expander("Options", expanded=True)
-            for option in page_def.steps[0].options:
+            card = Expander("Options", expanded=False)  # folded to "Defaults", or how many have been changed from them
+            options = page_def.steps[0].options
+            for option in options:
                 self._org_add_option(st, card.body_lay, option)
+            card.set_summary(lambda: options_summary(options, st.opts))
             lay.addWidget(card)
 
         results = Card("Scan Results")
         results.add(hint("Select the patches to apply; right-click a game or a patch to match them by hand."
                          if page_def.key == "patch" else "Click a row to select or deselect it. The arrow shows its details."))
         tools_bar = QHBoxLayout()
+        st.review = ReviewBar()  # what is selected and what applying it frees, where you are deciding
+        tools_bar.addWidget(st.review)
+        tools_bar.addStretch(1)
         for text, fn in (("Select all", lambda _c=False, k=page_def.key: self._org_select(k, True)),
                          ("Clear all", lambda _c=False, k=page_def.key: self._org_select(k, False)),
                          ("Expand all", lambda _c=False, k=page_def.key: self._org_expand(k, True)),
@@ -193,7 +200,6 @@ class OrganizeMixin:
             b = QPushButton(text)
             b.clicked.connect(fn)
             tools_bar.addWidget(b)
-        tools_bar.addStretch(1)
         results.add(tools_bar)
         st.steps_label = hint("")
         st.steps_label.setVisible(False)
@@ -264,6 +270,7 @@ class OrganizeMixin:
         opts["_note"] = lambda text: self.ui_q.put(("org_note", key, token, text))  # progress for slow scans (checksums)
         self._org_set_busy(True, "Scanning...")
         st.status.setText("Scanning...")
+        st.review.set_chips([])
         self._org_stop.clear()
 
         def work() -> None:
@@ -286,6 +293,7 @@ class OrganizeMixin:
             if self.current_page == key:
                 self._refresh_start_label()
         st.findings, st.message = findings, message
+        st.review.set_chips([])  # filled in again below once there is a selection to describe
         if st.tool.key == "patch":
             self._patch_show(key, findings, message, error)
             return
@@ -303,10 +311,18 @@ class OrganizeMixin:
                 item.setForeground(2, T.bad)
             else:
                 item.setCheckState(0, Qt.CheckState.Checked if i in st.checked else Qt.CheckState.Unchecked)
+                if is_destination(f.note):  # where a rename or a sort sends it: the 'after', in the accent colour
+                    item.setForeground(2, T.accent)
             tree.addTopLevelItem(item)
             for name, count, note in f.children:
                 child = QTreeWidgetItem([name, str(count), note])
                 child.setFlags(row_flags)
+                if (tone := note_tone(note)) is not None:  # what stays reads green and what goes reads red, at a glance
+                    child.setForeground(2, T.ok if tone == OK else T.bad)
+                    if tone == OK:
+                        bold = child.font(2)
+                        bold.setBold(True)
+                        child.setFont(2, bold)
                 item.addChild(child)
         st.reveal.stagger(len(findings))  # the results ripple in, row by row
         self._set_badge(key, len(findings))
@@ -330,15 +346,8 @@ class OrganizeMixin:
 
     def _org_update_status(self, key: str) -> None:
         st = self.org[key]
-        ticked = [st.findings[i] for i in st.checked]
-        text = f"{len(ticked)} of {len(st.findings)} selected"
-        if freed := sum(f.size for f in ticked):
-            text += f"  |  frees {fmt_size(freed)}"
-        if blocked := sum(1 for f in st.findings if f.problem):
-            text += f"  |  {blocked} can't be applied (see Status)"
-        if st.message:
-            text += f"  |  {st.message}"
-        st.status.setText(text + ".")
+        st.review.set_chips(review_chips(st.findings, st.checked))
+        st.status.setText(f"{st.message}." if st.message else "")  # the counts are in the chips above the list
 
     def _org_context(self, key: str, pos) -> None:
         if self.org[key].tool.key == "patch":
@@ -409,6 +418,7 @@ class OrganizeMixin:
         st = self.org[key]
         self._org_set_busy(True, tool.busy)
         st.status.setText(f"Working on {len(picks)} item(s)...")
+        st.review.set_chips([])
         self._org_stop.clear()
         self._log_clear()
         self.ui_q.put(("log", f"=== {APP_NAME} {APP_VERSION} ===\n--- {tool.title} started: {len(picks)} item(s) ---\n"))

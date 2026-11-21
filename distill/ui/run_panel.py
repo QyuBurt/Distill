@@ -11,20 +11,24 @@ from pathlib import Path
 from PySide6.QtCore import QEasingCurve, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QApplication, QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
+from .. import artprogress, lbthrottle
 from ..batch import BatchRunner
+from .. import crashlog
 from ..constants import PKG_LAYOUTS, PS3_OUTPUTS, RVZ_MAX_LEVEL
-from ..runview import DL, TOOL, bar_targets, view_of
+from ..runview import ART, DL, TOOL, bar_jobs, eta_bits, view_of
 from ..switchconv import SwitchConfig, SwitchRunner
 from ..models import BatchSummary, Config, fmt_duration, space_report
 from ..system import resolve_tool_path
 from . import motion
 from .dialogs import SummaryDialog
+from .emu_cards import segment_css
 from .logview import LogHighlighter
 from .nav import PAGE_INFO
+from .queue_view import QueueView
 from .state import TOOLS
 from .widgets import StatusLabel, symbolize
 from .theme import T
@@ -48,6 +52,7 @@ class RunMixin:
         row.addWidget(self.lbl_phase)
         row.addStretch(1)
         row.addWidget(self.lbl_run_info)
+        row.addWidget(self._build_run_view_switch())
         self.log_find = QLineEdit()
         self.log_find.setPlaceholderText("Find in log")
         self.log_find.setClearButtonEnabled(True)
@@ -57,7 +62,7 @@ class RunMixin:
         row.addWidget(self.log_find)
         copy_btn, save_btn, clear_btn = QPushButton("Copy log"), QPushButton("Save log..."), QPushButton("Clear")
         self._log_btns = (self.log_find, copy_btn, save_btn, clear_btn)
-        for btn, symbol, tip in ((copy_btn, "copy", "Copy the log"), (save_btn, "save", "Save the log to a file"), (clear_btn, "trash", "Clear the log")):
+        for btn, symbol, tip in ((copy_btn, "copy", "Copy the log"), (save_btn, "save", "Save the log to a file"), (clear_btn, "trash", "Clear the log and the queue")):
             btn.setFlat(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             symbolize(btn, symbol, tip, width=34)
@@ -70,13 +75,14 @@ class RunMixin:
         prow.setSpacing(12)
         self.lbl_total_prog = QLabel("Batch Progress: 0 / 0")
         self.lbl_total_prog.setMinimumWidth(190)
-        self.pb_total = QProgressBar()
+        self.pb_total = QProgressBar()  # a value holder, never shown: the bar along the bottom is the window's one progress bar
         self.pb_total.setRange(0, 1000)
         self.pb_total.setTextVisible(True)
         self.pb_total.setFormat("%p%")
         self.pb_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pb_total.valueChanged.connect(lambda v: self._bar_moved(TOOL, v))  # the bar along the bottom follows it
-        self.dl_pb = QProgressBar()  # the download run's own bar: it takes the conversion's place on the Download pages
+        self.pb_total.hide()
+        self.dl_pb = QProgressBar()  # the download run's value holder, never shown either
         self.dl_pb.setRange(0, 1000)
         self.dl_pb.setTextVisible(True)
         self.dl_pb.setFormat("%p%")
@@ -108,8 +114,44 @@ class RunMixin:
         self.log.setPlaceholderText("The live process log appears here.")
         self._log_hl = LogHighlighter(self.log.document())  # errors red, warnings amber, verified lines green
         lay.addWidget(self.log, 1)
+        self.queue_view = QueueView()  # the same run, one row a file; it is what the panel shows until Log is chosen
+        lay.addWidget(self.queue_view, 1)
+        self.log.setVisible(self._run_view != "queue")
         self._run_panel, self._log_shown, self._panel_mode = panel, True, "conv"
         return panel
+
+    def _build_run_view_switch(self) -> QWidget:
+        """Queue | Log: two faces of the run. Queue is a row a file with its progress and what it saved; Log is every line the
+        tools wrote, for when something needs reading closely."""
+        self._run_view = "queue"
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.view_queue, self.view_log = QPushButton("Queue"), QPushButton("Log")
+        group = QButtonGroup(box)
+        group.setExclusive(True)
+        for button, first, tip in ((self.view_queue, True, "Every file as a row, with its progress and what it saved."),
+                                   (self.view_log, False, "The tools' own output, line by line.")):
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            T.bind_css(button, lambda first=first: segment_css(first).replace("padding: 8px 14px", "padding: 3px 12px"))
+            group.addButton(button)
+            lay.addWidget(button)
+        self.view_queue.setChecked(True)
+        self.view_queue.toggled.connect(lambda on: self._set_run_view("queue" if on else "log"))
+        return box
+
+    def _set_run_view(self, view: str) -> None:
+        """Show the queue or the log in the panel (a conversion page's panel; the other pages have neither)."""
+        if view == self._run_view:
+            return
+        self._run_view = view
+        conv = self._panel_mode == "conv"
+        queue = conv and view == "queue"
+        motion.set_visible(self.log, conv and not queue, axis="height", animate=False)
+        motion.set_visible(self.queue_view, queue, axis="height", animate=False)
 
     def _tool_target(self) -> tuple[str, str] | None:
         """(page, what it is doing) of the conversion or Organise job in progress, or None. A scan has no progress to show, so it doesn't count."""
@@ -122,6 +164,11 @@ class RunMixin:
     def _dl_target(self) -> tuple[str, str] | None:
         """(page, what it is doing) of the download run, or None."""
         return (self._dl_page, self._dl_label) if self.dl_runner is not None else None
+
+    def _art_target(self) -> tuple[str, str] | None:
+        """(page, what it is doing) while the Games page is fetching covers and details in the background, else None."""
+        prog = getattr(self, "_gm_progress", None)
+        return ("games", "Getting covers and details") if prog is not None and prog.running() else None
 
     def _run_target(self) -> tuple[str, str] | None:
         """The job the bar along the bottom would stand for first: a conversion, else the download run."""
@@ -141,28 +188,50 @@ class RunMixin:
             self.run_bar.set_value(value)
 
     def _runbar_sync(self) -> None:
-        """Show or hide the bar along the bottom, and say what it is for. It is up while a job runs and you are on another page."""
+        """Show or hide the bar along the bottom, and say what it is for. It is the window's one progress bar: up while any job runs,
+        on whatever page is showing, and clicking it goes to the page doing the work. No page carries a bar of its own."""
         bar = getattr(self, "run_bar", None)
         if bar is None or not hasattr(self, "_panel_mode"):
             return
-        away_jobs = bar_targets(self._tool_target(), self._dl_target(), self.current_page)  # a conversion first, then the download
-        away = bool(away_jobs)
+        jobs = bar_jobs(self._tool_target(), self._dl_target(), self._art_target())  # a conversion first, then the download, then the covers
+        away = bool(jobs)
         if away:
-            view, key, label = away_jobs[0]
-            if view == DL:
-                paused, text, value = self.dl_paused, self._dl_prog_text, self.dl_pb.value()
-            else:
-                paused, text, value = self.is_paused and self.is_processing, self.lbl_total_prog.text(), self.pb_total.value()
-            count = re.search(r"\d+\s*/\s*\d+", text)
-            state = "Paused" if paused else label.rstrip(".")
-            more = f"  (+{len(away_jobs) - 1} more)" if len(away_jobs) > 1 else ""
-            bar.set_info(PAGE_INFO[key][0] if key in PAGE_INFO else key, state + (f"  |  {count.group(0)}" if count else "") + more)
+            view, key, _label = jobs[0]
+            title, detail, value = self._away_facts(jobs)
+            bar.set_info(title, detail, self._art_tip() if view == ART else "")
             self._bar_view, self._bar_page = view, key
             bar.set_value(value)
         motion.set_visible(bar, away)
         self._apply_panel_mode(self._current_mode())  # this page's own log and bar, or none while the job is elsewhere
         if hasattr(self, "start_btn"):
             self._update_start_text()
+
+    def _art_note(self) -> str:
+        """A line for the bar when LaunchBox has asked Distill to slow down (it is waiting, and will carry on by itself)."""
+        wait = lbthrottle.pages().cooling()
+        return f"LaunchBox asked for a pause, resuming in {max(1, round(wait))}s" if wait > 0.5 else ""
+
+    def _art_tip(self) -> str:
+        return artprogress.tooltip(self._gm_progress.snapshot(), self._art_note())
+
+    def _away_facts(self, away_jobs: list) -> tuple[str, str, int]:
+        """(page title, "Converting  |  3 / 12  (+1 more)", how far 0..1000) for the first of the jobs running on another page."""
+        view, key, label = away_jobs[0]
+        if view == ART:  # the Games page's covers and details: what is being grabbed, how many are done and how long it will take
+            snap = self._gm_progress.snapshot()
+            more = f"  (+{len(away_jobs) - 1} more)" if len(away_jobs) > 1 else ""
+            return PAGE_INFO[key][0] if key in PAGE_INFO else key, artprogress.detail_line(snap, self._art_note()) + more, round(snap.fraction * 1000)
+        if view == DL:
+            paused, text, value, timing = self.dl_paused, self._dl_prog_text, self.dl_pb.value(), self.dl_eta.text()
+        else:
+            paused, text, value, timing = (self.is_paused and self.is_processing, self.lbl_total_prog.text(), self.pb_total.value(),
+                                           self.lbl_eta.text())
+        count = re.search(r"\d+\s*/\s*\d+", text)
+        state = "Paused" if paused else label.rstrip(".")
+        more = f"  (+{len(away_jobs) - 1} more)" if len(away_jobs) > 1 else ""
+        bits = eta_bits(timing)  # "3.20 MB/s  |  ~12m left": the time line of the page, in short
+        detail = state + (f"  |  {count.group(0)}" if count else "") + (f"  |  {bits}" if bits else "") + more
+        return PAGE_INFO[key][0] if key in PAGE_INFO else key, detail, value
 
     def _apply_panel_mode(self, mode: str) -> None:
         """Conversion pages show the whole run panel with its live log. Download keeps only the overall bar and the
@@ -178,7 +247,7 @@ class RunMixin:
         conv = kind == "conv"
         self._log_shown = conv
         dl = kind == "dl"  # the Download pages show the download run's own bar and speed line
-        for w, shown in ((self.pb_total, not dl), (self.lbl_eta, not dl), (self.dl_pb, dl), (self.dl_eta, dl)):
+        for w, shown in ((self.lbl_eta, not dl), (self.dl_eta, dl)):  # (the bars themselves are never shown: the bar along the bottom is)
             w.setVisible(shown)
         hides_panel = ("org", "games", "recomps", "emus", "away", "sound")
         self._panel_gen = gen = getattr(self, "_panel_gen", 0) + 1  # a change of mind cancels what the last one had pending
@@ -190,7 +259,9 @@ class RunMixin:
                  and kind not in hides_panel and before not in hides_panel)
         for w in (self.lbl_phase, self.lbl_run_info, self.lbl_total_prog, self.settings_btn, *self._log_btns):
             motion.set_visible(w, conv, axis="width", animate=glide)  # (settings_btn sits in the page header, in a row)
-        motion.set_visible(self.log, conv, axis="height", animate=glide)
+        queue = conv and self._run_view == "queue"
+        motion.set_visible(self.log, conv and not queue, axis="height", animate=glide)
+        motion.set_visible(self.queue_view, queue, axis="height", animate=glide)
         motion.set_visible(self.lbl_notice, not conv, axis="height", animate=glide)
         self._run_panel.setVisible(kind not in hides_panel)
         if not conv:
@@ -242,6 +313,20 @@ class RunMixin:
             self._apply_events(events)
         self._refresh_eta()
         self._refresh_dl()
+        self._art_bar_tick()
+
+    def _art_bar_tick(self) -> None:
+        """Keep the bar along the bottom up to date with the Games page's cover and details fetch (a few times a second is plenty)."""
+        prog = getattr(self, "_gm_progress", None)
+        if prog is None:
+            return
+        running, now = prog.running(), time.monotonic()
+        if running != getattr(self, "_art_was_running", False):
+            self._art_was_running = running
+            self._runbar_sync()  # it started or ended: the bar comes or goes
+        elif running and getattr(self, "_bar_view", None) == ART and now - getattr(self, "_art_bar_at", 0.0) >= 0.25:
+            self._art_bar_at = now
+            self._runbar_sync()
 
     # -- the live log: every line is a text block, and a task line is rewritten in place as it progresses
     def _log_write(self, text: str) -> None:
@@ -250,12 +335,14 @@ class RunMixin:
         cur.insertText(text + "\n")
 
     def _task_new(self, tid: int, text: str) -> None:
+        self.queue_view.task_new(tid, text)
         cur = QTextCursor(self.log.document())
         cur.movePosition(QTextCursor.MoveOperation.End)
         self._tasks[tid] = [cur.blockNumber(), text.count("\n") + 1]
         cur.insertText(text + "\n")
 
     def _task_update(self, tid: int, text: str) -> None:
+        self.queue_view.task_update(tid, text)
         entry = self._tasks.get(tid)
         if entry is None:
             return
@@ -275,8 +362,17 @@ class RunMixin:
 
     def _log_clear(self) -> None:
         self.log.clear()
+        self.queue_view.clear()
         self._tasks.clear()
         self.lbl_notice.setText("")
+
+    def _safe_event(self, handler, ev: tuple) -> None:
+        """Run one page's handler for one event. If it raises, the error goes to the crash file and the rest of this tick's events still run (they
+        used to be thrown away with it, which left a bar or a spinner stuck on a job that had finished)."""
+        try:
+            handler(ev)
+        except Exception as exc:  # noqa: BLE001 - one bad event must not take the window's other events with it
+            crashlog.record(type(exc), exc, exc.__traceback__, f"event {ev[0]}")
 
     def _apply_events(self, events: list[tuple]) -> None:
         # Only the newest progress update per task matters within one tick.
@@ -290,8 +386,10 @@ class RunMixin:
                     self._log_write(msg)
                 case (str() as name, *_rest) if name.startswith("recomp_"):
                     self._rc_event(ev)
+                case (str() as name, *_rest) if name.startswith("preview_"):
+                    self._pv_event(ev)
                 case (str() as name, *_rest) if name.startswith("games_"):
-                    self._gm_event(ev)
+                    self._safe_event(self._gm_event, ev)
                 case (str() as name, *_rest) if name.startswith("emu_"):
                     self._em_event(ev)
                 case ("notice", text):
@@ -449,6 +547,7 @@ class RunMixin:
         self.lbl_total_prog.setText(f"{kind} Progress: {current} / {total}")
 
     def _cleanup_ui(self) -> None:
+        self.queue_view.set_running(False)  # a row that was cut short (Stop) says so rather than looking busy for ever
         secs = self._active_secs()
         stopped = self._stopping
         self._title_progress(None)
@@ -604,6 +703,8 @@ class RunMixin:
         else:
             self._update_start_text()
         self.is_paused = False
+        self.queue_view.begin_run(keep=only is not None)  # a retry keeps the earlier rows, dimmed, beside the new ones
+        self.queue_view.set_running(True)
         self.pause_event.set()
         self._sync_run_controls()  # Start goes quiet, Pause and Stop come alive
         self._update_ui_state("Initializing", 0, 1)

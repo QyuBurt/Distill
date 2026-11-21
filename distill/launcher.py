@@ -91,6 +91,7 @@ class Session:
     label: str  # what it is: 'RetroArch · mGBA', 'Ship of Harkinian'
     name: str  # the game's name
     finished: Callable[[float], None]  # called with how long it ran
+    after: Callable[[], None] | None = None  # called when it has closed, however short (the game's "run after" command)
 
 
 def prepare_game(ident: str, resume: bool = False, *, store: gm.GameStore | None = None, em_store: rc.Store | None = None,
@@ -104,9 +105,10 @@ def prepare_game(ident: str, resume: bool = False, *, store: gm.GameStore | None
     em_store = em_store or em.open_store()
     emus = standalones_of(em_store, catalog if catalog is not None else full_catalog(), store, game.system)
     try:
-        plan = gm.plan_launch(game, game.emulator, retro_of(em_store), store.default_for(game.system), emus, resume=resume)
+        plan = gm.plan_launch(game, game.emulator, retro_of(em_store), store.default_for(game.system), emus, resume=resume, profile=store.profile(game.id))
     except gm.GameError as exc:
         raise LaunchError(str(exc)) from exc
+    plan.admin = False  # (Sunshine ends the game by ending the process tree: a program started elevated would be out of its reach)
     if not detach and plan.cmd and plan.cmd[0] == "open":
         plan.cmd.insert(1, "-W")  # a Mac's `open` hands over and returns at once; -W makes it wait until the program quits
     try:
@@ -119,7 +121,7 @@ def prepare_game(ident: str, resume: bool = False, *, store: gm.GameStore | None
         if seconds >= gm.MIN_SESSION:  # shorter is a launcher handing over to another program, not a game being played
             store.add_playtime(game.id, seconds)
 
-    return Session(proc, plan.label, game.name, finished)
+    return Session(proc, plan.label, game.name, finished, gm.post_hook(plan))
 
 
 def prepare_recomp(ident: str, *, rc_store: rc.Store | None = None, detach: bool = False) -> Session:
@@ -150,6 +152,11 @@ def wait(session: Session) -> int:
         code = session.proc.wait()
     except Exception:  # a process that can't be waited on just isn't timed
         return 0
+    if session.after is not None:
+        try:
+            session.after()
+        except Exception:  # (a command after the game that fails is its own business)
+            pass
     session.finished(time.time() - start)
     return code if isinstance(code, int) else 0
 

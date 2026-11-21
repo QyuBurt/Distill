@@ -11,19 +11,22 @@ emulator of its own, with a way into the Platform setup window.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QKeyEvent, QPixmap
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu, QProgressBar,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import gamemedia as mm
 from .. import games as gm
+from .. import launchprofile as lp
 from . import icons
 from .frameless import FramelessDialog, hairline
+from .games_manual_dialog import ManualPickerDialog
 from .recomp_dialog import _caption, _icon_button, _stack
 from . import shimmermath
 from .shimmer import Shimmer, busy
@@ -339,10 +342,11 @@ class MediaTab(QWidget):
 
     def _build_manual(self) -> QFrame:
         row = _Row("Manual", "A PDF manual, read as a book with turning pages from the game's page.")
-        row.find_btn.setVisible(False)
+        row.find_btn.setToolTip("Find a manual online (the Internet Archive)")
         row.file_btn.setToolTip("Choose a PDF manual from this computer")
         row.none_btn.setToolTip("Remove the manual")
         row.auto_btn.setVisible(False)
+        row.find_btn.clicked.connect(self.find_manual)
         row.file_btn.clicked.connect(self.choose_manual)
         row.none_btn.clicked.connect(self.clear_manual)
         return row
@@ -591,6 +595,14 @@ class MediaTab(QWidget):
         self.plan.manual = ("set", path)
         self._refresh_manual()
 
+    def find_manual(self) -> None:
+        """Look for the game's manual online; the one chosen is saved with the rest when Save is pressed."""
+        name, platform, system = self.lookup()
+        dlg = ManualPickerDialog(self, name, system, platform)
+        if dlg.exec() == ManualPickerDialog.DialogCode.Accepted and dlg.path is not None:
+            self.plan.manual = ("set", str(dlg.path))
+            self._refresh_manual()
+
     def clear_manual(self) -> None:
         self.plan.manual = ("clear", "") if mm.cached_manual(self.key) is not None else None
         self._refresh_manual()
@@ -794,14 +806,28 @@ class EmulatorTab(QWidget):
     `manage()` opens the Platform setup window, after which the lists are read again."""
 
     def __init__(self, choice: str, system: Callable[[], str], info_for: Callable[[str], gm.EmulatorOptions], manage: Callable[[], None] | None,
-                 parent: QWidget | None = None):
+                 profile: lp.Profile | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         self.start_choice, self.system, self.info_for, self.manage = choice, system, info_for, manage
+        self.start_profile = profile or lp.Profile()
         self.info: gm.EmulatorOptions | None = None
         self._offer = False  # 'use it for every game on the platform' is on offer (the tick box can be hidden by being on another tab)
         self._args: dict[str, str] = {}  # what was typed for each emulator of its own (kept while switching between them)
         self._args_seen: str = ""  # the emulator the options box is showing
-        lay = QVBoxLayout(self)
+        scroll = QScrollArea(self)  # (there is a good deal in this tab: it scrolls rather than squeezing)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.viewport().setAutoFillBackground(False)
+        host = QWidget()
+        host.setObjectName("emuBody")
+        host.setStyleSheet("#emuBody { background: transparent; }")
+        scroll.setWidget(host)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        lay = QVBoxLayout(host)
         lay.setContentsMargins(20, 18, 20, 16)
         lay.setSpacing(12)
         self.play_with = QComboBox()
@@ -835,6 +861,7 @@ class EmulatorTab(QWidget):
                               "extension. These options apply to every game this emulator plays.")
         box.addWidget(self.args_hint)
         lay.addWidget(self.args_box)
+        lay.addWidget(self._build_profile(self.start_profile))
         lay.addStretch(1)
         foot = QHBoxLayout()
         self.manage_btn = QPushButton("Platform setup...")
@@ -847,6 +874,66 @@ class EmulatorTab(QWidget):
         foot.addStretch(1)
         lay.addLayout(foot)
         self.refresh()
+
+    def _build_profile(self, p: lp.Profile) -> QWidget:
+        """The settings that are only for this game: its own options, working folder, environment, commands before and after, administrator."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 10, 0, 0)
+        lay.setSpacing(10)
+        lay.addWidget(hairline())
+        head = QLabel("Only for this game")
+        T.bind_css(head, lambda: f"color: {T.title.name()}; font-weight: 600; background: transparent;")
+        lay.addWidget(head)
+        lay.addWidget(hint("Leave a box empty to do nothing different. In options and commands, {rom} is the game's file, {dir} its folder and {name} its "
+                           "name without the extension.", live=True))
+        self.p_args = QLineEdit(p.args)
+        self.p_args.setClearButtonEnabled(True)
+        self.p_args.setPlaceholderText("The emulator's own options")
+        self.p_args.setToolTip("Replaces the options of an emulator of its own for this game; added to the end of RetroArch's command.")
+        lay.addLayout(_stack("Launch options", self.p_args))
+        self.p_cwd = QLineEdit(p.cwd)
+        self.p_cwd.setClearButtonEnabled(True)
+        self.p_cwd.setPlaceholderText("The emulator's own folder")
+        browse = QPushButton("Browse...")
+        browse.setAutoDefault(False)
+        browse.clicked.connect(self._browse_cwd)
+        folder_row = QWidget()
+        row = QHBoxLayout(folder_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self.p_cwd, 1)
+        row.addWidget(browse)
+        lay.addLayout(_stack("Start in this folder", folder_row))
+        self.p_env = QPlainTextEdit(p.env)
+        self.p_env.setPlaceholderText("VARIABLE=value, one on each line")
+        self.p_env.setFixedHeight(64)
+        lay.addLayout(_stack("Environment variables", self.p_env))
+        self.p_pre = QLineEdit(p.pre)
+        self.p_pre.setClearButtonEnabled(True)
+        self.p_pre.setPlaceholderText("A command to run before it starts")
+        self.p_pre.setToolTip("Distill waits for it (up to a minute); if it fails, the game is not started.")
+        lay.addLayout(_stack("Run before", self.p_pre))
+        self.p_post = QLineEdit(p.post)
+        self.p_post.setClearButtonEnabled(True)
+        self.p_post.setPlaceholderText("A command to run after it closes")
+        lay.addLayout(_stack("Run after", self.p_post))
+        self.p_admin = AnimCheckBox("Run as administrator")
+        self.p_admin.setChecked(p.admin)
+        self.p_admin.setToolTip("Windows asks for permission each time. Distill can't count the playtime of a game started this way.")
+        self.p_admin.setVisible(sys.platform == "win32")
+        lay.addWidget(self.p_admin)
+        return box
+
+    def _browse_cwd(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Start in which folder?", self.p_cwd.text().strip() or "")
+        if folder:
+            self.p_cwd.setText(folder)
+
+    def profile(self) -> lp.Profile:
+        """The game's own launch settings as they are in the boxes now."""
+        return lp.Profile(self.p_args.text().strip(), self.p_cwd.text().strip(), self.p_env.toPlainText().strip(), self.p_pre.text().strip(),
+                          self.p_post.text().strip(), self.p_admin.isChecked() and sys.platform == "win32")
 
     # ---- what the tab holds ----------------------------------------------------------------------------------------------
     def choice(self) -> str:

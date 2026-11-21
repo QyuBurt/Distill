@@ -109,3 +109,54 @@ class ArtQueueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueueControlTests(unittest.TestCase):
+    def test_on_start_is_called_when_a_worker_takes_an_item(self):
+        started = []
+        got = []
+        q = ArtQueue(lambda i: i, lambda i, f: got.append(i), workers=1, sleep=lambda s: None, on_start=started.append)
+        for i in range(3):
+            q.add(i)
+        settle(q)
+        self.assertEqual(sorted(started), [0, 1, 2])
+
+    def test_clear_takes_back_what_has_not_begun_and_says_which(self):
+        gate, dropped = threading.Event(), []
+        q = ArtQueue(lambda i: gate.wait(5), lambda i, f: None, workers=1, sleep=lambda s: None, on_drop=dropped.extend)
+        q.add("held")
+        while q.pending:
+            threading.Event().wait(0.005)
+        for x in "abc":
+            q.add(x)
+        gone = q.clear()
+        self.assertEqual(sorted(gone), ["a", "b", "c"])
+        self.assertEqual(sorted(dropped), ["a", "b", "c"])
+        self.assertEqual(q.pending, 0)
+        gate.set()
+        settle(q)
+
+    def test_a_backlog_past_the_limit_drops_the_oldest_asks(self):
+        gate, dropped = threading.Event(), []
+        q = ArtQueue(lambda i: gate.wait(5), lambda i, f: None, workers=1, sleep=lambda s: None, max_pending=2, on_drop=dropped.extend)
+        q.add("held")
+        while q.pending:
+            threading.Event().wait(0.005)
+        for x in "abcd":
+            q.add(x)
+        self.assertEqual(dropped, ["a", "b"])
+        self.assertEqual(q.pending, 2)
+        gate.set()
+        settle(q)
+
+    def test_a_failing_hook_does_not_stop_the_worker(self):
+        got = []
+
+        def boom(item):
+            raise RuntimeError
+
+        q = ArtQueue(lambda i: i, lambda i, f: got.append(i), workers=1, sleep=lambda s: None, on_start=boom)
+        q.add(1)
+        q.add(2)
+        settle(q)
+        self.assertEqual(sorted(got), [1, 2])

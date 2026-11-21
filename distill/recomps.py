@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import apikeys
+from . import apikeys, lbthrottle
 from .constants import APP_DIR, APP_NAME, ASSETS_DIR
 from .github_auth import github_token, reveal
 from .models import fmt_size
@@ -975,10 +975,28 @@ def _get(url: str, token: str = "", accept: str = "", timeout: int = 20) -> byte
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
-    if token and urllib.parse.urlparse(url).hostname in ("api.github.com", "www.steamgriddb.com"):
+    host = urllib.parse.urlparse(url).hostname
+    if token and host in ("api.github.com", "www.steamgriddb.com"):
         headers["Authorization"] = f"Bearer {token}"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
-        return resp.read()
+    throttle = lbthrottle.for_host(host)
+    if throttle is None:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+            return resp.read()
+    # The LaunchBox Games Database: only as many requests at once as it is putting up with (see lbthrottle), and a "slow down" is waited out
+    # and asked again, not taken for "no such game".
+    for attempt in range(3):
+        try:
+            with throttle.slot(), urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+                data = resp.read()
+            throttle.good()
+            return data
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (429, 503):
+                raise
+            throttle.busy(lbthrottle.retry_after(exc.headers))  # everything holds back; the next try waits for that in `slot()`
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _release_of(d: dict) -> Release:
@@ -1831,9 +1849,40 @@ LB_PLATFORMS = {"GameCube": "Nintendo GameCube", "Wii": "Nintendo Wii", "Xbox": 
                 "PlayStation": "Sony Playstation", "PlayStation 2": "Sony Playstation 2", "PlayStation 3": "Sony Playstation 3",
                 "PlayStation 4": "Sony Playstation 4", "SNES": "Super Nintendo Entertainment System", "NES": "Nintendo Entertainment System",
                 "Dreamcast": "Sega Dreamcast", "Saturn": "Sega Saturn"}
-# image types worth showing as a poster, best first. Posters are portrait, which is what the grid wants.
-_LB_TYPES = (("poster", re.compile(r"poster", re.IGNORECASE)), ("box front", re.compile(r"box\s*-\s*front", re.IGNORECASE)),
-             ("flyer", re.compile(r"flyer\s*-\s*front", re.IGNORECASE)))
+# image types worth showing as a cover, best first: the front box, a rebuilt front box scan (when there is no plain one), then (for games with no box scan) a poster,
+# and an advertisement flyer last. Several of one type are put in the person's region order (Settings > General > Cover art).
+_LB_TYPES = (("box front", re.compile(r"box\s*-\s*front(?!\s*-\s*reconstructed)", re.IGNORECASE)),
+             ("box front reconstructed", re.compile(r"box\s*-\s*front\s*-\s*reconstructed", re.IGNORECASE)),
+             ("poster", re.compile(r"poster", re.IGNORECASE)), ("flyer", re.compile(r"flyer\s*-\s*front", re.IGNORECASE)))
+# picture types that are NOT a cover but can sit beside one: fan-made art (even fan-made box fronts), a spine, back, 3D render, a flyer's back...
+_LB_NOT_COVER = re.compile(r"fan\s*-?\s*art[^<>\"\n]*|box\s*-\s*(?!\s*front)\w+|(?:flyer|poster)\s*-\s*(?!\s*front)\w+|\b(?:cart(?:ridge)?|disc|manual|banner|clear\s*logo|screenshot|marquee|"
+                           r"arcade|control\s*panel|background|icon|spine|3d)\b", re.IGNORECASE)
+COVER_REGIONS = ("Europe", "North America", "Japan", "Asia")  # the regions the person can put in order
+_REGION_WORDS = {"europe": "Europe", "pal": "Europe", "united kingdom": "Europe", "germany": "Europe", "france": "Europe", "spain": "Europe", "italy": "Europe",
+                 "north america": "North America", "united states": "North America", "usa": "North America", "canada": "North America",
+                 "japan": "Japan", "asia": "Asia", "korea": "Asia", "china": "Asia", "hong kong": "Asia", "taiwan": "Asia"}
+_cover_regions: list[str] = list(COVER_REGIONS)
+
+
+def set_cover_regions(order) -> None:
+    """The person's order of preference for box art regions (each of COVER_REGIONS once; any left out follow, in the default order)."""
+    got = [r for r in dict.fromkeys(order or ()) if r in COVER_REGIONS]
+    _cover_regions[:] = got + [r for r in COVER_REGIONS if r not in got]
+
+
+def cover_regions() -> list[str]:
+    return list(_cover_regions)
+
+
+def _region_rank(text: str) -> int:
+    """Where the region named in a picture's label '(Europe)' stands in the person's order; World and unlabelled ones come after the
+    chosen regions, then regions that are not on the list."""
+    m = re.search(r"\(([^()]*)\)", text)
+    region = _REGION_WORDS.get(m[1].strip().lower(), "") if m else ""
+    order = _cover_regions
+    if region in order:
+        return order.index(region)
+    return len(order) if (not m or m[1].strip().lower() in ("world", "")) else len(order) + 1
 
 
 _STOP_WORDS = {"the", "of", "a", "an", "and", "for", "to"}
@@ -1884,18 +1933,25 @@ def _lb_game_ids(page: str, game: str, platform: str) -> list[str]:
 def _lb_posters(page: str) -> list[str]:
     """Poster-like pictures on a LaunchBox page, best first (Poster, then Box - Front, then Flyer - Front). Each image
     is labelled by the nearest type name in the text around its address."""
-    found: dict[str, int] = {}
+    found: dict[str, tuple[int, int]] = {}
     for m in _LB_IMG.finditer(page):
         lo = max(0, m.start() - 400)
-        around = page[lo:m.end() + 400]
-        best = None
-        for rank, (_name, rx) in enumerate(_LB_TYPES):
-            for hit in rx.finditer(around):
-                dist = abs(lo + hit.start() - m.start())
-                if best is None or dist < best[0]:
-                    best = (dist, rank)
-        if best is not None and m[0] not in found:
-            found[m[0]] = best[1]
+        blank = lambda t: re.sub(r"https?://[^\s\"'<>]+", lambda u: " " * len(u[0]), t)  # noqa: E731  (an address is not a label: 'launchbox-app' is not a box)
+        around = blank(page[lo:m.end() + 400])
+        start = page.rfind("<", 0, m.start())
+        tag = blank(page[start:page.find(">", m.end()) + 1]) if start >= 0 else ""  # the picture's own alt text names its type and region
+        rank = None
+        if _LB_NOT_COVER.search(tag):
+            continue  # its own label says fan art, a spine, a back...: never a cover
+        rank = next((i for i, (_n, rx) in enumerate(_LB_TYPES) if rx.search(tag)), None)
+        if rank is None:  # no type in the tag: the nearest type name in the text around it, unless that is a kind of picture that is not a cover
+            hits = [(abs(lo + h.start() - m.start()), i, h.span()) for i, (_n, rx) in enumerate(_LB_TYPES) for h in rx.finditer(around)]
+            nots = [(abs(lo + h.start() - m.start()), -1, h.span()) for h in _LB_NOT_COVER.finditer(around)]
+            hits = [h for h in hits if not any(n[2][0] <= h[2][0] and h[2][1] <= n[2][1] for n in nots)]  # ('Fanart - Box - Front' is not a box front)
+            best = min(hits + nots, default=None)
+            rank = best[1] if best and best[1] >= 0 else None
+        if rank is not None and m[0] not in found:
+            found[m[0]] = (rank, _region_rank(tag))
     return [u for u, _r in sorted(found.items(), key=lambda kv: kv[1])]
 
 
@@ -2174,7 +2230,7 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
     if sgdb_key:
         sources.append(("steamgriddb", lambda: sgdb_posters(rc, sgdb_key)))
     if not old:
-        sources.append(("other", lambda: launchbox_covers(rc)))
+        sources.append(("launchbox", lambda: launchbox_covers(rc)))
         if rc.cover:
             sources.append(("other", lambda: [rc.cover]))
         if rc.cover_path:
@@ -2192,10 +2248,10 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
         for url in filter(None, urls):
             if not (data := _image(url)):
                 continue
-            if is_portrait(data):
-                chosen = (name, data)
+            if name == "launchbox" or is_portrait(data):  # (LaunchBox's list is already in order, box fronts first: boxes are wide on some consoles, tall on others, so shape never passes one over)
+                chosen = ("other" if name == "launchbox" else name, data)
                 break
-            spare = spare or (name, data)
+            spare = spare or ("other" if name == "launchbox" else name, data)
         if chosen:
             break
     if old and not chosen:  # the upgrade found nothing: keep what we have and don't ask SteamGridDB again
@@ -2203,10 +2259,18 @@ def fetch_cover(rc: Recomp, token: str = "", retry: bool = False, sgdb_key: str 
         return old
     chosen = chosen or spare
     if chosen:
-        for f in art_dir().glob(f"{rc.id}.*"):
-            f.unlink(missing_ok=True)
         dest = art_dir() / f"{rc.id}{_ext_of(chosen[1])}"
-        dest.write_bytes(chosen[1])
+        # The window reads this folder while it is being written (a cover is looked for every time its card is drawn), so the new picture is
+        # written whole under another name and swapped in, never seen half-written, and an older one in another format is cleared only after.
+        tmp = dest.with_name(dest.name + ".part")
+        tmp.write_bytes(chosen[1])
+        tmp.replace(dest)
+        for f in art_dir().glob(f"{rc.id}.*"):
+            if f != dest and f.suffix.lower() != ".src":  # (the .src note is rewritten just below)
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:  # (Windows: the window has that old picture open this moment; it goes next time)
+                    pass
         _src_file(rc).write_text(chosen[0])
         return dest
     miss.write_text(rc.game, encoding="utf-8")

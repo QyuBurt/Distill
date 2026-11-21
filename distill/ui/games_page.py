@@ -16,12 +16,13 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFileDialog, QF
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QSlider,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import apikeys
+from .. import apikeys, artprogress
 from .. import libraryhealth as lh
 from .. import mediascrape as ms
 from .. import gamemedia as mm
 from .. import games as gm
 from .. import launcher
+from .. import lbmatch as lbm
 from .. import romm
 from .. import recomps as rc
 from ..droproute import DropTarget, route_drop
@@ -33,18 +34,23 @@ from .emu_cards import LAUNCHBOX_COLOUR, FactList, SourceChip, chip_css, clear_l
 from .motion import smooth_scroll
 from .nav import PAGE_INFO
 from ..artqueue import ArtQueue
-from .recomp_page import ART_CACHE_MAX, ART_WORKERS, DETAIL_H, DETAIL_W, ID_ROLE, CoverFrame, cover_pixmap, rounded_pixmap
+from .recomp_page import ART_CACHE_MAX, DETAIL_H, DETAIL_W, ID_ROLE, CoverFrame, cover_pixmap, rounded_pixmap
 from .theme import T
 from .widgets import accent_button, Card, detail_shell, ModalStack, hint, symbolize
 from .games_health_dialog import LibraryHealthDialog
+from .games_manual_dialog import ManualPickerDialog
 from .games_saves_dialog import BackupAllDialog, SavesDialog
 from .games_scrape_dialog import MediaScrapeDialog
+from .games_uninstall_dialog import InstalledRommDialog
 from .shimmer import FetchStrip, Shimmer, fade_in
 from .games_widgets import (BackdropView, BADGE, ButtonFill, CoverStage, ROMM_COLOUR, cell_metrics, COUNT_ROLE, EmptyLibrary, GameDelegate, GameGrid, GridPage,
                             HEALTH_ROLE, HStrip, LinkChip, NotesEdit, PAGE_MIN_H, Pill, PILL_COLOURS, PlatformLogo, poster_rect, RA_COLOUR,
                             RailDelegate, SelectionBar, SHOT_H, SHOT_W, StarRating, StatStrip, StatTile, ZOOM_STEPS, _tile_pixmap, _when)
 
 
+GM_ART_WORKERS = 8  # covers fetched at once (was 6). LaunchBox itself is paced by lbthrottle, which adds requests while it answers and holds back when it says slow down
+GM_ART_BACKLOG = 400  # covers asked for and not begun: past this the oldest asks go (scrolled well past), and are asked again if they come back on screen
+DISK_RECHECK = 3.0  # seconds before a game with no cover in memory has the cover folder looked at again
 COVER_FADE = 0.30  # seconds a cover that has just arrived takes to come in over its placeholder
 
 
@@ -56,16 +62,22 @@ class GamesMixin:
         self._gm_by_id: dict[str, gm.Game] = {}
         self._gm_art: dict[str, QPixmap] = {}
         self._gm_art_tried: set[str] = set()
+        self._gm_disk_checked: dict[str, float] = {}  # game -> when the cover folder was last looked at for it
         self._gm_art_pending: set[str] = set()  # covers asked for and not yet back: their cards shimmer
         self._gm_art_born: dict[str, float] = {}  # when a cover arrived (for the fade that brings it in)
         self._gm_shimmer = motion.frame_timer(self)  # repaints the grid while anything in it is shimmering or fading in
         self._gm_shimmer.timeout.connect(self._gm_shimmer_tick)
         self._gm_pending: set[str] = set()  # the open game's pictures still being fetched: 'back', 'shots', 'disc' or 'cart'
         self._gm_pending_total = 0
+        self._gm_untimed = False  # the last game started could not be timed (started as administrator)
         self._gm_media_stop: dict[str, threading.Event] = {}  # a game's picture fetching that can be stopped from its page
         self._gm_shots_shown = 0  # screenshot tiles already on the page (only newer ones fade in)
-        self._gm_art_q = ArtQueue(lambda g, key: gm.fetch_cover(g, key), lambda g, found: self.ui_q.put(("games_art", g.id, found)),
-                                  workers=ART_WORKERS, busy=rc.SgdbBusy, on_busy=lambda g: (self._gm_art_tried.discard(g.id), self._gm_art_pending.discard(g.id)))
+        self._gm_progress = artprogress.ArtProgress()  # what the covers and details fetch is doing: the bar along the bottom reads it (run_panel._art_target)
+        self._gm_art_q = ArtQueue(self._gm_art_work, self._gm_art_done, workers=GM_ART_WORKERS, busy=rc.SgdbBusy, on_busy=self._gm_art_busy_again,
+                                  on_start=lambda g: self._gm_progress.begin(g.id, "info"), max_pending=GM_ART_BACKLOG, on_drop=self._gm_art_dropped)
+        self._gm_match_q = ArtQueue(self._gm_match_work, lambda g, _done: self._gm_progress.finish(g.id), workers=2, pause=0.25,  # LaunchBox matches for games that have their cover
+                                    on_start=lambda g: self._gm_progress.begin(g.id, "info"), max_pending=GM_ART_BACKLOG, on_drop=self._gm_match_dropped)
+        self._gm_match_asked: set[str] = set()  # games asked about this session: an unreachable LaunchBox is not hammered
         self._gm_details: dict[str, gm.Details] = {}
         self._gm_refetch: set[str] = set()  # games whose LaunchBox details are to be looked up again (their name or platform was edited)
         self._gm_mode = "all"  # the pill showing: 'all', 'fav', 'recent' (played) or 'new' (added)
@@ -129,6 +141,7 @@ class GamesMixin:
         row.addWidget(self.gm_rail_frame)
         self.gm_views = ModalStack()
         self.gm_views.dismissed.connect(self._gm_back)
+        self.gm_views.stepped.connect(self._gm_step)  # the card's chevrons and the Left / Right keys
         self.gm_views.addWidget(self._gm_build_grid())
         self.gm_views.addWidget(self._gm_build_detail())
         row.addWidget(self.gm_views, 1)
@@ -574,6 +587,14 @@ class GamesMixin:
         self._gm_refresh_health()
         self._gm_refresh_buttons()
 
+    def _gm_on_hide(self) -> None:
+        """The Games page was left for another. What is being fetched carries on (the bar along the bottom shows it), but the page stops
+        animating and nothing is left half-way: a cover's flight and the grid's shimmer end here."""
+        self._gm_cancel_flight()
+        self._gm_shimmer.stop()
+        if hasattr(self, "gmd_notes"):
+            self.gmd_notes.flush()  # whatever was typed last is saved before the page goes
+
     def _gm_refresh_health(self) -> None:
         """Work out which platforms would not start a game (nothing installed for them, a core's BIOS files missing) and mark them in the sidebar."""
         try:
@@ -805,6 +826,8 @@ class GamesMixin:
                     QTimer.singleShot(0, self._gm_fill)
 
     def _gm_fill(self, *_args) -> None:
+        self._gm_art_q.clear()  # the grid is about to show other games: covers asked for and not begun are forgotten, and asked for again if drawn
+        self._gm_match_q.clear()
         mode, platform = self._gm_mode, self._gm_platform
         total = self.gm_store.totals()[0]
         empty = total == 0
@@ -904,12 +927,12 @@ class GamesMixin:
     def _gm_fill_filter_menu(self, menu: QMenu) -> None:
         menu.clear()
         facets = self.gm_store.facets()
-        for key, title in (("genre", "Genre"), ("decade", "Decade"), ("developer", "Developer"), ("publisher", "Publisher"), ("region", "Region")):
+        for key, title in (("genre", "Genre"), ("tag", "Tag"), ("decade", "Decade"), ("developer", "Developer"), ("publisher", "Publisher"), ("region", "Region")):
             values = facets.get(key, [])
             current = self._gm_filters.get(key, "")
             sub_menu = menu.addMenu(title + (f":  {current}" if current else ""))
             if not values:
-                sub_menu.addAction("Nothing to choose yet (try Get info)").setEnabled(False)
+                sub_menu.addAction("Nothing to choose yet (add tags in the Edit window or the Tools menu)" if key == "tag" else "Nothing to choose yet (try Get info)").setEnabled(False)
                 continue
             for value, n in values[:30]:
                 act = sub_menu.addAction(f"{value}   ({n})")
@@ -955,6 +978,8 @@ class GamesMixin:
         as_list.triggered.connect(lambda _c=False: self._gm_set_view("grid" if self._gm_view == "list" else "list"))
         menu.addAction("Random game", self._gm_random)
         menu.addAction("Playtime by platform...", self._gm_stats)
+        if self._gm_romm_configured() or any(g.source == "romm" for g in self.gm_store.games()):
+            menu.addAction("Installed RomM games...", lambda: self._gm_uninstall_window())
         menu.addAction("Fetch pictures...", lambda: self._gm_fetch_pictures())
         menu.addAction("Library health...", self._gm_library_health)
         menu.addAction("Back up all saves...", self._gm_backup_all)
@@ -1125,6 +1150,24 @@ class GamesMixin:
             q.put(("games_install", gid, "done", str(path)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _gm_uninstall_window(self, only: list[str] | None = None) -> None:
+        """The installed RomM games, with the room they take, to uninstall one or several (a game's files go; it stays in the library).
+        `only` limits the list to those games (from a right-click) and ticks them."""
+        games = [g for g in self.gm_store.games() if g.source == "romm" and g.installed and g.id not in self._gm_installs]
+        dlg = InstalledRommDialog(self, games, self._gm_romm_folder(), self._gm_pixmap, self._gm_uninstalled)
+        if only:
+            dlg.preselect(set(only))
+        dlg.exec()
+
+    def _gm_uninstalled(self, ids: list[str]) -> None:
+        """Games were uninstalled: they are listed as not installed now, and a page that is open offers Install again."""
+        self._gm_selected.difference_update(ids)
+        self._gm_reload()
+        if self._gm_current in ids and (g := self._gm_game()) is not None:
+            self._gm_check_playable(g)
+            self._gm_refresh_buttons()
+            self._gm_sync_play_button(g)
 
     def _gm_cancel_install(self, gid: str) -> None:
         if (stop := self._gm_install_stop.get(gid)) is not None:
@@ -1446,6 +1489,8 @@ class GamesMixin:
             menu.addAction("Edit...", lambda: self._gm_edit(gid))
             menu.addAction("Show in folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(g.path).parent))))
         menu.addSeparator()
+        if any(x.source == "romm" and x.installed and x.id not in self._gm_installs for x in games):
+            menu.addAction("Uninstall..." if not many else "Uninstall installed RomM games...", lambda: self._gm_uninstall_window([x.id for x in games]))
         menu.addAction("Remove from library" if not many else f"Remove {len(ids)} games from library", lambda: self._gm_bulk_remove(ids))
         menu.exec(where)
 
@@ -1463,7 +1508,28 @@ class GamesMixin:
         menu.addAction("Fix names and discs...", lambda: self._gm_tool_fix(ids))
         menu.addAction("Find soundtrack...", lambda: self._gm_tool_sound(ids))
         menu.addAction("Fetch pictures...", lambda: self._gm_fetch_pictures(ids))
+        menu.addAction("Add tag...", lambda: self._gm_bulk_tag(ids))
+        menu.addAction("Remove tag...", lambda: self._gm_bulk_tag(ids, remove=True))
         menu.addAction("Verify against a DAT...", lambda: self._gm_verify(ids))
+
+    def _gm_bulk_tag(self, ids: list[str], remove: bool = False) -> None:
+        """Put a tag on every selected game, or take one off."""
+        games = self._gm_tool_games(ids)
+        if not games:
+            return
+        if remove:
+            have = sorted({t for g in games for t in gm.split_tags(g.tags)}, key=str.casefold)
+            if not have:
+                self._toast("None of these games has a tag.", "info", 4000)
+                return
+            tag, ok = msgbox.get_item(self, "Remove tag", f"Take which tag off {len(games)} game{'s' if len(games) != 1 else ''}?", have)
+            changed = self.gm_store.tag_many([g.id for g in games], remove=tag) if ok and tag else 0
+        else:
+            tag, ok = msgbox.get_text(self, "Add tag", f"Tag for {len(games)} game{'s' if len(games) != 1 else ''} (several can be separated by commas):")
+            changed = self.gm_store.tag_many([g.id for g in games], add=tag) if ok and tag.strip() else 0
+        if changed:
+            self._gm_reload()
+            self._toast(f"{'Took the tag off' if remove else 'Tagged'} {changed} game{'s' if changed != 1 else ''}.", "info", 4000)
 
     def _gm_tool_games(self, ids: list[str]) -> list[gm.Game]:
         return [g for g in (self.gm_store.get(i) for i in self._gm_expand(ids)) if g is not None]
@@ -1724,8 +1790,7 @@ class GamesMixin:
             error = ""
             for g in games:
                 try:
-                    m = gm.best_match(g)
-                    changed += bool(m and gm.fill_from_match(store, g, m))
+                    changed += bool(lbm.ensure_match(g, store, force=True, strict=True))  # the same matcher as on screen: it saves the link too
                 except gm.GameError as exc:
                     error = str(exc)
                     break
@@ -1797,7 +1862,10 @@ class GamesMixin:
 
     def _gm_event(self, ev: tuple) -> None:
         name = ev[0]
-        if name == "games_note":
+        if name == "games_matched":  # a game was matched: its details are read again, from that entry, when its page is next opened
+            self._gm_refetch.add(ev[1])
+            self._gm_details.pop(ev[1], None)
+        elif name == "games_note":
             if self._gm_scanning:
                 self.gm_status.setText(ev[1])
         elif name == "games_scanned":
@@ -1897,7 +1965,7 @@ class GamesMixin:
     def _gm_pixmap(self, g: gm.Game) -> QPixmap | None:
         """The cover for the grid. Called while painting, so only what is on screen is ever loaded or fetched."""
         if g.id not in self._gm_art:
-            self._gm_ensure_art(g)
+            self._gm_ensure_art(g, painting=True)
         if (self._gm_art_pending or self._gm_art_born) and not self._gm_shimmer.isActive():
             self._gm_shimmer_on()  # (the grid was hidden while it was waiting: carry on)
         return self._gm_art.get(g.id)
@@ -1923,18 +1991,79 @@ class GamesMixin:
         x = (time.monotonic() - born) / COVER_FADE
         return 1.0 if x >= 1.0 else x * x * (3 - 2 * x)
 
-    def _gm_ensure_art(self, g: gm.Game) -> None:
-        if g.id not in self._gm_art and (hit := gm.cover_path(g)) is not None:
-            self._gm_set_art(g.id, hit, repaint=False)
-        key = self.rc_store.sgdb_key()
-        if g.id in self._gm_art_tried or rc.cover_settled(gm.shim(g), key):
+    def _gm_ensure_art(self, g: gm.Game, painting: bool = False) -> None:
+        """Make sure the game's cover is on its way. `painting`: called from the grid's paint, which happens many times a second, so nothing
+        here may touch a widget or do more than a little disk work (the cover folder is looked at once every few seconds per game, not on every frame)."""
+        gid = g.id
+        if gid in self._gm_art_pending:  # asked for and not back yet: nothing to look at
             return
-        self._gm_art_tried.add(g.id)
-        self._gm_art_pending.add(g.id)
+        now = time.monotonic()
+        if gid not in self._gm_art and now - self._gm_disk_checked.get(gid, -DISK_RECHECK) >= DISK_RECHECK:
+            self._gm_disk_checked[gid] = now
+            if (hit := gm.cover_path(g)) is not None:
+                self._gm_set_art(gid, hit, repaint=False, painting=painting)
+        if gid in self._gm_art_tried:
+            return
+        key = self.rc_store.sgdb_key()
+        if rc.cover_settled(gm.shim(g), key):
+            self._gm_match_later(g)  # it has its cover, but is still matched: its details and the rest of its art should be the right entry's
+            return
+        self._gm_art_tried.add(gid)
+        self._gm_art_pending.add(gid)
+        self._gm_progress.add(gid, g.name)
         self._gm_art_q.add(g, key)
         self._gm_shimmer_on()
 
-    def _gm_set_art(self, gid: str, path: Path | None, repaint: bool = True) -> None:
+    def _gm_art_work(self, g: gm.Game, key: str):
+        """An art worker's job (off the UI thread): find the game's LaunchBox entry first, so its cover comes from the right one, then fetch it."""
+        self._gm_match_now(g)
+        self._gm_progress.begin(g.id, "cover")
+        found = gm.fetch_cover(g, key)
+        if found is not None:
+            self._gm_progress.covers_found(g.id)
+        return found
+
+    def _gm_art_done(self, g: gm.Game, found) -> None:
+        """Hand a worker's answer to the window (the one place workers talk to it) and count the game as done."""
+        self.ui_q.put(("games_art", g.id, found))
+        self._gm_progress.finish(g.id)
+
+    def _gm_art_busy_again(self, g: gm.Game) -> None:
+        self._gm_art_tried.discard(g.id)  # SteamGridDB was busy: the game is asked about again next time it is drawn
+        self._gm_art_pending.discard(g.id)
+
+    def _gm_art_dropped(self, games: list[gm.Game]) -> None:
+        """Covers that were asked for and taken off the queue before they began (the grid moved on): forgotten, so they are asked for again if they are drawn."""
+        for g in games:
+            self._gm_art_tried.discard(g.id)
+            self._gm_art_pending.discard(g.id)
+        self._gm_progress.drop([g.id for g in games])
+
+    def _gm_match_dropped(self, games: list[gm.Game]) -> None:
+        for g in games:
+            self._gm_match_asked.discard(g.id)
+        self._gm_progress.drop([g.id for g in games])
+
+    def _gm_match_now(self, g: gm.Game) -> None:
+        try:
+            if lbm.ensure_match(g, self.gm_store):
+                self.ui_q.put(("games_matched", g.id))
+                if g.lb_match in (lbm.AUTO, lbm.CONFIRMED):
+                    self._gm_progress.matched(g.id)
+        except Exception:  # a bonus: a game that can't be matched still gets its cover, and is asked about again another session
+            pass
+
+    def _gm_match_work(self, g: gm.Game) -> None:
+        self._gm_match_now(g)
+
+    def _gm_match_later(self, g: gm.Game) -> None:
+        """A game on screen that has its cover and no answer from LaunchBox yet: matched in the background, a few at a time."""
+        if g.id not in self._gm_match_asked and lbm.needs_match(g):
+            self._gm_match_asked.add(g.id)
+            self._gm_progress.add(g.id, g.name)
+            self._gm_match_q.add(g)
+
+    def _gm_set_art(self, gid: str, path: Path | None, repaint: bool = True, painting: bool = False) -> None:
         pix = cover_pixmap(path, DETAIL_W, DETAIL_H, self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0)
         if pix is None:
             return
@@ -1944,7 +2073,14 @@ class GamesMixin:
         if repaint:
             self.gm_list.viewport().update()
         if gid == self._gm_current and (cur := self._gm_by_id.get(gid)) is not None:
-            self._gm_detail_cover(cur)
+            if painting:  # (inside the grid's paint: resizing and filling the page's cover now would change widgets mid-paint)
+                QTimer.singleShot(0, lambda gid=gid: self._gm_refresh_detail_cover(gid))
+            else:
+                self._gm_detail_cover(cur)
+
+    def _gm_refresh_detail_cover(self, gid: str) -> None:
+        if gid == self._gm_current and (g := self._gm_by_id.get(gid)) is not None:
+            self._gm_detail_cover(g)
 
     def _gm_detail_cover(self, g: gm.Game) -> None:
         pix = self._gm_art.get(g.id)
@@ -1971,6 +2107,7 @@ class GamesMixin:
             return
         self._gm_art.pop(g.id, None)
         self._gm_art_tried.discard(g.id)
+        self._gm_disk_checked.pop(g.id, None)
         if path is not None:
             self._gm_set_art(g.id, path)
         else:
@@ -2076,6 +2213,7 @@ class GamesMixin:
                 leaving = self._gm_poster_box(gid)
         self._gm_by_id[gid] = g
         self._gm_current = gid
+        self.gm_views.set_stepping(len(self._gm_shown_ids()) > 1)  # chevrons to the games either side, when there are any
         self.gm_views.setCurrentIndex(1)
         self._gm_detail_cover(g)
         self._gm_ensure_art(g)
@@ -2098,12 +2236,25 @@ class GamesMixin:
         if leaving is not None:
             self._gm_fly_to_page(leaving)
 
+    def _gm_step(self, delta: int) -> None:
+        """Go to the game before (-1) or after (+1) this one, in the order the library is showing them (wrapping round at the ends), with
+        the card swiping away from that side and the new one swiping in."""
+        if self.gm_views.currentIndex() != 1 or not self._gm_current:
+            return
+        ids = self._gm_shown_ids()
+        shown = self._gm_group_of.get(self._gm_current, self._gm_current)  # (a poster that stands for several versions)
+        if len(ids) < 2 or shown not in ids:
+            return
+        target = ids[(ids.index(shown) + delta) % len(ids)]
+        self.gm_views.slide(delta, lambda: self._gm_show_detail(target))
+
     def _gm_fill_detail(self, g: gm.Game) -> None:
         clear_layout(self.gmd_chips)
         logo = self.gmd_logo.set_system(g.system)
         self.gmd_logo.setVisible(logo)
         for text, css in ((g.system.upper() if not logo else "", chip_css(T.accent_text)), (gm.SOURCES.get(g.source, "").upper(), chip_css(QColor(ROMM_COLOUR))),
-                          (g.region, pill_css(T.fg3)), (g.kind, pill_css(T.fg3)), (f"{g.discs} DISCS" if g.discs > 1 else "", pill_css(T.fg3))):
+                          (g.region, pill_css(T.fg3)), (g.kind, pill_css(T.fg3)), (f"{g.discs} DISCS" if g.discs > 1 else "", pill_css(T.fg3)),
+                          *((t, pill_css(T.fg3)) for t in gm.split_tags(g.tags)[:6])):
             if text:
                 label = QLabel(text)
                 label.setStyleSheet(css)
@@ -2233,16 +2384,20 @@ class GamesMixin:
     def _gm_launch(self, g: gm.Game, choice: str, resume: bool = False) -> str:
         """Start a game (from its newest save state with `resume`) and begin timing the session. Returns what it started with; raises
         gm.GameError with something the player can act on."""
-        plan = gm.plan_launch(g, choice, self._gm_retro(), self.gm_store.default_for(g.system), self._gm_emus(g.system), resume=resume)
+        plan = gm.plan_launch(g, choice, self._gm_retro(), self.gm_store.default_for(g.system), self._gm_emus(g.system), resume=resume,
+                              profile=self.gm_store.profile(g.id))  # (the game's own launch settings, if it has any)
         proc = gm.spawn(plan)
         self.gm_store.record_play(g.id)
+        self._gm_untimed = proc is None
+        if proc is None:  # started as administrator: Windows keeps the process to itself, so there is nothing to time
+            return f"{plan.label} as administrator"
         store, gid, q = self.gm_store, g.id, self.ui_q
 
         def finished(seconds: float) -> None:
             store.add_playtime(gid, seconds)
             q.put(("games_session", gid, seconds))
 
-        gm.watch_session(proc, finished)
+        gm.watch_session(proc, finished, gm.post_hook(plan))
         return plan.label
 
     def _gm_play(self) -> None:
@@ -2257,7 +2412,7 @@ class GamesMixin:
         except gm.GameError as exc:
             self.gmd_msg.setText(str(exc))
             return
-        self.gmd_msg.setText(f"Started with {label}. Distill adds up the time while it runs.")
+        self.gmd_msg.setText(f"Started with {label}." + (" The time isn't counted for a game started this way." if self._gm_untimed else " Distill adds up the time while it runs."))
         if (fresh := self._gm_game()) is not None:
             self._gm_apply_facts(fresh, self._gm_details.get(fresh.id))
 
@@ -2270,7 +2425,7 @@ class GamesMixin:
         except gm.GameError as exc:
             self.gmd_msg.setText(str(exc))
             return
-        self.gmd_msg.setText(f"Continuing with {label}. Distill adds up the time while it runs.")
+        self.gmd_msg.setText(f"Continuing with {label}." + (" The time isn't counted for a game started this way." if self._gm_untimed else " Distill adds up the time while it runs."))
         if (fresh := self._gm_game()) is not None:
             self._gm_apply_facts(fresh, self._gm_details.get(fresh.id))
 
@@ -2290,17 +2445,22 @@ class GamesMixin:
         names = sorted({*gm.system_choices(), *(s for s, _n in self.gm_store.systems() if s != gm.UNKNOWN)}, key=str.casefold)
         media_key = self._gm_group_of.get(gid, gid)  # versions of one game share their pictures
         dlg = EditGameDialog(self, g, names, self.rc_store.sgdb_key(), self._gm_art.get(gid), media_key=media_key, emu_info=self._gm_emu_options,
-                             manage=lambda: self._gm_platform_setup(dlg.system.currentText().strip() or g.system))
+                             manage=lambda: self._gm_platform_setup(dlg.system.currentText().strip() or g.system),
+                             tag_choices=[t for t, _n in self.gm_store.facets().get("tag", [])], profile=self.gm_store.profile(gid))
         if dlg.exec() != QDialog.DialogCode.Accepted or dlg.values is None:
             return
         v = dlg.values
         self.gm_store.update_details(gid, title=v["title"], system=v["system"], developer=v["developer"], publisher=v["publisher"], year=v["year"], genre=v["genre"],
-                                     rating=v["rating"], status=v["status"], notes=v["notes"])
+                                     rating=v["rating"], status=v["status"], notes=v["notes"], tags=v["tags"])
         for other in self._gm_groups.get(gid, ()):  # the same game in another version: the facts, and what the player thinks of it, are the same
             if other.id != gid:
                 self.gm_store.update_details(other.id, developer=v["developer"], publisher=v["publisher"], year=v["year"], genre=v["genre"],
-                                             rating=v["rating"], status=v["status"], notes=v["notes"])
+                                             rating=v["rating"], status=v["status"], notes=v["notes"], tags=v["tags"])
         fresh = self.gm_store.get(gid)
+        if dlg.picked is not None:  # the player chose an entry in the lookup: that is the game, whatever the scoring would have said
+            lbm.confirm(fresh or g, self.gm_store, dlg.picked)
+            self._gm_refetch.add(gid)
+            self._gm_details.pop(gid, None)
         system = fresh.system if fresh is not None else g.system
         if dlg.make_default and dlg.chosen_emulator:  # the Emulator tab: for every game on the platform (this one follows it again), or just this one
             self.gm_store.set_default(system, dlg.chosen_emulator)
@@ -2309,6 +2469,8 @@ class GamesMixin:
             self.gm_store.set_emulator(gid, dlg.emulator)
         for emu, text in dlg.launch_args.items():
             self.gm_store.set_setting(f"args:{emu}", text)  # '' = back to Distill's own
+        if dlg.profile is not None:
+            self.gm_store.set_profile(gid, dlg.profile)  # this game's own launch settings
         problems = mm.apply_plan(media_key, dlg.media_plan) if not dlg.media_plan.empty() else []  # the Media tab's choices
         before = (g.name, g.system, g.developer, g.publisher, g.year, g.genre)
         after = (fresh.name, fresh.system, fresh.developer, fresh.publisher, fresh.year, fresh.genre) if fresh is not None else before
@@ -2348,9 +2510,33 @@ class GamesMixin:
         if g is None:
             return
         key = self._gm_group_of.get(g.id, g.id)
-        if mm.cached_manual(key) is None and not self._gm_choose_manual(g, key):
+        if mm.cached_manual(key) is None and not self._gm_add_manual(g, key):
             return
         self._gm_read_manual(g, key)
+
+    def _gm_add_manual(self, g: gm.Game, key: str) -> bool:
+        """The game has no manual yet: offer to find one online or choose a PDF, and say whether one was added."""
+        menu = QMenu(self)
+        online = menu.addAction("Find online...")
+        pick = menu.addAction("Choose a file...")
+        chosen = menu.exec(self.gmd_manual.mapToGlobal(self.gmd_manual.rect().bottomLeft()))
+        if chosen is online:
+            return self._gm_find_manual(g, key)
+        return chosen is pick and self._gm_choose_manual(g, key)
+
+    def _gm_find_manual(self, g: gm.Game, key: str) -> bool:
+        """Search the Internet Archive for the game's manual, and keep the one the player picks."""
+        platform = gm.LB_PLATFORM_NAMES.get(g.system, "" if g.system == gm.UNKNOWN else g.system)
+        dlg = ManualPickerDialog(self, g.name, g.system, platform, g.region)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.path is None:
+            return False
+        ok = mm.set_manual(key, dlg.path)
+        dlg.path.unlink(missing_ok=True)  # (it was a temporary download: the game keeps its own copy)
+        if not ok:
+            msgbox.warning(self, "Manual", "That file couldn't be used as a manual. It needs to be a PDF.")
+            return False
+        self._gm_refresh_manual_button(g)
+        return True
 
     def _gm_choose_manual(self, g: gm.Game, key: str) -> bool:
         path, _ = QFileDialog.getOpenFileName(self, f"Choose the manual for {g.name}", "", "PDF files (*.pdf);;All files (*)")
@@ -2382,6 +2568,7 @@ class GamesMixin:
         has = mm.cached_manual(key) is not None
         menu = QMenu(self)
         read = menu.addAction("Read manual") if has else None
+        find = menu.addAction("Find a different one online..." if has else "Find online...")
         pick = menu.addAction("Choose a different PDF..." if has else "Choose a PDF...")
         remove = menu.addAction("Remove manual") if has else None
         chosen = menu.exec(self.gmd_manual.mapToGlobal(pos))
@@ -2389,6 +2576,8 @@ class GamesMixin:
             return
         if chosen is read:
             self._gm_read_manual(g, key)
+        elif chosen is find:
+            self._gm_find_manual(g, key)
         elif chosen is pick:
             self._gm_choose_manual(g, key)
         elif chosen is remove:

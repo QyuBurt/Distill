@@ -531,14 +531,45 @@ class LaunchBoxParseTests(unittest.TestCase):
         self.assertEqual(rc._lb_game_ids(page, "Banjo-Kazooie", "Nintendo 64"), ["7"])
         self.assertEqual(rc._lb_game_ids("nothing", "Banjo-Kazooie", "Nintendo 64"), [])
 
-    def test_posters_ranked_poster_then_box_front_and_others_ignored(self):
+    def test_posters_ranked_box_front_then_poster_and_others_ignored(self):
         a, b, c = self.GUID("a"), self.GUID("b"), self.GUID("c")
         gap = "." * 900
         page = (f'<img src="https://images.launchbox-app.com/{a}.jpg"> Screenshot - Gameplay {gap}'
                 f'<img src="https://images.launchbox-app.com/{b}.png"> Box - Front {gap}'
                 f'<img src="https://images.launchbox-app.com/{c}.jpg"> Poster')
-        self.assertEqual(rc._lb_posters(page), [f"https://images.launchbox-app.com/{c}.jpg", f"https://images.launchbox-app.com/{b}.png"])
+        self.assertEqual(rc._lb_posters(page), [f"https://images.launchbox-app.com/{b}.png", f"https://images.launchbox-app.com/{c}.jpg"])
         self.assertEqual(rc._lb_posters("<img> Clear Logo"), [])
+
+    def test_box_then_reconstructed_box_then_flyer_and_regions_in_the_chosen_order(self):
+        g = lambda c: f"https://images.launchbox-app.com/{self.GUID(c)}.jpg"  # noqa: E731
+        img = lambda c, alt: f'<img src="{g(c)}" alt="G - {alt}">'  # noqa: E731
+        page = (img("a", "Advertisement Flyer - Front (Europe) - 900x1400") + img("b", "Box - Front (North America) - 1000x1000")
+                + img("c", "Box - Front (Europe) - 1000x1000") + img("d", "Box - Front - Reconstructed (Japan) - 1000x1000")
+                + img("e", "Box - Front (Japan) - 1000x1000"))
+        try:
+            rc.set_cover_regions(["Europe", "North America", "Japan", "Asia"])
+            self.assertEqual(rc._lb_posters(page), [g(x) for x in "cbeda"])
+            rc.set_cover_regions(["Japan", "Asia", "North America", "Europe"])
+            self.assertEqual(rc._lb_posters(page), [g(x) for x in "ebcda"])
+        finally:
+            rc.set_cover_regions(rc.COVER_REGIONS)
+
+    def test_fan_made_boxes_spines_and_backs_are_never_covers(self):
+        g = lambda c: f"https://images.launchbox-app.com/{self.GUID(c)}.jpg"  # noqa: E731
+        alt = lambda c, a: f'<img src="{g(c)}" alt="G - {a}">'  # noqa: E731
+        page = (alt("a", "Fanart - Box - Front (Europe) - 1000x1000") + alt("b", "Box - Spine (Europe) - 100x1000")
+                + alt("d", "Box - Back (Europe) - 1000x1000") + alt("c", "Box - Front (Japan) - 1000x1000"))
+        self.assertEqual(rc._lb_posters(page), [g("c")])
+        head = lambda c, n: f'<h3>{n}</h3><img src="{g(c)}">'  # noqa: E731  (no alt text: the heading names the picture)
+        self.assertEqual(rc._lb_posters(head("a", "Fanart - Box - Front") + head("b", "Box - Spine") + head("c", "Box - Front")), [g("c")])
+
+    def test_a_region_left_out_of_the_order_follows_the_others(self):
+        try:
+            rc.set_cover_regions(["Japan"])
+            self.assertEqual(rc.cover_regions(), ["Japan", "Europe", "North America", "Asia"])
+        finally:
+            rc.set_cover_regions(rc.COVER_REGIONS)
+
 
     def test_image_size_and_portrait(self):
         import struct
@@ -556,7 +587,7 @@ class LaunchBoxParseTests(unittest.TestCase):
 
 
 class CoverTests(Isolated):
-    def test_portrait_poster_beats_landscape_box_and_landscape_is_the_fallback(self):
+    def test_a_box_front_beats_a_poster_whatever_its_shape_and_the_poster_is_the_fallback(self):
         import struct
         png = lambda w, h: b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"0" * 2000  # noqa: E731
         guid = lambda c: "-".join(c * n for n in (8, 4, 4, 4, 12))  # noqa: E731
@@ -574,11 +605,11 @@ class CoverTests(Isolated):
             raise rc.urllib.error.URLError("nope")
         with mock.patch.object(rc, "_get", fake):
             got = rc.fetch_cover(recomp(id="p1"))
-        self.assertEqual(rc.image_size(got.read_bytes()), (300, 420))
-        shapes[poster] = b"junk"  # no poster any more: the landscape box is better than nothing
+        self.assertEqual(rc.image_size(got.read_bytes()), (420, 300))  # the landscape box front wins: boxes are wide on some consoles
+        shapes[box] = b"junk"  # no box front scan that loads: the poster is the fallback
         with mock.patch.object(rc, "_get", fake):
             got = rc.fetch_cover(recomp(id="p2"))
-        self.assertEqual(rc.image_size(got.read_bytes()), (420, 300))
+        self.assertEqual(rc.image_size(got.read_bytes()), (300, 420))
 
     def test_first_working_source_wins_and_is_cached(self):
         r = recomp(cover="https://x/cover.png")

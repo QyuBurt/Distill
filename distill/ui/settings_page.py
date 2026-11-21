@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -13,15 +15,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .. import magnet, ytdlp
+from .. import magnet, recomps as rc, ytdlp
 from ..constants import (
     PKG_LAYOUTS, PKG_MISSING_HINT,
     PKG_TOOLS, PS3_OUTPUTS, RVZ_DEFAULT_LEVEL,
     RVZ_MAX_LEVEL, TOOL_MISSING_TEXT,
 )
 from ..downloads import DL_MAX_PARALLEL
+from ..convertpages import DEFAULT_UNPINNED
+from ..orgreview import ACCENT, BAD, OK, WARN
+from ..pagesummary import perf_summary
 from ..folderwatch import WATCH_FOLDER
 from ..system import portable_path, resolve_dolphintool, resolve_tool_path
+from ..toolinfo import ToolInfos, managers, version_text
+from ..toolstate import describe, overview, tool_state
 from . import motion
 from .state import LABEL_W, TOOL_GROUPS, TOOLS
 from .apikeys_card import ApiKeysPanel, KeyFolder
@@ -29,9 +36,14 @@ from .dialogs import LoginsDialog, TorrentDialog
 from .frameless import FramelessDialog
 from .nav import NAV_GROUPS
 from .motion import Motion
+from .review_bar import ReviewBar
+from .theme import T
 from .rules_panel import RulesPanel
 from .ytdlp_card import YtdlpCard
 from .widgets import (AnimCheckBox, AnimRadio, Card, Expander, hint, PathRow, StageSwitch, StepSwitch, ToolRow)
+
+
+TOOL_TONES = {OK: lambda: T.ok, WARN: lambda: T.warn, BAD: lambda: T.bad, ACCENT: lambda: T.accent}  # a tool tag's tone -> the theme colour it is drawn in
 
 
 class SettingsMixin:
@@ -86,6 +98,14 @@ class SettingsMixin:
         steps: dict[int, str] = {}
         for share, name in ((0.25, "Low"), (0.5, "Medium"), (0.75, "High"), (1.0, "All")):
             steps[max(1, round(self.sys_threads * share))] = name  # a later name wins when counts coincide
+        self.cover_region_boxes = []  # the order of preference for box art regions (Settings > General > Cover art)
+        for n in range(len(rc.COVER_REGIONS)):
+            box = combo(rc.COVER_REGIONS, rc.cover_regions()[n])
+            box.setToolTip("Choosing a region that is already used elsewhere swaps the two.")
+            box.activated.connect(lambda _i, b=box: self._cover_region_picked(b))
+            box.currentTextChanged.connect(lambda _t: self._cover_regions_apply())
+            setattr(self, f"cover_region_{n + 1}", box)
+            self.cover_region_boxes.append(box)
         self.thread_budget = StageSwitch(describe="below")
         for count, name in sorted(steps.items()):
             self.thread_budget.addItem(name, count, f"{count} of {self.sys_threads} system threads - dynamically "
@@ -125,6 +145,8 @@ class SettingsMixin:
         lay.addWidget(self.temp_dir)
         lay.addWidget(hint("Optional. Extract archives to a RAM disk or SSD instead of the system temp folder. "
                            "It needs room for about two unpacked archives."))
+        card.set_summary(lambda: perf_summary(self.thread_budget.currentText(), self.thread_budget.currentData(), self.sys_threads,
+                                              self.io_mode.currentText(), self.temp_dir.text()))  # folded: what it is set to
         return card
 
     def _tool_text(self, key: str) -> str:
@@ -145,6 +167,21 @@ class SettingsMixin:
 
     def _logins_saved(self) -> None:
         self.dl_remember = self.logins_panel.remember_value
+
+    def _cover_region_picked(self, picked: QComboBox) -> None:
+        """A region was chosen for one place in the order: the place that had it takes the one this place had, so each region stays once."""
+        boxes = self.cover_region_boxes
+        old = rc.cover_regions()
+        new_text, i = picked.currentText(), boxes.index(picked)
+        for other in boxes:
+            if other is not picked and other.currentText() == new_text:
+                other.blockSignals(True)
+                other.setCurrentText(old[i])
+                other.blockSignals(False)
+        self._cover_regions_apply()
+
+    def _cover_regions_apply(self) -> None:
+        rc.set_cover_regions([b.currentText() for b in self.cover_region_boxes])
 
     def _set_reduce_motion(self, on: bool) -> None:
         Motion.reduce = on
@@ -261,13 +298,19 @@ class SettingsMixin:
                                "Browse only if you want to use a different copy. The dots in the side panel show which "
                                "conversion tools are ready; the dots at the bottom right of Files & Torrents show yt-dlp, "
                                "ffmpeg and your default downloader."))
+        self.tools_review = ReviewBar()  # how many tools are ready, busy or missing, at a glance
+        self._toolinfos, self._tool_info_cache, self._tool_info_at = ToolInfos(), {}, 0.0  # each tool's version, and Update now
+        self._updating: set[str] = set()  # tools whose Update now is in progress
+        lay.addWidget(self.tools_review)
         for group, tools in TOOL_GROUPS.items():
             card = Card(group)
             for key, label in tools.items():
                 row = ToolRow(label, LABEL_W)
                 self._register_tool_row(key, row)
+                row.update_btn.clicked.connect(lambda _checked=False, k=key: self._tool_update(k))
                 card.add(row)
             lay.addWidget(card)
+        self._refresh_tool_chips()
         keys = Card("Switch keys")
         keys.add(hint("Needed to open Switch 1 files (nscb_rust) and to decrypt them for NUP (hactoolnet). Dump them from your own "
                       "console with Lockpick_RCM. Distill only remembers where the files are; it never copies or uploads them.",
@@ -378,6 +421,16 @@ class SettingsMixin:
         card.add(self.notify_check)
         lay.addWidget(card)
 
+        card = Card("Cover art")  # which region's box art wins when a game has several (LaunchBox): keeps a library looking alike
+        card.add(hint("Order of preference for box art. The front box is used first (whatever its shape), then a rebuilt front box scan, and a poster or flyer only if there is neither; within those, "
+                      "the region at the top wins. Covers already fetched are not changed."))
+        for n, box in enumerate(self.cover_region_boxes):
+            label = QLabel(f"{['1st', '2nd', '3rd', '4th'][n]} choice")
+            label.setObjectName("pathLabel")
+            card.add(label)
+            card.add(box)
+        lay.addWidget(card)
+
         lay.addStretch(1)
 
         # -- Sidebar: compact mode, and which tools are pinned to it
@@ -409,7 +462,7 @@ class SettingsMixin:
                 if key.startswith("act_"):  # Logins / Torrent privacy live in Settings
                     continue
                 box = AnimCheckBox(text)
-                box.setChecked(True)
+                box.setChecked(key not in DEFAULT_UNPINNED)  # a fresh install pins the hub; the person pins the tools they use
                 box.toggled.connect(self._apply_pins)
                 self._pin_boxes[key] = box
                 card.add(box)
@@ -445,6 +498,7 @@ class SettingsMixin:
         self._tool_rows[key].append(row)
         row.path.edit.textEdited.connect(lambda text, k=key: self._set_tool_text(k, text, user=True))
         row.path.edit.textChanged.connect(lambda *_: self._refresh_nav_dots())
+        row.path.edit.textChanged.connect(lambda *_: self._refresh_tool_chips())
         if key == "ytdlp":
             row.path.edit.textChanged.connect(self._ytdlp_path_changed)
 
@@ -464,6 +518,63 @@ class SettingsMixin:
     def _set_tool_status(self, key: str, text: str) -> None:
         for row in self._tool_rows[key]:
             row.status.setText(text)
+        self._refresh_tool_chips()
+
+    def _tool_state(self, key: str) -> str:
+        """Ready / checking / updating / missing, by the rule the sidebar dots and footer markers use."""
+        path = self._tool_text(key)
+        ready = bool(path) and (Path(resolve_tool_path(path)).is_file() or bool(shutil.which(path)))
+        pending = key in (getattr(self, "_pending_tools", set()) | getattr(self, "_pending_dl", set()))
+        return tool_state(ready, pending, key in getattr(self, "_installing", set()))
+
+    def _refresh_tool_chips(self) -> None:
+        """A tag on every tool row (Ready / Checking / Updating / Missing) and the overview above them, by the rule the sidebar
+        dots and the footer markers use. Cheap enough to run on every status line."""
+        if not hasattr(self, "tools_review"):
+            return
+        states = {}
+        for key in (k for tools in TOOL_GROUPS.values() for k in tools):
+            if not self._tool_rows[key]:
+                continue  # its row is not built yet
+            states[key] = self._tool_state(key)
+            text, tone = describe(states[key])
+            for row in self._tool_rows[key]:
+                row.set_state(text, TOOL_TONES[tone])
+        self.tools_review.set_chips(overview(states))
+        self._refresh_tool_info()
+        self._cv_refresh()  # the Convert hub's cards follow the same tools
+
+    def _refresh_tool_info(self, force: bool = False) -> None:
+        """The version line on every tool row, and whether its Update now can be pressed. The versions are re-read from the tools'
+        folders at most every two seconds (or when asked); which buttons are live follows what is running, on every call."""
+        if not hasattr(self, "_toolinfos"):
+            return
+        if force or time.monotonic() - self._tool_info_at > 2.0:
+            self._tool_info_cache = {key: self._toolinfos.info(key) for tools in TOOL_GROUPS.values() for key in tools}
+            self._tool_info_at = time.monotonic()
+        busy_run = self.is_processing or self.org_busy or self.dl_runner is not None
+        for key, info in self._tool_info_cache.items():
+            if info is None or not self._tool_rows[key]:
+                continue
+            working = key in self._installing or key in self._updating
+            tip = (info.reason or ("Wait for the running job to finish first: it may be using this tool." if busy_run
+                                   else "A download is in progress." if working
+                                   else "Look for a newer version now, and install it if there is one."))
+            for row in self._tool_rows[key]:
+                row.set_info(version_text(info), info.can_update and not busy_run and not working, tip)
+
+    def _tool_update(self, key: str) -> None:
+        """Update now: the check Distill makes when it starts, made again. A newer release is downloaded, tried, and kept only if it
+        runs (the old copy is put back if not): that is the manager's own doing. Not while a job is running, which may be using the tool."""
+        cls = managers().get(key)
+        if cls is None or key in self._updating or key in self._installing:
+            return
+        if self.is_processing or self.org_busy or self.dl_runner is not None:
+            return  # the button is disabled for this; belt and braces
+        self._updating.add(key)
+        self._set_tool_status(key, f"Checking for a newer {TOOLS[key][0]}...")
+        self._refresh_tool_info()
+        threading.Thread(target=cls(self.ui_q.put).run, daemon=True, name=f"update-{key}").start()
 
     def _tool_path_found(self, key: str, path: str) -> None:
         if self._tool_text(key) in ("", self._auto[key]):  # never overwrite a manual choice
@@ -478,6 +589,9 @@ class SettingsMixin:
     def _tool_ready(self, key: str) -> None:
         self._pending_tools.discard(key)
         self._pending_dl.discard(key)
+        getattr(self, "_updating", set()).discard(key)
+        self._refresh_tool_chips()
+        self._refresh_tool_info(force=True)  # a new copy may just have landed: read its version
         self._refresh_nav_dots()
         self._refresh_markers()
         self._sync_run_controls()  # Start comes alive once every tool check is in (and nothing on this page's side is running)

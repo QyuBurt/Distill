@@ -779,6 +779,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         from PySide6.QtCore import Qt
 
         self.assertEqual(dlg.list.item(0).data(Qt.ItemDataRole.UserRole), "sound")
+        win._pin_boxes["chd"].setChecked(True)
         self.assertIn("Ctrl+1", win.nav_items["chd"].toolTip())
 
     def test_title_shows_progress_while_running_and_settings_search_filters(self):
@@ -1140,6 +1141,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_quick_search_filters_tools_and_their_groups(self):
         win = self.make_window()
         self.addCleanup(win.close)
+        win._pin_boxes["chd"].setChecked(True)  # a fresh install pins no converter or organiser: pin two to search among
+        win._pin_boxes["fix"].setChecked(True)
         win.nav_search.setText("torrent")
         self.assertFalse(win.nav_items["dl"].isHidden())
         self.assertTrue(win.nav_items["chd"].isHidden())
@@ -1562,7 +1565,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win.is_processing = True
         win._begin_run_label("chd")
         win._runbar_sync()
-        self.assertTrue(win.run_bar.isHidden())  # on the running page itself, the page has the progress
+        self.assertFalse(win.run_bar.isHidden())  # the one progress bar: up on the running page too, not only on other pages
         win._show_page("fix")
         self.assertFalse(win.run_bar.isHidden())
         self.assertEqual(win.run_bar.title, "CHD Compression")
@@ -1572,7 +1575,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertIn("CHD Compression", win.start_btn.toolTip())
         win._run_bar_clicked()
         self.assertEqual(win.current_page, "chd")
-        self.assertTrue(win.run_bar.isHidden())
+        self.assertFalse(win.run_bar.isHidden())  # still up while the job runs, and clicking it there changes nothing
+        win._run_bar_clicked()
+        self.assertEqual(win.current_page, "chd")
         win._show_page("fix")
         win.is_processing = False
         win._runbar_sync()
@@ -1591,6 +1596,336 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(win._panel_mode, "conv")
         win.is_processing = False
 
+    def test_the_queue_follows_the_task_events_beside_the_log(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._show_page("chd")
+        win.queue_view.begin_run()
+        win.queue_view.set_running(True)
+        win._apply_events([("new", 1, "[  WAITING   ] Good"), ("new", 2, "[  WAITING   ] Bad"),
+                           ("update", 1, "[ CONVERTING ]", "(40.0%) Good"),
+                           ("update", 2, "[   ERROR    ]", "Bad (Conversion failed - exit code 1)")])
+        model = win.queue_view.model
+        self.assertEqual(model.rowCount(), 2)
+        self.assertEqual((model.task_at(0).name, model.task_at(0).pct), ("Good", 40.0))
+        self.assertEqual(model.task_at(1).note, "Conversion failed - exit code 1")
+        self.assertIn("Bad", win.log.toPlainText())  # the log is written exactly as before
+        win.queue_view._refresh()
+        self.assertIn("1 running", win.queue_view.headline.text())
+        self.assertIn("1 failed", win.queue_view.headline.text())
+
+    def test_the_switch_swaps_the_queue_and_the_log_and_a_search_goes_to_the_log(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._show_page("chd")
+        self.assertFalse(win.queue_view.isHidden())  # the queue is what a conversion page shows
+        self.assertTrue(win.log.isHidden())
+        win.view_log.setChecked(True)
+        self.assertTrue(win.queue_view.isHidden())
+        self.assertFalse(win.log.isHidden())
+        win.view_queue.setChecked(True)
+        self.assertFalse(win.queue_view.isHidden())
+        self.assertTrue(win.log.isHidden())
+        win.log_find.setText("anything")
+        win._log_find()
+        self.assertTrue(win.view_log.isChecked())  # the words are in the log, so the log comes up
+
+    def test_the_queue_filters_settle_stopped_rows_and_keep_a_retrys_old_rows(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        view = win.queue_view
+        view.begin_run()
+        view.set_running(True)
+        view.task_new(1, "[  VERIFIED  ] Done - 10% smaller (1.00 GB -> 900.00 MB)")
+        view.task_new(2, "[ CONVERTING ] (40.0%) Halfway")
+        view.task_new(3, "[   ERROR    ] Bad (Conversion failed - exit code 1)")
+        view.filters["problems"].setChecked(True)
+        self.assertEqual(view.model.rowCount(), 1)
+        view.filters["active"].setChecked(True)
+        self.assertEqual([view.model.task_at(r).name for r in range(view.model.rowCount())], ["Halfway"])
+        view.filters["all"].setChecked(True)
+        view.set_running(False)  # Stop: the row that was part-way says so
+        self.assertEqual(view.model.task_at(1).state, "STOPPED")
+        view.begin_run(keep=True)  # a retry: the earlier rows stay, dimmed, and the new run is counted alone
+        view.task_new(1, "[ CONVERTING ] Bad")
+        self.assertEqual(view.model.rowCount(), 4)
+        self.assertTrue(view.model.stale(0))
+        self.assertFalse(view.model.stale(3))
+        view.clear()
+        self.assertEqual(view.model.rowCount(), 0)
+
+    def test_the_organise_review_chips_follow_the_selection(self):
+        from distill.organize import Finding
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        st = win.org["fix"]
+        st.findings = [Finding("a", size=2**30), Finding("b", problem="locked")]
+        st.checked = {0}
+        win._org_update_status("fix")
+        shown = lambda: [label.text() for label in st.review._labels if not label.isHidden()]  # noqa: E731
+        self.assertEqual(shown(), ["1 of 2 selected", "frees 1.00 GB", "1 can't be applied"])
+        st.checked = set()
+        win._org_update_status("fix")
+        self.assertEqual(shown(), ["0 of 2 selected", "1 can't be applied"])
+        win._org_show("fix", [], "", "")  # a scan that found nothing leaves no stale selection behind
+        self.assertEqual(shown(), [])
+
+    def test_the_download_list_chips_follow_the_ticks_and_the_run(self):
+        from distill.downloads import RemoteFile
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.dl_model.set_files([RemoteFile("a.bin", "http://x/a", 2**30), RemoteFile("b.bin", "http://x/b", None),
+                                RemoteFile("c.bin", "http://x/c", 5)])
+        shown = lambda: [label.text() for label in win.dl_review._labels if not label.isHidden()]  # noqa: E731
+        win.dl_checked = {0, 1}
+        win._dl_update_sel()
+        self.assertEqual(shown(), ["2 of 3 selected \u00b7 1.00 GB+"])
+        win.dl_model.status[0], win.dl_model.status[1], win.dl_model.status[2] = "Done", "12.0%", "Failed: HTTP 404"
+        win._dl_chips()
+        self.assertEqual(shown(), ["2 of 3 selected \u00b7 1.00 GB+", "1 downloading", "1 done", "1 failed"])
+        win.dl_model.set_files([])
+        win._dl_update_sel()
+        self.assertEqual(shown(), [])  # an emptied list leaves no stale counts
+
+    def test_after_downloads_folds_to_a_line_that_follows_its_boxes(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        fold = win.dl_after
+        self.assertEqual(fold.summary.text(), "Nothing happens when they finish")
+        self.assertTrue(fold.body.isHidden())
+        win.dl_organize.setChecked(True)
+        win.dl_power.setCurrentIndex(1)
+        self.assertIn("open Sort by System", fold.summary.text())
+        self.assertIn("then sleep the computer", fold.summary.text())
+        fold.head.setChecked(True)  # the controls inside are the same widgets, and are reachable
+        self.assertFalse(fold.body.isHidden())
+        self.assertIs(win.dl_command.parentWidget().parentWidget(), fold.body)
+        win.dl_organize.setChecked(False)
+        win.dl_power.setCurrentIndex(0)
+        self.assertEqual(fold.summary.text(), "Nothing happens when they finish")
+
+    def test_the_tools_page_tags_each_tool_and_counts_them(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        row = win._tool_rows["chdman"][0]
+        win._pending_tools.discard("chdman")
+        win._pending_dl.discard("chdman")
+        win._installing.discard("chdman")
+        win._set_tool_text("chdman", "/no/such/folder/chdman")
+        win._refresh_tool_chips()
+        self.assertEqual(row.chip.text(), "Missing")
+        shown = [label.text() for label in win.tools_review._labels if not label.isHidden()]
+        self.assertTrue(shown[0].endswith(" ready") and any(t.endswith(" missing") for t in shown), shown)
+        win._installing.add("chdman")  # a download in progress shows as updating, whatever else is true
+        win._refresh_tool_chips()
+        self.assertEqual(row.chip.text(), "Updating")
+        win._installing.discard("chdman")
+        win._pending_tools.add("chdman")
+        win._refresh_tool_chips()
+        self.assertEqual(row.chip.text(), "Checking")
+
+    def test_all_tools_opens_each_page_and_its_pin_edits_the_sidebar(self):
+        from distill.convertpages import DEFAULT_UNPINNED, all_tool_keys
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertEqual(set(win.cv_cards), set(all_tool_keys()))  # nine converters and five organisers
+        win._show_page("convert")
+        self.assertEqual(win.current_page, "convert")
+        self.assertEqual(win._current_mode(), "emus")  # no run panel and no Start button, like the Emulators page
+        self.assertIn(win.cv_cards["chd"].tag.text(), ("Ready", "Checking", "Updating", "Missing", "Running"))
+        self.assertTrue(win.cv_cards["fix"].tag.isHidden())  # an organiser has no tool to report on
+        self.assertFalse(win.nav_items["convert"].isHidden())  # a fresh install has the hub in the sidebar and none of the tools
+        for key in ("chd", "fix"):
+            self.assertTrue(win.nav_items[key].isHidden(), key)
+            self.assertFalse(win.cv_cards[key].pin.isChecked(), key)
+        win.cv_cards["chd"].pin.click()  # pin one from its card
+        self.assertTrue(win._pin_boxes["chd"].isChecked())
+        self.assertFalse(win.nav_items["chd"].isHidden())
+        win._pin_boxes["fix"].setChecked(True)  # and Settings > Sidebar moves the pin on the card
+        self.assertTrue(win.cv_cards["fix"].pin.isChecked())
+        self.assertFalse(win.nav_groups["ORGANISE LIBRARY"]["header"].isHidden())
+        win.cv_cards["chd"].pin.click()  # unpin it again
+        self.assertTrue(win.nav_items["chd"].isHidden())
+        self.assertIn("chd", win.pages)  # still there: the hub and Ctrl+K reach it
+        win.cv_cards["rvz"].clicked.emit("rvz")  # a card opens its page
+        self.assertEqual(win.current_page, "rvz")
+        win._show_page("convert")
+        win.cv_cards["rvz"].pin.click()  # but its pin does not
+        self.assertEqual(win.current_page, "convert")
+        self.assertTrue(set(DEFAULT_UNPINNED) >= {"rvz"})
+
+    def test_estimate_savings_samples_the_source_and_reports_on_its_page(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertEqual(set(win._pv_rows), {"chd", "rvz", "cso", "zar"})  # not Switch, PS3, PKG or Xbox
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "Game.cue").write_text('FILE "Game.bin" BINARY\n  TRACK 01 MODE2/2352\n')
+            (Path(folder) / "Game.bin").write_bytes(b"\0" * (2 << 20))
+            win.tabs["chd"].source.setText(folder)
+            row = win._pv_rows["chd"]
+            win._pv_start("chd")
+            self.assertEqual(row.button.text(), "Stop estimating")
+            deadline = time.monotonic() + 15
+            while "chd" in win._pv_state and time.monotonic() < deadline:
+                events = []
+                while not win.ui_q.empty():
+                    events.append(win.ui_q.get())
+                win._apply_events(events)
+                time.sleep(0.05)
+            self.assertNotIn("chd", win._pv_state)
+            self.assertEqual(row.button.text(), "Estimate savings")
+            self.assertTrue(row.label.text().startswith("About "), row.label.text())
+            self.assertIn("1 title", row.label.text())
+
+    def test_organise_detail_rows_show_what_stays_and_what_goes_in_colour(self):
+        from distill.organize import Finding
+        from distill.ui.theme import T
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        st = win.org["extras"]
+        finding = Finding("Game", "2", "Keeping a.chd  |  frees 2.00 GB",
+                          children=[("a.chd", "1.00 GB", "KEEP"), ("a.iso", "2.00 GB", "Remove")])
+        win._org_show("extras", [finding], "", "")
+        top = st.tree.topLevelItem(0)
+        keep, gone = top.child(0), top.child(1)
+        self.assertEqual(keep.foreground(2).color().name(), T.ok.name())
+        self.assertTrue(keep.font(2).bold())
+        self.assertEqual(gone.foreground(2).color().name(), T.bad.name())
+        self.assertFalse(gone.font(2).bold())
+        win._org_show("extras", [Finding("Game.cue", "2", "->  Game (USA).cue")], "", "")  # a rename's destination stands out
+        self.assertEqual(st.tree.topLevelItem(0).foreground(2).color().name(), T.accent.name())
+
+    def test_tool_rows_show_their_version_and_update_now_waits_for_a_job(self):
+        from unittest import mock
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        row = win._tool_rows["chdman"][0]
+        win._refresh_tool_info(force=True)
+        self.assertFalse(row.version.isHidden())
+        self.assertFalse(row.update_btn.isHidden())
+        info = win._tool_info_cache["chdman"]
+        self.assertEqual(row.update_btn.isEnabled(), info.can_update)  # idle: live wherever an update can do anything
+        win.is_processing = True  # a conversion may be using the tool
+        self.addCleanup(setattr, win, "is_processing", False)
+        win._refresh_tool_info()
+        self.assertFalse(row.update_btn.isEnabled())
+        self.assertIn("running job", row.update_btn.toolTip())
+        with mock.patch("threading.Thread.start") as start:
+            win._tool_update("chdman")
+            start.assert_not_called()  # and pressing it anyway starts nothing
+        win.is_processing = False
+        with mock.patch("threading.Thread.start") as start:
+            win._tool_update("chdman")
+            start.assert_called_once()
+        self.assertIn("chdman", win._updating)
+        win._tool_ready("chdman")  # the manager always ends with a ready event
+        self.assertNotIn("chdman", win._updating)
+
+    def test_the_links_box_is_one_line_and_grows_with_the_links(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        box = win.dl_url_text
+        one = box.height()
+        self.assertLess(one, 60)  # a slim row, not the 96 px box it was
+        box.setPlainText("https://archive.org/details/a")
+        self.assertEqual(box.height(), one)  # a single link stays one line
+        box.setPlainText("https://a\nhttps://b\nhttps://c")
+        three = box.height()
+        self.assertGreater(three, one)
+        box.setPlainText("x\n" * 40)
+        most = box.height()
+        self.assertGreater(most, three)
+        box.setPlainText("x\n" * 400)
+        self.assertEqual(box.height(), most)  # it stops growing and scrolls
+        box.clear()
+        self.assertEqual(box.height(), one)
+        self.assertGreaterEqual(win.dl_fetch_btn.x(), 0)  # (the Fetch button sits beside the box now, not under it)
+
+    def test_the_bar_along_the_bottom_is_the_only_progress_bar(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertFalse(hasattr(win, "st_pb"))  # the Resonance dock keeps its buttons and no bar of its own
+        win.is_processing = True
+        self.addCleanup(setattr, win, "is_processing", False)
+        win._begin_run_label("chd")
+        win.pb_total.setValue(400)
+        win.lbl_total_prog.setText("Batch Progress: 3 / 12")
+        win.lbl_eta.setText("Elapsed: 4m   |   Est. remaining: ~12m   |   Done around Tue 3:40 PM")
+        for page in ("chd", "dl", "sound", "games", "fix"):
+            win._show_page(page)
+            win._runbar_sync()
+            self.assertFalse(win.run_bar.isHidden(), page)  # on every page while a job runs
+            self.assertTrue(win.pb_total.isHidden() and win.dl_pb.isHidden(), page)  # and no page carries a bar of its own
+        self.assertEqual(win.run_bar.value, 400)
+        self.assertIn("3 / 12", win.run_bar.detail)
+        self.assertIn("~12m left", win.run_bar.detail)  # the page's time line, in short
+        win.is_processing = False
+        win._runbar_sync()
+        self.assertTrue(win.run_bar.isHidden())
+
+    def test_folded_option_cards_say_what_they_are_set_to(self):
+        from distill.ui.widgets import Expander
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        card = next(c for c in win.pages["chd"].findChildren(Expander) if c.header.text() == "Workflow")
+        self.assertFalse(card.header.isChecked())  # folded, as the calmer layout has it
+        text, warn = card.header._summary()
+        self.assertIn("Keeps originals", text)
+        self.assertFalse(warn)
+        win.tabs["chd"].delete.setChecked(True)  # a setting that deserves a second look turns the line amber
+        text, warn = card.header._summary()
+        self.assertIn("Deletes originals", text)
+        self.assertTrue(warn)
+        win.tabs["chd"].delete.setChecked(False)
+        zar = next(c for c in win.pages["zar"].findChildren(Expander) if c.header.text() == "Workflow")
+        self.assertNotIn("Unpack", zar.header._summary()[0])  # ZAR packs folders as they are: no unpack box to mention
+        options = [c for key in win.org for c in win.pages[key].findChildren(Expander) if c.header.text() == "Options"]
+        for card in options:
+            self.assertFalse(card.header.isChecked())
+            self.assertEqual(card.header._summary(), ("Defaults", False))
+        perf = win.perf.header._summary()[0]  # the Performance card, folded: how much of the machine, and the disk mode
+        self.assertIn("threads", perf)
+        self.assertIn("Disk:", perf)
+
+    def test_games_on_screen_are_matched_and_a_players_pick_is_theirs(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from distill import games as gm
+        from distill import recomps as rc
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Metroid.sfc", system="SNES", kind="SFC", region="", size=1, modified=1.0, folder="", path=str(root / "Metroid.sfc"))
+        win._gm_store.sync([rom], str(root))
+        game = win._gm_store.games()[0]
+        with mock.patch.object(win._gm_match_q, "add") as queued, mock.patch.object(rc, "cover_settled", return_value=True):
+            win._gm_ensure_art(game)  # on screen, with its cover and no answer from LaunchBox: matched in the background
+            win._gm_ensure_art(game)  # but only asked about once a session
+            self.assertEqual(queued.call_count, 1)
+            game.lb_match = "auto"
+            win._gm_match_asked.clear()
+            win._gm_ensure_art(game)  # one that already has an answer is left alone
+            self.assertEqual(queued.call_count, 1)
+        win._gm_event(("games_matched", game.id))  # a match arrived: its details are read again, from that entry, next time its page opens
+        self.assertIn(game.id, win._gm_refetch)
+
     def test_a_scan_does_not_raise_the_run_bar(self):
         win = self.make_window()
         self.addCleanup(win.close)
@@ -1603,7 +1938,10 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
     def test_unpinned_tools_leave_the_sidebar(self):
         win = self.make_window()
         self.addCleanup(win.close)
-        self.assertTrue(all(box.isChecked() for box in win._pin_boxes.values()))  # everything is pinned to begin with
+        from distill.convertpages import DEFAULT_UNPINNED
+
+        unpinned = {key for key, box in win._pin_boxes.items() if not box.isChecked()}
+        self.assertEqual(unpinned, set(DEFAULT_UNPINNED))  # to begin with only the converters and organisers are not pinned: the hub is
         win._pin_boxes["games"].setChecked(False)
         self.assertTrue(win.nav_items["games"].isHidden())
         self.assertFalse(win.nav_items["recomps"].isHidden())
@@ -2956,6 +3294,139 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         with mock.patch.object(type(win), "_st_search", lambda self: searched.append(self.st_search.text())):
             win._gm_tool_sound([gid])  # the grabber takes one name at a time: the game's name goes in its search box
         self.assertEqual((win.current_page, searched), ("sound", ["Game"]))
+
+    def test_edit_game_window_tags(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from distill import games as gm
+        from distill.ui.games_dialog import EditGameDialog
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Metroid.sfc", system="SNES", kind="SFC", region="", size=1, modified=1.0, folder="", path=str(root / "Metroid.sfc"))
+        win._gm_store.sync([rom], str(root))
+        win._gm_store.update_details(win._gm_store.games()[0].id, tags="co-op")
+        game = win._gm_store.games()[0]
+        dlg = EditGameDialog(win, game, ["SNES"], "", None, tag_choices=["co-op", "couch", "kids"])
+        self.addCleanup(dlg.close)
+        self.assertEqual(dlg.tags.text(), "co-op")  # the game's own tags, in the box
+        self.assertFalse(dlg.tag_hint.isHidden())  # the library's others are offered under it
+        self.assertNotIn(">co-op<", dlg.tag_hint.text())
+        self.assertIn(">couch<", dlg.tag_hint.text())
+        dlg._add_tag("couch")  # clicking one adds it
+        self.assertEqual(dlg.tags.text(), "co-op, couch")
+        self.assertNotIn(">couch<", dlg.tag_hint.text())
+        dlg.tags.setText("Kids,  kids , split screen")
+        dlg._accept()
+        self.assertEqual(gm.clean_tags(dlg.values["tags"]), "Kids|split screen")
+        plain = EditGameDialog(win, game, ["SNES"], "", None)  # no tag list: just the box
+        self.addCleanup(plain.close)
+        self.assertTrue(plain.tag_hint.isHidden())
+
+    def test_edit_game_window_launch_settings_for_this_game(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from distill import gamemedia as mm
+        from distill import games as gm
+        from distill import launchprofile as lp
+        from distill.ui.games_dialog import EditGameDialog
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Metroid.sfc", system="SNES", kind="SFC", region="", size=1, modified=1.0, folder="", path=str(root / "Metroid.sfc"))
+        win._gm_store.sync([rom], str(root))
+        game = win._gm_store.games()[0]
+        duck = gm.Standalone("duckstation", "DuckStation", Path("/emu/duck.exe"))
+        info = lambda system: gm.emulator_options(system, None, {"duckstation": duck}, "")  # noqa: E731
+        with mock.patch.object(mm, "MEDIA_DIR", root / "media"):
+            dlg = EditGameDialog(win, game, ["SNES"], "", None, media_key="k1", emu_info=info, profile=lp.Profile(args="-x", admin=False))
+            self.addCleanup(dlg.close)
+            tab = dlg.emu_tab
+            self.assertEqual(tab.p_args.text(), "-x")  # what the game already has, in the boxes
+            dlg._accept()
+            self.assertIsNone(dlg.profile)  # nothing changed: nothing to save
+            tab.p_pre.setText("mount {rom}")
+            tab.p_env.setPlainText("A=1\nB=2")
+            dlg._accept()
+            self.assertEqual(dlg.profile, lp.Profile(args="-x", env="A=1\nB=2", pre="mount {rom}"))
+            tab.p_args.setText("")
+            tab.p_pre.setText("")
+            tab.p_env.setPlainText("")
+            dlg._accept()
+            self.assertTrue(dlg.profile.empty())  # emptied: saved as nothing
+
+    def test_find_a_manual_window_lists_results_and_downloads_the_one_chosen(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from PySide6.QtWidgets import QApplication
+
+        from distill import manualsearch as ms
+        from distill.ui.games_manual_dialog import ManualPickerDialog
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        found = [ms.Manual("Super Metroid (Super Nintendo) Manual", "Internet Archive", "sm-manual", "https://example.invalid/sm.pdf", 3_000_000, 0.97,
+                           "https://archive.org/details/sm-manual"),
+                 ms.Manual("Super Metroid (Europe)", "Internet Archive", "sm-eu", "https://example.invalid/eu.pdf", 0, 0.7, "https://archive.org/details/sm-eu")]
+
+        def pump(until, seconds=10):
+            deadline = time.monotonic() + seconds
+            while not until() and time.monotonic() < deadline:
+                QApplication.processEvents()
+                time.sleep(0.01)
+
+        def fake_download(url, dest, progress=None, cancelled=lambda: False, limit=0):
+            Path(dest).write_bytes(b"%PDF-1.4\n")
+            if progress:
+                progress(9, 9)
+            return Path(dest)
+
+        with mock.patch.object(ms, "search", return_value=found), mock.patch.object(ms, "download", side_effect=fake_download), \
+                mock.patch.object(ms, "temp_dir", return_value=Path(tmp.name)):
+            dlg = ManualPickerDialog(win, "Super Metroid", "SNES", "Super Nintendo Entertainment System")
+            self.addCleanup(dlg.close)
+            self.assertFalse(dlg.use_btn.isEnabled())  # nothing to use until the search is back
+            pump(lambda: dlg.list.count() == 2)
+            self.assertEqual(dlg.list.count(), 2)
+            self.assertTrue(dlg.use_btn.isEnabled())  # (the best is already chosen)
+            self.assertIn("97% match", dlg.list.item(0).text())
+            self.assertIn("2.9 MB", dlg.list.item(0).text())
+            dlg._use()
+            pump(lambda: dlg.path is not None)
+            self.assertIsNotNone(dlg.path)
+            self.assertTrue(dlg.path.read_bytes().startswith(b"%PDF-"))
+            self.assertEqual(dlg.result(), dlg.DialogCode.Accepted)
+
+        with mock.patch.object(ms, "search", return_value=[]):
+            empty = ManualPickerDialog(win, "Obscure", "SNES", "")  # nothing found: it says so and offers nothing to use
+            self.addCleanup(empty.close)
+            pump(lambda: "No manual found" in empty.status.text())
+            self.assertIn("No manual found", empty.status.text())
+            self.assertFalse(empty.use_btn.isEnabled())
+        with mock.patch.object(ms, "search", side_effect=ms.ManualError("Couldn't reach the Internet Archive.")):
+            down = ManualPickerDialog(win, "Anything", "SNES", "")
+            self.addCleanup(down.close)
+            pump(lambda: "Couldn't reach" in down.status.text())
+            self.assertIn("Couldn't reach", down.status.text())
+
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import QBrush, QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QProgressBar, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
     QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -354,31 +354,7 @@ class SoundtrackMixin:
         buttons.addWidget(self.st_summary, 1)
         buttons.addWidget(self.st_save_selected)
         lay.addLayout(buttons)
-        progress = QHBoxLayout()
-        progress.setSpacing(12)
-        self.st_pb = QProgressBar()  # follows the download run's own bar (see _st_link_dock)
-        self.st_pb.setRange(0, 1000)
-        self.st_pb.setTextVisible(True)
-        self.st_pb.setFormat("%p%")
-        self.st_pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.st_eta = QLabel("")
-        self.st_eta.setObjectName("muted")
-        self.st_eta.setMinimumWidth(220)
-        self.st_eta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        progress.addWidget(self.st_pb, 1)
-        progress.addWidget(self.st_eta)
-        lay.addLayout(progress)
         dock.hide()
-
-    def _st_link_dock(self) -> None:
-        """Once the download run's bar exists: the dock's bar and speed line show what it shows."""
-        self.dl_pb.valueChanged.connect(self.st_pb.setValue)
-        self.st_pb.setValue(self.dl_pb.value())
-        sync = QTimer(self)  # (the speed line is a label, which has no signal to follow)
-        sync.setInterval(400)
-        sync.timeout.connect(lambda: self.st_eta.setText(self.dl_eta.text()) if self.st_dock.isVisible() else None)
-        sync.start()
-        self._st_dock_timer = sync
 
     # ---- look: tab strip, search boxes, chips, queue toggles ----------------------------------------
     @staticmethod

@@ -77,6 +77,8 @@ class FeedbackMixin:
         needle = self.log_find.text()
         if not needle:
             return
+        if self._run_view != "log":  # the words are in the log, not the queue
+            self.view_log.setChecked(True)
         if not self.log.find(needle):
             cursor = self.log.textCursor()
             cursor.movePosition(cursor.MoveOperation.Start)

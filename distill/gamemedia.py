@@ -237,6 +237,15 @@ def _best_entry(ids: list[str], title: str, platform: str) -> str:
     return min(ranked)[-1] if ranked else ""
 
 
+def remember_lb_id(title: str, system: str, lb_id: str) -> None:
+    """Pin the LaunchBox entry that `title` on `system` is (what a match, or the player's own pick, found): lb_game_id answers with it from
+    then on, so the background, disc, cartridge and screenshots come from that entry and not from a fresh search. Only the full title is
+    pinned: a shorter form it falls back to ('Gothic 2' for 'Gothic 2: Night of the Raven') is a different game's too."""
+    if lb_id:
+        memo = _dir() / f"lbid2_{hashlib.md5(f'{title}|{system}'.encode()).hexdigest()[:16]}.txt"
+        memo.write_text(lb_id, encoding="utf-8")
+
+
 def lb_game_id(title: str, system: str) -> str:
     """The LaunchBox Games Database id of a game ('' when not found), remembered on disk. `system` is LaunchBox's platform name, and the
     entry on that platform is the one chosen (see _best_entry)."""
