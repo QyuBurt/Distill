@@ -45,9 +45,10 @@ class EnvTests(unittest.TestCase):
 
 class ExpandTests(unittest.TestCase):
     def test_placeholders_are_filled_and_quoted(self):
-        out = lp.expand("run {rom} in {dir} as {name}", "/my games/Metroid (USA).sfc")
-        self.assertIn(q("/my games/Metroid (USA).sfc"), out)
-        self.assertIn(q("/my games"), out)
+        rom_path = "/my games/Metroid (USA).sfc"
+        out = lp.expand("run {rom} in {dir} as {name}", rom_path)
+        self.assertIn(q(os.path.normpath(rom_path)), out)
+        self.assertIn(q(os.path.normpath(os.path.dirname(rom_path))), out)
         self.assertTrue(out.endswith(q("Metroid (USA)")))
 
 
