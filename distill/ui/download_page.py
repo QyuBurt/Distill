@@ -344,6 +344,8 @@ class DownloadMixin:
             self._dl_add_links(links)
         elif (paths := self._drop_paths(event)) and self._route_drop(paths):
             pass  # a page took it (see dropper.py)
+        elif (paths := self._drop_paths(event)) and self._gm_drop_art(paths):
+            pass  # pictures: box art for the games of a platform (see coverdrop.py)
         elif self.current_page == "dl":
             self.dl_status.setText("Drop .torrent files or magnet links here.")
         else:

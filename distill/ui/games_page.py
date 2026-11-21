@@ -20,6 +20,7 @@ from .. import apikeys, artprogress
 from .. import libraryhealth as lh
 from .. import mediascrape as ms
 from .. import gamemedia as mm
+from .. import coverdrop as cdrop
 from .. import games as gm
 from .. import launcher
 from .. import lbmatch as lbm
@@ -115,6 +116,7 @@ class GamesMixin:
         self._gm_loaded = False
         self._gm_is_empty = False  # the library has no games (the page's scrollbar goes while that is so)
         self._gm_list_scroll = 0
+        self._gm_rev_at_open = -1  # the store's revision when a card was opened: if it is the same on the way back, the grid is still right
         self._gm_view = "grid"  # 'grid' (posters) or 'list' (a table with sortable columns; Filters menu, remembered between runs)
         self._gm_col: tuple[str, bool] = ("name", False)  # the list's sort: a key of gm.LIST_COLUMNS and whether it runs high to low
         self._gm_random_last = ""  # the game Random game picked last, so it isn't picked twice running
@@ -1880,6 +1882,8 @@ class GamesMixin:
                 if missing:
                     text += f" Couldn't reach {', '.join(missing)}: its games were left as they are."
                 self.gm_status.setText(text)
+        elif name == "games_coverdrop":
+            self._gm_coverdrop_event(*ev[1:])
         elif name == "games_romm":
             self._gm_romm_done(*ev[1:])
         elif name == "games_install":
@@ -2099,6 +2103,80 @@ class GamesMixin:
                                            f"color: {T.fg3.name()}; font-weight: 700; padding: 16px;")
         self.gmd_stage.sync()
 
+    def _gm_drop_art(self, paths: list[Path]) -> bool:
+        """Pictures (or a folder of them, or a folder of platform folders) dropped on the window: ask once, then make them the covers of the
+        games with matching titles on that platform. False when what was dropped isn't pictures, so another handler can have it."""
+        systems = [s for s, _n in self.gm_store.systems()]
+        sets = cdrop.plan(paths, systems)
+        if not sets:
+            return False
+        if getattr(self, "_gm_coverdrop_busy", False):
+            self._toast("Still setting the last box art: drop these again when it has finished.", "warn", 5000)
+            return True
+        jobs: list[tuple[str, cdrop.Matched]] = []
+        skipped: list[str] = []
+        for s in sets:
+            platform = s.platform if s.platform in systems else ""
+            if not platform and len(sets) == 1:
+                platform = self._gm_platform if self._gm_platform in systems else ""  # the platform chosen in the sidebar
+                if not platform and systems:
+                    choice, ok = msgbox.get_item(self, "Box art", f"Which platform are the {len(s.files)} pictures in '{s.folder.name}' for?", systems)
+                    if not ok:
+                        return True
+                    platform = choice
+            if not platform:
+                skipped.append(s.folder.name)
+                continue
+            jobs.append((platform, cdrop.match(s.files, self.gm_store.games(system=platform))))
+        pairs = [p for _platform, m in jobs for p in m.pairs]
+        spare = sum(len(m.unmatched) for _platform, m in jobs)
+        if not pairs:
+            why = f" Folders not named for a platform in your library were left out: {', '.join(skipped)}." if skipped else ""
+            self._toast(f"No game's title matches any of those pictures.{why}", "warn", 7000)
+            return True
+        where = f"on {jobs[0][0]}" if len(jobs) == 1 else f"across {len(jobs)} platforms"
+        text = f"Set the box art of {len(pairs)} game{'s' if len(pairs) != 1 else ''} {where} from the pictures dropped?\n\nThey replace the covers these games have now."
+        if spare:
+            text += f"\n\n{spare} picture{'s' if spare != 1 else ''} matched no game and will be left out."
+        if skipped:
+            text += f"\n\nLeft out, not named for a platform in your library: {', '.join(skipped)}."
+        if msgbox.question(self, "Box art", text, default=QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return True
+        self._gm_coverdrop_busy = True
+        self.gm_status.setText(f"Setting box art for {len(pairs)} games...")
+        q = self.ui_q
+
+        def work() -> None:
+            try:
+                done, failed = cdrop.apply(pairs, lambda i, n: q.put(("games_coverdrop", "progress", i, n)) if i % 5 == 0 else None)
+            except Exception as exc:  # whatever goes wrong must not leave the page thinking it is still busy
+                done, failed = [], [str(exc)]
+            q.put(("games_coverdrop", "done", done, failed, spare))
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _gm_coverdrop_event(self, kind: str, *args) -> None:
+        if kind == "progress":
+            self.gm_status.setText(f"Setting box art: {args[0]} of {args[1]}...")
+            return
+        done, failed, spare = args
+        self._gm_coverdrop_busy = False
+        for gid in done:  # the grid and the game's page read the new picture from disk the next time they draw it
+            self._gm_art.pop(gid, None)
+            self._gm_art_tried.discard(gid)
+            self._gm_disk_checked.pop(gid, None)
+        self.gm_list.viewport().update()
+        if self._gm_current in done:
+            self._gm_refresh_detail_cover(self._gm_current)
+        text = f"Set the box art of {len(done)} game{'s' if len(done) != 1 else ''}."
+        if spare:
+            text += f" {spare} picture{'s' if spare != 1 else ''} matched no game."
+        if failed:
+            text += f" {len(failed)} couldn't be used (first: {failed[0]})."
+        self.gm_status.setText(text)
+        self._toast(text, "warn" if failed else "info", 8000)
+
     def _gm_apply_cover(self, g: gm.Game, data: bytes | None) -> None:
         try:
             path = rc.set_cover(g.id, data) if data is not None else rc.clear_cover(g.id)
@@ -2133,8 +2211,10 @@ class GamesMixin:
                 leaving = (flight.picture_of(self.gmd_cover), box)
         self._gm_current = ""
         self.gm_views.setCurrentIndex(0)
-        self._gm_reload()  # a favourite, a play or a new title changes the grid and the rail's counts
-        self._gm_scroll_list(self._gm_list_scroll)  # back to where the grid was
+        if self.gm_store.revision != self._gm_rev_at_open:  # a favourite, a play or a new title changes the grid and the rail's counts
+            self._gm_reload()
+            self._gm_scroll_list(self._gm_list_scroll)  # back to where the grid was
+        # (nothing was saved while the card was up: the grid underneath is exactly as it was left, scroll position and all)
         if leaving is not None:
             self._gm_fly_to_poster(gid, *leaving)
 
@@ -2209,6 +2289,7 @@ class GamesMixin:
         leaving = None  # where this game's cover is in the grid, for it to glide up from
         if self.gm_views.currentIndex() == 0:
             self._gm_list_scroll = (self.gm_table if self._gm_view == "list" else self.gm_list).verticalScrollBar().value()
+            self._gm_rev_at_open = self.gm_store.revision
             if self._gm_can_fly():
                 leaving = self._gm_poster_box(gid)
         self._gm_by_id[gid] = g

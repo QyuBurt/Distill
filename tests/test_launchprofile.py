@@ -236,6 +236,16 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(store.profile("g1").empty())
             self.assertEqual(store.setting("profile:g1", "x"), "")
 
+    def test_the_revision_moves_on_a_write_and_stays_put_for_a_read(self):
+        """The Games page skips rebuilding its grid on the way back from a card when this has not moved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = gm.GameStore(Path(tmp) / "games.db")
+            before = store.revision
+            store.totals(), store.systems(), store.games(), store.setting("x", "")
+            self.assertEqual(store.revision, before)
+            store.set_favorite("g1", True)
+            self.assertGreater(store.revision, before)
+
 
 if __name__ == "__main__":
     unittest.main()

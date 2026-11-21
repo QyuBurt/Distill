@@ -181,6 +181,7 @@ class GameStore:
     def __init__(self, path: Path | None = None):
         self.path = path or rc.root() / "games.db"
         self._lock = threading.RLock()
+        self.revision = 0  # goes up whenever a call changes the file: lets the page tell that nothing it shows can be out of date
         with self._db() as db:
             db.executescript(_SCHEMA)
             have = {r[1] for r in db.execute("PRAGMA table_info(user)")}
@@ -198,6 +199,8 @@ class GameStore:
             db = sqlite3.connect(str(self.path), timeout=15)
             try:
                 yield db
+                if db.total_changes:
+                    self.revision += 1
                 db.commit()
             finally:
                 db.close()
