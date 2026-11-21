@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+import os
 from pathlib import Path
 
 from tests import helpers  # noqa: F401
