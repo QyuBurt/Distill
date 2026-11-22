@@ -101,8 +101,12 @@ class Theme:
             widget = entry[0]() if entry else None
             if widget is None:
                 self._stale.discard(key)
-            elif widget is root or root.isAncestorOf(widget):
-                self.catch_up(widget)
+                continue
+            try:
+                if widget is root or root.isAncestorOf(widget):
+                    self.catch_up(widget)
+            except RuntimeError:  # the Qt object is already gone (its Python wrapper outlived it): nothing to restyle, and not worth a crash
+                self._stale.discard(key)
 
     def set_dark(self, dark: bool) -> None:
         self.dark = dark
