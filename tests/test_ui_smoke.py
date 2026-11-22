@@ -61,6 +61,34 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         bar.setValue(1000)
         self.assertFalse(sm.nudge(-1))  # at the bottom
 
+    def test_a_theme_change_restyles_what_is_on_screen_and_the_rest_when_it_is_shown(self):
+        from PySide6.QtWidgets import QLabel, QWidget
+
+        from distill.ui.theme import T
+
+        parent = QWidget()
+        self.addCleanup(parent.deleteLater)
+        seen, hidden = QLabel(parent), QLabel(parent)
+        applied = []
+        T.bind(seen, lambda: applied.append("seen"))
+        T.bind(hidden, lambda: applied.append("hidden"))
+        applied.clear()
+        parent.show()
+        hidden.hide()
+        T.restyle()
+        self.assertEqual(applied, ["seen"])  # the hidden one waits
+        hidden.show()
+        self.assertEqual(applied, ["seen", "hidden"])  # and takes the look the moment it is shown
+        hidden.hide()
+        hidden.show()
+        self.assertEqual(applied, ["seen", "hidden"])  # only once
+        hidden.hide()
+        T.restyle()
+        T.flush(parent)  # before a page is slid in
+        self.assertEqual(applied[-1], "hidden")
+        T.restyle(everything=True)
+        self.assertEqual(applied.count("seen"), 3)
+
     def test_an_emulator_icon_keeps_no_tint_or_outline_after_a_restyle(self):
         """The monogram's coloured fill and border are bound to the theme; a picture must replace that binding, or the next restyle
         (a theme switch, start-up) draws the tint and outline behind the icon again."""
@@ -81,7 +109,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         for widget, attr in ((EmulatorCard("a", "Alpha", "System"), "tile"), (EmulatorTile("b", "Beta", "System"), "mono")):
             self.addCleanup(widget.deleteLater)
             widget.set_logo(str(path))
-            T.restyle()
+            T.restyle(everything=True)  # (these widgets are never shown)
             css = getattr(widget, attr).styleSheet()
             self.assertNotIn("rgba", css)
             self.assertNotIn("1px", css)

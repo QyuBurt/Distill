@@ -1359,6 +1359,7 @@ class Logo(QWidget):
     soft glow of the brand gradient, like the Start button while a batch runs."""
 
     clicked = Signal()
+    secret = Signal()  # Shift + click: the pond (an easter egg)
     ICON, GLOW = 36, 9  # the icon's size, and the room kept around it for the glow
 
     def __init__(self) -> None:
@@ -1407,7 +1408,7 @@ class Logo(QWidget):
 
     def mouseReleaseEvent(self, e: QMouseEvent) -> None:
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
-            self.clicked.emit()
+            (self.secret if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else self.clicked).emit()
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):

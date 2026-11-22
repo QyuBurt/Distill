@@ -6,6 +6,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -268,25 +269,42 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if QApplication.instance().palette() != (pal := T.palette()):
             QApplication.instance().setPalette(pal)
 
+    def _open_pond(self) -> None:
+        """The easter egg: Shift + click the logo."""
+        pond = getattr(self, "_pond", None)
+        if pond is not None and pond.isVisible():
+            pond.raise_()
+            pond.activateWindow()
+            return
+        from .pond import PondDialog
+        self._pond = PondDialog(self)
+        self._pond.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._pond.show()
+
     def _sync_logo_tip(self) -> None:
         self.logo.setToolTip("Switch to the light look" if T.dark else "Switch to the dark look")
 
     def _toggle_theme(self) -> None:
         """Dark <-> light. The window as it is now is photographed and laid over the new look, then wiped away from the top left
-        to the bottom right (no wipe when motion is reduced)."""
+        to the bottom right (no wipe when motion is reduced). With DISTILL_THEME_TIMING=1 in the environment, where the time went is
+        appended to theme_timing.txt beside Distill."""
         if getattr(self, "_wipe", None) is not None:
             return  # one change at a time
+        marks = [("start", time.perf_counter())]
         wipe = None
         if motion.on() and self.isVisible() and not self.isMinimized():
             wipe = ThemeWipe(self, self.grab(), self._wipe_done)
             self._wipe = wipe
             wipe.show()
             wipe.raise_()
+            marks.append(("photograph", time.perf_counter()))
         T.dark = not T.dark
         self.setUpdatesEnabled(False)  # one repaint at the end, not one per restyled widget
         try:
             self._apply_theme()
+            marks.append(("restyle", time.perf_counter()))
             self._tint_title_bar()
+            marks.append(("title bar", time.perf_counter()))
         finally:
             self.setUpdatesEnabled(True)
         self._sync_logo_tip()
@@ -295,9 +313,32 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             wipe.start()
         else:
             self._theme_refill()
+        marks.append(("finish", time.perf_counter()))
+        self._log_theme_timing(marks)
 
-    def _theme_refill(self) -> None:
-        for refill in ("_em_fill", "_em_refresh_detail", "_rc_fill", "_rc_refresh_detail"):  # cards coloured from the theme when filled
+    def _log_theme_timing(self, marks: list[tuple[str, float]]) -> None:
+        if not os.environ.get("DISTILL_THEME_TIMING"):
+            return
+        parts = [f"{name} {1000 * (t - before):.0f} ms" for (_n, before), (name, t) in zip(marks, marks[1:])]
+        stale = len(T._stale)
+        try:
+            with open(APP_DIR / "theme_timing.txt", "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')}  to {'dark' if T.dark else 'light'}: {', '.join(parts)}, total {1000 * (marks[-1][1] - marks[0][1]):.0f} ms "
+                        f"({stale} widgets waiting for their page)\n")
+        except OSError:
+            pass
+
+    _REFILLS = {"emus": ("_em_fill", "_em_refresh_detail"), "recomps": ("_rc_fill", "_rc_refresh_detail")}
+
+    def _theme_refill(self, page: str | None = None) -> None:
+        """The Emulators and PC Recomps cards are coloured from the theme when they are filled, so they are filled again after a change of
+        look: but only the page on screen. The other waits (`_refill_waiting`) and is filled when it is opened."""
+        here = page or self.current_page
+        waiting = self.__dict__.setdefault("_refill_waiting", set())
+        if page is None:  # a change of look: every other page is now out of date
+            waiting.update(p for p in self._REFILLS if p != here)
+        waiting.discard(here)
+        for refill in self._REFILLS.get(here, ()):
             try:
                 getattr(self, refill)()
             except Exception:
@@ -566,6 +607,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         brand.setSpacing(12 - Logo.GLOW)
         self.logo = Logo()  # click it to change between the dark and light looks
         self.logo.clicked.connect(self._toggle_theme)
+        self.logo.secret.connect(self._open_pond)
         self._sync_logo_tip()
         brand.addWidget(self.logo)
         names = QVBoxLayout()
@@ -1001,6 +1043,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         sound = key == "sound"
         self._inner_lay.setStretch(0, 1 if sound else 0)  # the page takes the whole height, or stays as tall as its content
         self._inner_lay.setStretch(self._inner_lay.count() - 1, 0 if sound else 1)
+        T.flush(self.pages[key])  # a page that waited out a theme change takes the new look before it slides in
         self.stack.setCurrentWidget(self.pages[key], 1 if further_up else -1)
         motion.set_visible(self.markers, key == "dl", axis="width")  # only Files & Torrents uses yt-dlp, ffmpeg and a debrid service
         title, blurb = PAGE_INFO[key]
@@ -1023,6 +1066,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._refresh_start_label()
         self._runbar_sync()  # the bar along the bottom shows while the running job's page is not the one on screen
         self._gm_sync_scrollbar()  # the Games page hides its scrollbar while it has no games; every other page keeps its own
+        if key in getattr(self, "_refill_waiting", ()):
+            self._theme_refill(key)
         if key == "games":
             self._gm_on_show()
         elif key == "recomps":

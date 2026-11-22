@@ -4,7 +4,7 @@ from __future__ import annotations
 import weakref
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QPalette
 
 
@@ -19,6 +19,19 @@ def _mix(a: QColor, b: QColor, t: float) -> QColor:
                   round(a.blue() + (b.blue() - a.blue()) * t))
 
 
+class _CatchUp(QObject):
+    """Sits on a widget whose restyle was put off because it was not on screen; when the widget is shown it gets its new look."""
+
+    def __init__(self, theme: "Theme") -> None:
+        super().__init__()
+        self._theme = theme
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Show:
+            self._theme.catch_up(obj)
+        return False
+
+
 class Theme:
     """Surface, text and accent colours of the Distill look. The values were read from the design mockups; `set_dark`
     switches between the dark palette and the light one."""
@@ -27,6 +40,8 @@ class Theme:
         self.text_font, self.display_font, self.mono_font = "Segoe UI", "Segoe UI", "Cascadia Mono"  # replaced by the bundled fonts at start-up
         self.dark = True
         self._bound: dict[int, tuple[weakref.ref, Callable[[], None]]] = {}  # widgets that restyle themselves on a theme change
+        self._stale: set[int] = set()  # bound widgets that were off screen at the last change: they restyle when shown
+        self._catcher: _CatchUp | None = None
         self.refresh()
 
     # ---- widgets that hold colours of their own ---------------------------------------------------------
@@ -35,6 +50,7 @@ class Theme:
         (a style sheet, a tinted pixmap) and would otherwise keep the old theme's. Binding the same widget again replaces
         the earlier callback, so a widget restyled as its state changes doesn't pile them up."""
         key = id(widget)
+        self._stale.discard(key)  # (apply() below gives it the current look)
         self._bound[key] = (weakref.ref(widget, lambda _r, k=key: self._bound.pop(k, None)), apply)
         apply()
 
@@ -42,13 +58,51 @@ class Theme:
         """setStyleSheet(css()) now, and again whenever the theme changes."""
         self.bind(widget, lambda: widget.setStyleSheet(css()))
 
-    def restyle(self) -> None:
-        for ref, apply in list(self._bound.values()):
-            if ref() is not None:
-                try:
+    def restyle(self, everything: bool = False) -> None:
+        """Give every bound widget the current look. A widget that is not on screen (the other pages, closed sections) waits and takes it
+        when it is first shown (or at once through `flush`): a theme change used to restyle thousands of widgets nobody could see.
+        `everything` restyles all of them now."""
+        for key, (ref, apply) in list(self._bound.items()):
+            widget = ref()
+            if widget is None:
+                self._stale.discard(key)
+                continue
+            try:
+                if everything or widget.isVisible():
+                    self._stale.discard(key)
                     apply()
-                except RuntimeError:  # the Qt object is already gone
-                    pass
+                elif key not in self._stale:
+                    self._stale.add(key)
+                    if self._catcher is None:
+                        self._catcher = _CatchUp(self)
+                    widget.installEventFilter(self._catcher)  # (installing again just moves it to the front)
+            except RuntimeError:  # the Qt object is already gone
+                self._stale.discard(key)
+
+    def catch_up(self, widget) -> None:
+        """Restyle one widget that was waiting for its look."""
+        key = id(widget)
+        if key not in self._stale:
+            return
+        self._stale.discard(key)
+        entry = self._bound.get(key)
+        if entry is not None and entry[0]() is widget:
+            try:
+                entry[1]()
+            except RuntimeError:
+                pass
+
+    def flush(self, root) -> None:
+        """Restyle the waiting widgets inside `root` now (before a page is slid or grabbed, which can happen before it is shown)."""
+        if not self._stale:
+            return
+        for key in list(self._stale):
+            entry = self._bound.get(key)
+            widget = entry[0]() if entry else None
+            if widget is None:
+                self._stale.discard(key)
+            elif widget is root or root.isAncestorOf(widget):
+                self.catch_up(widget)
 
     def set_dark(self, dark: bool) -> None:
         self.dark = dark
