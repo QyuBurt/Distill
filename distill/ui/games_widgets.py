@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QPlainT
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .. import games as gm
-from .. import mediashape as shape
+from .. import mediashape as mshape
 from . import fillmath, icons, motion, shimmermath
 from .shimmer import paint_band
 from .emu_cards import SourceChip, clear_layout
@@ -691,7 +691,7 @@ class CoverStage(QWidget):
         if not kind or pix is None or pix.isNull() or (kind == "cart" and not pix.hasAlphaChannel()):
             kind, pix = "", None
         self._kind, self._source = kind, pix
-        spec = shape.known_spec(system) if kind else None
+        spec = mshape.known_spec(system) if kind else None
         if spec is not None and (spec.shape == "cart") != (kind == "cart"):
             spec = None  # (a system whose table entry does not match the picture's kind: use the defaults)
         self._shape = spec.shape if spec else kind
@@ -722,7 +722,7 @@ class CoverStage(QWidget):
             else:
                 w = max(8, round(cw * (self._spec_scale or self.CART_SCALE)))
                 if self._spec_scale:
-                    w = max(shape.MIN_CART_PX, w)
+                    w = max(mshape.MIN_CART_PX, w)
                 h = max(8, round(w * self._source.height() / max(1, self._source.width())))
                 self._pix = self._source.scaled(round(w * dpr), round(h * dpr), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 self._pix.setDevicePixelRatio(dpr)
@@ -749,13 +749,13 @@ class CoverStage(QWidget):
             b, g, r, a = data[i], data[i + 1], data[i + 2], data[i + 3]
             return a > 128 and (0.3 * r + 0.59 * g + 0.11 * b < 165 or max(r, g, b) - min(r, g, b) > 40)
 
-        found = shape.find_disc(img.width(), img.height(), dark)
+        found = mshape.find_disc(img.width(), img.height(), dark)
         return None if found is None else (found[0] * k, found[1] * k, found[2] * k)
 
     def _sync_umd(self, cw: int, ch: int, dpr: float) -> int:
         """Size a UMD: the shell as a share of the cover's height; the disc in it is cut out to turn on its own. Returns how far it sticks out."""
         src = self._source
-        side = min(round(ch * 0.9), max(shape.MIN_UMD_PX, round(ch * self._spec_scale)))
+        side = min(round(ch * 0.9), max(mshape.MIN_UMD_PX, round(ch * self._spec_scale)))
         w = max(8, side)
         h = max(8, round(w * src.height() / max(1, src.width())))
         k = w / max(1, src.width())  # logical pixels per pixel of the picture

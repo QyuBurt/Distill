@@ -2398,6 +2398,59 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual((none.media_kind(), none.width()), ("", 220))
         none.close()
 
+    def test_manual_reader_splits_two_page_scans_into_single_pages(self):
+        import tempfile
+        from pathlib import Path
+
+        from PySide6.QtCore import QMarginsF, QPointF, QSizeF
+        from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter
+
+        from distill.ui.manual_reader import BookView
+
+        def pdf(path: Path, sizes: list[tuple[float, float]]) -> None:  # sizes in millimetres
+            w = QPdfWriter(str(path))
+            p = None
+            for n, (mw, mh) in enumerate(sizes):
+                w.setPageLayout(QPageLayout(QPageSize(QSizeF(mw, mh), QPageSize.Unit.Millimeter), QPageLayout.Orientation.Portrait, QMarginsF(0, 0, 0, 0)))
+                if p is None:
+                    p = QPainter(w)
+                else:
+                    w.newPage()
+                p.drawText(20, 40, f"page {n}")
+            p.end()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spreads, normal = Path(tmp) / "spreads.pdf", Path(tmp) / "normal.pdf"
+            pdf(spreads, [(105, 148)] + [(210, 148)] * 4)  # a cover, then four scans of two pages each
+            pdf(normal, [(105, 148)] * 5)
+            book = BookView(spreads)
+            self.assertEqual((book.pdf_pages, book.pages), (5, 9))  # cut in two automatically: 1 + 4 x 2
+            self.assertTrue(book.is_split())
+            self.assertAlmostEqual(book.aspect, 105 / 148, places=1)
+            self.assertFalse(book._pixmap(1, 120, 170).isNull())  # a half page draws
+            seen = []
+            book.pagesChanged.connect(lambda: seen.append(book.pages))
+            book.go_to_page(3)  # logical page 4: the second scan's right half
+            book.set_split("off")
+            self.assertEqual((book.pages, seen), (5, [5]))
+            self.assertEqual(book.pages_shown()[1] or book.pages_shown()[0], 2)  # still on the same PDF page (the second scan)
+            book.set_split("auto")
+            book.set_cover((1, "right"))  # the first scan's right half is the front cover; its left half (the back) goes to the end
+            self.assertEqual((book._units[0], book._units[-1], book.pages, book.spread), ((1, "right"), (1, "left"), 9, 0))
+            book.pick_cover(True)
+            clicks = []
+            book.coverChosen.connect(lambda p, part: clicks.append((p, part)))
+            book.resize(900, 600)
+            book._pick_at(QPointF(book.width() / 2 + 100, book.height() / 2))  # a click on the right-hand page
+            self.assertEqual(clicks, [(1, "right")])
+            self.assertFalse(book.picking)
+            book.set_cover(None)
+            self.assertEqual(book._units[0], (0, "whole"))
+            book.close()
+            plain = BookView(normal)
+            self.assertEqual((plain.pages, plain.is_split()), (5, False))  # a normal manual is left alone
+            plain.close()
+
     def test_games_page_shows_background_screenshots_and_achievements(self):
         import tempfile
         from pathlib import Path

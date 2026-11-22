@@ -22,8 +22,9 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidg
 
 from .. import games as gm
 from . import curlmath as cm
+from . import pagesplit as ps
 from . import motion, scrollmath
-from .albumview import IconButton
+from .albumview import SCRIM, SCRIM_ALPHA, SCRIM_ALPHA_HOVER, IconButton
 from .frameless import FramelessDialog, hairline
 from .theme import T
 from .widgets import hint
@@ -52,18 +53,25 @@ class _Turn:
 
 class BookView(QWidget):
     spreadChanged = Signal(int)
+    coverChosen = Signal(int, str)  # the player clicked the page that is the front cover: (PDF page, part)
+    pagesChanged = Signal()  # the pages were re-cut (two-page scans split or joined): the page count is different
     fullScreenRequested = Signal()  # F or F11
 
-    def __init__(self, path: str | Path, parent: QWidget | None = None):
+    def __init__(self, path: str | Path, parent: QWidget | None = None, split: str = "auto", cover: ps.Unit | None = None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(420, 320)
         self.doc = QPdfDocument(self)
         self.doc.load(str(path))
-        self.pages = self.doc.pageCount() if self.doc.status() == QPdfDocument.Status.Ready else 0
-        size = self.doc.pagePointSize(0) if self.pages else None
-        self.aspect = size.width() / size.height() if size is not None and size.width() > 0 and size.height() > 0 else 0.72
+        self.pdf_pages = self.doc.pageCount() if self.doc.status() == QPdfDocument.Status.Ready else 0
+        self._sizes = [(self.doc.pagePointSize(i).width(), self.doc.pagePointSize(i).height()) for i in range(self.pdf_pages)]
+        self.split_mode = split  # 'auto', 'on' or 'off': scans of open books have two pages on each PDF page, shown here as two pages
+        self.cover = cover  # the page the player marked as the front cover (None: the first one)
+        self.picking = False  # waiting for a click on the page that is the cover
+        self._units: list[ps.Unit] = []
+        self.pages, self.aspect = 0, 0.72
+        self._cut()
         self.spread = 0
         self.rtl = False
         self._turn: _Turn | None = None
@@ -79,6 +87,57 @@ class BookView(QWidget):
         self._prefetch_todo: list[int] = []
 
     # ---- the book ---------------------------------------------------------------------------------------------
+    def _cut(self) -> None:
+        """Work out the pages to show from the PDF's pages (a wide scan of two pages becomes a left and a right page)."""
+        self._units = ps.with_cover(ps.page_units(self._sizes, self.split_mode), self.cover)
+        self.pages = len(self._units)
+        self.aspect = ps.book_aspect(self._sizes, self._units)
+
+    def set_cover(self, cover: ps.Unit | None) -> None:
+        """Make a page the front cover (None: back to the first page). The book opens at it."""
+        self._stop_motion()
+        self.cover = cover
+        self._cut()
+        self._cache.clear()
+        self.spread = 0
+        self.pagesChanged.emit()
+        self._changed()
+
+    def pick_cover(self, on: bool = True) -> None:
+        """Wait for the player to click the page that is the front cover (Esc gives up)."""
+        self.picking = on and self.ok
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self.picking else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _pick_at(self, pos: QPointF) -> None:
+        spine, top, w, h = self._layout()
+        side = self._side_at(pos)
+        page = self.pages_shown()[0 if side < 0 else 1]
+        inside = (spine <= pos.x() <= spine + w) if side > 0 else (spine - w <= pos.x() <= spine)
+        if page is None or not inside or not top <= pos.y() <= top + h:
+            return
+        pdf_page, part = self._units[page]
+        self.pick_cover(False)
+        self.coverChosen.emit(pdf_page, part)
+
+    def is_split(self) -> bool:
+        return any(part != "whole" for _i, part in self._units)
+
+    def set_split(self, mode: str) -> None:
+        """Cut the pages again ('auto', 'on' or 'off'), staying on the same PDF page."""
+        if mode == self.split_mode or not self.pdf_pages:
+            return
+        left, right = self.pages_shown()
+        page = right if right is not None else left
+        here = self._units[page][0] if page is not None and page < len(self._units) else 0
+        self._stop_motion()
+        self.split_mode = mode
+        self._cut()
+        self._cache.clear()
+        self.spread = cm.spread_of(ps.first_unit_of(self._units, here), self.pages)
+        self.pagesChanged.emit()
+        self._changed()
+
     @property
     def ok(self) -> bool:
         return self.pages > 0
@@ -196,12 +255,16 @@ class BookView(QWidget):
         out = QPixmap(pw, ph)
         out.setDevicePixelRatio(1.0)
         out.fill(PAPER)
-        size = self.doc.pagePointSize(page)
+        pdf_page, part = self._units[page]
+        size = self.doc.pagePointSize(pdf_page)
         if size.width() > 0 and size.height() > 0:
-            k = min(pw / size.width(), ph / size.height())
-            rw, rh = max(1, round(size.width() * k)), max(1, round(size.height() * k))
-            image = self.doc.render(page, QSize(rw, rh))
+            halves = 2 if part != "whole" else 1  # a half of a wide scan is drawn from the whole page, cut in two
+            k = min(pw / (size.width() / halves), ph / size.height())
+            rw, rh = max(1, round(size.width() / halves * k)), max(1, round(size.height() * k))
+            image = self.doc.render(pdf_page, QSize(rw * halves, rh))
             if not image.isNull():
+                if halves == 2:
+                    image = image.copy(0 if part == "left" else image.width() // 2, 0, image.width() // 2, image.height())
                 p = QPainter(out)
                 p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
                 p.drawImage((pw - rw) // 2, (ph - rh) // 2, image)
@@ -229,7 +292,21 @@ class BookView(QWidget):
             QTimer.singleShot(20, self._prefetch_one)
 
     # ---- painting -----------------------------------------------------------------------------------------------
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, event) -> None:
+        self._paint_book(event)
+        if self.picking:  # a note over the top of the book
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            text = "Click the page that is the front cover  (Esc to cancel)"
+            box = QRectF(0, 0, self.fontMetrics().horizontalAdvance(text) + 36, 34)
+            box.moveCenter(QPointF(self.width() / 2, 28))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 190))
+            p.drawRoundedRect(box, 17, 17)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _paint_book(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         p.fillRect(self.rect(), T.bg.darker(112))
@@ -380,6 +457,9 @@ class BookView(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or not self.ok:
             return
+        if self.picking:
+            self._pick_at(event.position())
+            return
         self.setFocus()
         pos = event.position()
         side = self._side_at(pos)
@@ -479,7 +559,9 @@ class BookView(QWidget):
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
-        if key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Space):
+        if self.picking and key == Qt.Key.Key_Escape:
+            self.pick_cover(False)
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Space):
             self.flip(1)
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp):
             self.flip(-1)
@@ -610,6 +692,91 @@ class PageBox(QLineEdit):
         event.accept()
 
 
+OVERLAY_BTN = 32  # the small round buttons in the book's top left corner
+
+
+def _overlay_painter(btn: QPushButton) -> tuple[QPainter, bool, QColor]:
+    """A painter for one of the three small buttons over the book: a soft dark round scrim, with the glyph (drawn on a 46 x 40 sheet by the
+    button) scaled down to sit in it. White, lighter when the pointer is over it; the accent colour when it is on. Returns (painter, on, colour)."""
+    p = QPainter(btn)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    on, over = btn.isChecked(), btn.underMouse()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(SCRIM[0], SCRIM[1], SCRIM[2], SCRIM_ALPHA_HOVER if over else SCRIM_ALPHA))
+    p.drawEllipse(QRectF(btn.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+    p.translate(btn.width() / 2, btn.height() / 2)
+    p.scale(0.72, 0.72)
+    p.translate(-23.0, -20.0)
+    colour = QColor(T.accent_text) if on else QColor(255, 255, 255, 255 if over else 205)
+    return p, on, colour
+
+
+class SplitPagesButton(QPushButton):
+    """A wide page with a line down the middle, for 'each PDF page is two pages side by side'. On: the wide pages are cut in two and shown
+    as separate pages. It starts on or off by itself (see pagesplit.looks_like_spreads); clicking it is the player's say."""
+
+    def __init__(self):
+        super().__init__()
+        self.setCheckable(True)
+        self.setFixedSize(OVERLAY_BTN, OVERLAY_BTN)
+        self.setStyleSheet("border: none; background: transparent;")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName("Split two-page scans")
+        self.setToolTip("Some scanned manuals have two pages side by side on every PDF page. When this is on, those are shown as two separate "
+                        "pages. It is switched on by itself when the manual looks like that; click to change it.")
+
+    def paintEvent(self, event) -> None:
+        p, on, colour = _overlay_painter(self)
+        cx = 23.0  # (drawn on a 46 x 40 sheet, scaled down by _overlay_painter)
+        sheet = QRectF(cx - 12, 9, 24, 17)
+        p.setPen(QPen(colour, 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(sheet, 2.5, 2.5)
+        if on:  # cut in two, the halves drawn apart
+            p.setBrush(QColor(colour.red(), colour.green(), colour.blue(), 50))
+            p.drawRoundedRect(QRectF(sheet.left(), sheet.top(), 10, sheet.height()), 2.5, 2.5)
+            p.drawRoundedRect(QRectF(sheet.right() - 10, sheet.top(), 10, sheet.height()), 2.5, 2.5)
+        else:
+            p.drawLine(QPointF(cx, sheet.top() + 1), QPointF(cx, sheet.bottom() - 1))
+        y = 32.0  # the arrows under it point outwards when split
+        d = 1 if on else -1
+        p.drawLine(QPointF(cx - 6 * d, y), QPointF(cx - 10 * d, y))
+        p.drawLine(QPointF(cx + 6 * d, y), QPointF(cx + 10 * d, y))
+        if on:
+            for s in (-1, 1):
+                p.drawLine(QPointF(cx + 10 * s, y), QPointF(cx + 7 * s, y - 2.5))
+                p.drawLine(QPointF(cx + 10 * s, y), QPointF(cx + 7 * s, y + 2.5))
+
+
+class CoverButton(QPushButton):
+    """A star: 'this is the front cover'. Click it, then click the page that is the cover. Lit when a cover has been marked; click it then
+    to go back to the first page being the cover."""
+
+    def __init__(self):
+        super().__init__()
+        self.setCheckable(True)  # checked: a cover is marked
+        self.setFixedSize(OVERLAY_BTN, OVERLAY_BTN)
+        self.setStyleSheet("border: none; background: transparent;")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName("Front cover")
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.setToolTip("You marked a different page as the front cover. Click to put it back to the first page." if self.isChecked() else
+                        "Mark the front cover: click here, then click the page that is the front cover. For scans that start with the back "
+                        "cover or the inside pages.")
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p, on, colour = _overlay_painter(self)
+        p.setPen(QPen(colour, 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(colour if on else Qt.BrushStyle.NoBrush)
+        cx, cy, r = 23.0, 21.0, 11.0
+        pts = [QPointF(cx + (r if k % 2 == 0 else r * 0.45) * math.sin(k * math.pi / 5), cy - (r if k % 2 == 0 else r * 0.45) * math.cos(k * math.pi / 5))
+               for k in range(10)]
+        p.drawPolygon(QPolygonF(pts))
+
+
 class ReadingOrderButton(QPushButton):
     """A small book with 本 on its cover and an arrow under it, to say which way the book is read. Off: the arrow points right (read left to
     right, the spine on the left). On: it points left and the spine moves to the right, as in a book read from the back."""
@@ -617,22 +784,18 @@ class ReadingOrderButton(QPushButton):
     def __init__(self):
         super().__init__()
         self.setCheckable(True)
-        self.setFixedSize(46, 40)
-        self.setStyleSheet("padding: 0;")
+        self.setFixedSize(OVERLAY_BTN, OVERLAY_BTN)
+        self.setStyleSheet("border: none; background: transparent;")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAccessibleName("Right to left")
         self.setToolTip("Read from right to left, for books read from the back (many Japanese manuals): the cover is on the left and "
                         "pages turn the other way.")
 
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        on = self.isChecked()
-        colour = QColor(T.accent_text if on else (T.title if self.underMouse() else T.fg2))
-        cx = self.width() / 2
+        p, on, colour = _overlay_painter(self)
+        cx = 23.0  # (drawn on a 46 x 40 sheet, scaled down by _overlay_painter)
         book = QRectF(cx - 8, 5, 16, 19)
-        p.setPen(QPen(colour, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setPen(QPen(colour, 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(book, 2.5, 2.5)
         spine = book.right() - 3.2 if on else book.left() + 3.2
@@ -656,7 +819,9 @@ class ManualDialog(FramelessDialog):
     def __init__(self, parent: QWidget, title: str, pdf: Path, store: gm.GameStore | None = None, key: str = ""):
         super().__init__(parent, f"Manual: {title}", "file", (1180, 800), (760, 560))
         self.store, self.key, self.pdf = store, key, pdf
-        self.book = BookView(pdf)
+        saved = store.setting(f"manual_split:{key}", "") if store is not None and key else ""
+        cover = ps.parse_cover(store.setting(f"manual_cover:{key}", "")) if store is not None and key else None
+        self.book = BookView(pdf, split={"1": "on", "0": "off"}.get(saved, "auto"), cover=cover)  # (nothing saved: it decides by itself)
         outer = self.content
         if not self.book.ok:
             note = hint("This PDF couldn't be opened. It may be damaged or protected with a password.", live=True)
@@ -686,19 +851,27 @@ class ManualDialog(FramelessDialog):
         self.jump.stepped.connect(lambda d: self.book.go_to_spread(self.book.spread + d))
         self.rtl = ReadingOrderButton()
         self.rtl.toggled.connect(self._rtl_changed)
+        self.split = SplitPagesButton()
+        self.split.setChecked(self.book.is_split())
+        self.split.toggled.connect(self._split_changed)
+        self.book.pagesChanged.connect(self._pages_changed)
+        self.star = CoverButton()
+        self.star.setChecked(cover is not None)
+        self.star.refresh()
+        self.star.clicked.connect(self._star_clicked)
+        self.book.coverChosen.connect(self._cover_chosen)
         bar.addWidget(prev)
         bar.addWidget(self.where)
         bar.addWidget(nxt)
         bar.addSpacing(12)
         bar.addWidget(self.jump)
         bar.addStretch(1)
-        bar.addWidget(self.rtl)
         # In the top right of the book itself: open the PDF elsewhere, and fill the screen with it (the full-screen square is the corner).
         self.open_btn = IconButton("external", "Open in your PDF viewer", 34, 18, filled=True, scrim=True)
         self.open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.pdf))))
         self.full_btn = IconButton("expand", "Full screen (F)", 34, 18, filled=True, scrim=True)
         self.full_btn.clicked.connect(self.toggle_full_screen)
-        for b in (self.open_btn, self.full_btn):
+        for b in (self.open_btn, self.full_btn, self.star, self.split, self.rtl):  # (the three small ones sit in the top left)
             b.setParent(self.book)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.book.installEventFilter(self)
@@ -724,6 +897,11 @@ class ManualDialog(FramelessDialog):
         x = self.book.width() - margin - self.full_btn.width()
         self.full_btn.move(x, margin)
         self.open_btn.move(x - gap - self.open_btn.width(), margin)
+        left = margin
+        for b in (self.star, self.split, self.rtl):  # top left, small and quiet
+            b.move(left, margin)
+            left += b.width() + 6
+            b.raise_()
         self.full_btn.raise_()
         self.open_btn.raise_()
 
@@ -786,6 +964,34 @@ class ManualDialog(FramelessDialog):
         self.book.set_rtl(on)
         if self.store is not None and self.key:
             self.store.set_setting(f"manual_rtl:{self.key}", "1" if on else "0")
+
+    def _star_clicked(self) -> None:
+        """Marked already: clear it. Not yet: wait for a click on the page that is the cover."""
+        if self.book.cover is not None:
+            self._set_cover(None)
+        else:
+            self.star.setChecked(False)
+            self.book.pick_cover(True)
+            self.book.setFocus()
+
+    def _cover_chosen(self, pdf_page: int, part: str) -> None:
+        self._set_cover((pdf_page, part))
+
+    def _set_cover(self, cover) -> None:
+        self.book.set_cover(cover)
+        self.star.setChecked(cover is not None)
+        self.star.refresh()
+        if self.store is not None and self.key:
+            self.store.set_setting(f"manual_cover:{self.key}", ps.cover_text(cover))
+
+    def _split_changed(self, on: bool) -> None:
+        self.book.set_split("on" if on else "off")
+        if self.store is not None and self.key:
+            self.store.set_setting(f"manual_split:{self.key}", "1" if on else "0")
+
+    def _pages_changed(self) -> None:
+        self.jump.setRange(1, self.book.pages)
+        self.jump.setToolTip(f"Page number (of {self.book.pages}): scroll the wheel over it to move through the book, or type a number")
 
     def _on_spread(self, spread: int) -> None:
         self.where.setText(self.book.label())
