@@ -92,21 +92,18 @@ class StructureTests(unittest.TestCase):
 
     def test_version_and_name(self):
         from distill.constants import APP_NAME, APP_VERSION
+        from distill.version import __version__
 
         self.assertEqual(APP_NAME, "Distill")
-        self.assertRegex(APP_VERSION, r"^v\d+\.\d+$")
+        self.assertRegex(APP_VERSION, r"^v\d+\.\d+(\.\d+)?$")  # v1.5.0: release tags carry three parts now
+        self.assertEqual(APP_VERSION, f"v{__version__}")
 
-    def test_pyproject_version_agrees_with_the_app_version(self):
-        """One number, two files: the window title / release tags use APP_VERSION, packaging metadata uses pyproject."""
-        import re
-
-        from distill.constants import APP_VERSION
-
+    def test_pyproject_reads_the_version_instead_of_copying_it(self):
+        """The packaging metadata derives its version from distill/version.py, so a release edits one number, not two."""
         text = (PKG.parent / "pyproject.toml").read_text(encoding="utf-8")
-        declared = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
-        self.assertIsNotNone(declared, "pyproject.toml has no version")
-        self.assertTrue(declared.group(1) == APP_VERSION[1:] or declared.group(1).startswith(APP_VERSION[1:] + "."),
-                        f"pyproject says {declared.group(1)}, distill/constants.py says {APP_VERSION}")
+        self.assertNotRegex(text, r'(?m)^version\s*=\s*"', "pyproject.toml keeps a second copy of the version")
+        self.assertRegex(text, r'(?m)^dynamic\s*=\s*\[[^]]*"version"')
+        self.assertRegex(text, r'(?m)^version\s*=\s*\{\s*attr\s*=\s*"distill\.version\.__version__"\s*\}')
 
     def test_bundled_assets_are_all_there(self):
         """A packaged build ships whatever is in distill/assets; a missing file only shows up as a plain-looking window."""

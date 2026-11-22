@@ -13,7 +13,7 @@ from . import constants
 
 BUNDLED_PACKAGES = ("py7zr", "libtorrent", "mutagen")  # PyInstaller can't see all these need: a packaged build without one is broken
 SEVENZIP_BACKENDS = ("bcj", "pyppmd", "pyzstd", "inflate64", "brotli", "Cryptodome", "multivolumefile", "texttable", "psutil")
-CATALOGS = ("emulators.json", "recomps.json")
+CATALOGS = {"emulators.json": "emulators", "recomps.json": "recomps"}  # file -> the key holding its real entries
 
 
 class Report:
@@ -37,14 +37,21 @@ class Report:
 
 
 def check_assets(report: Report) -> None:
+    """The data files a packaged build must carry. Each catalog is counted by the entries it holds, never by its
+    top-level keys: a file that parses but has no list, or an empty one, is a broken build and not a pass."""
     assets = constants.ASSETS_DIR
     report.note(assets.is_dir(), f"assets folder {assets}")
-    for name in CATALOGS:
+    for name, key in CATALOGS.items():
         try:
-            entries = json.loads((assets / name).read_text(encoding="utf-8"))
-            report.note(bool(entries), f"{name}: {len(entries)} entries")
+            data = json.loads((assets / name).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             report.note(False, f"{name}: {exc}")
+            continue
+        entries = data.get(key) if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            report.note(False, f"{name}: no '{key}' list")
+        else:
+            report.note(bool(entries), f"{name}: {len(entries)} entries")
 
 
 def check_packages(report: Report, frozen: bool) -> None:

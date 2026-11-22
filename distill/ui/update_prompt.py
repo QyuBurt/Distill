@@ -35,18 +35,24 @@ class UpdatePromptMixin:
     def _update_offer(self, update) -> None:
         if update is None or self._p_data.get("skip_update") == update.tag or getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
             return
-        can_install = bool(update.asset_url)
+        can_install = update.installable  # the packaged Windows builds swap themselves; anything else installs by hand
+        can_download = bool(update.asset_url)
+        first = "Update now" if can_install else "Download" if can_download else "Open page"
+        informative = ("Install it now? Distill restarts when it is done; your settings and tools are kept." if can_install
+                       else update.message or "Open the download page?")
         choice, _tick = msgbox.ask(
             self, "info", "Update available", f"<b>{APP_NAME} {update.tag}</b> is available (you have {APP_VERSION}).",
-            [("Update now" if can_install else "Open page", "accept"), ("Not now", "normal"), ("Skip this version", "destructive")],
-            default=0, escape=1,
-            informative=("Install it now? Distill restarts when it is done; your settings and tools are kept." if can_install else "Open the download page?"),
+            [(first, "accept"), ("Not now", "normal"), ("Skip this version", "destructive")],
+            default=0, escape=1, informative=informative,
             details=update.notes.strip(), markdown=True, details_open=True, details_label="release notes")  # the GitHub release text, drawn as Markdown
         if choice == 2:
             self._p_data["skip_update"] = update.tag
             self._settings_save()
         elif choice == 0:
-            self._update_install(update) if can_install else QDesktopServices.openUrl(QUrl(update.page))
+            if can_install or can_download:
+                self._update_install(update)
+            else:
+                QDesktopServices.openUrl(QUrl(update.page))
 
     def _update_install(self, update) -> None:
         if getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
@@ -78,6 +84,10 @@ class UpdatePromptMixin:
                     screen.dismiss()
                 else:
                     fail(str(result))
+                return
+            if not update.installable:  # no in-place installer here: the verified file is handed over instead
+                screen.dismiss()
+                self._update_downloaded(update, result)
                 return
             screen.set_installing()  # the logo stays where the download left it; the install window carries on from there
             try:
@@ -111,6 +121,16 @@ class UpdatePromptMixin:
         self._upd.downloaded.connect(on_done)
         threading.Thread(target=work, daemon=True).start()
         screen.show()
+
+    def _update_downloaded(self, update, path) -> None:
+        """A platform with no in-place installer gets the downloaded, checksum-verified file handed over as it is."""
+        choice, _tick = msgbox.ask(
+            self, "info", "Update downloaded",
+            f"<b>{update.asset_name}</b> was downloaded and its checksum matches the release.",
+            [("Open folder", "accept"), ("Close", "normal")], default=0, escape=1,
+            informative=f"{path}\n\nInstall it the way you installed Distill.")
+        if choice == 0:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 
     def _update_preview(self) -> None:
         """The update screen with a made-up download and install, for looking at it (and trying Cancel) without a release."""
