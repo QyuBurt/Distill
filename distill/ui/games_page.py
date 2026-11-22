@@ -1917,7 +1917,7 @@ class GamesMixin:
                     self._gm_pending.discard("shots")
                     self._gm_show_shots(g, mm.cached_screenshots(key))  # (none found: the placeholders go)
                 elif kind in ("disc", "cart") and payload and kind == mm.media_kind(g.system):
-                    self.gmd_stage.set_media(kind, QPixmap(str(payload)))
+                    self.gmd_stage.set_media(kind, QPixmap(str(payload)), g.system)
                 elif kind == "ra" and self._gm_ra_mode == "loading":
                     self._gm_show_ra(*payload)
                 self._gm_update_fetch()
@@ -2732,7 +2732,7 @@ class GamesMixin:
         if not kind:
             return
         if (saved := mm.cached_media_art(key, kind)) is not None:
-            self.gmd_stage.set_media(kind, QPixmap(str(saved)))
+            self.gmd_stage.set_media(kind, QPixmap(str(saved)), g.system)
             return
         if mm.art_state(key, kind) == "none":
             self._gm_pending.add(kind)

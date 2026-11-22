@@ -2333,6 +2333,71 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual((stage.width(), stage.height()), (220, 314))
         stage.close()
 
+    def test_cover_stage_sizes_media_per_platform_and_turns_only_the_disc_in_a_umd(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+        from PySide6.QtWidgets import QLabel
+
+        from distill.ui.games_widgets import CoverStage
+        from distill.ui.motion import Motion
+
+        self.addCleanup(setattr, Motion, "reduce", Motion.reduce)
+
+        def plain(w: int, h: int) -> QPixmap:
+            img = QImage(w, h, QImage.Format.Format_ARGB32)
+            img.fill(QColor("#4488cc"))
+            return QPixmap.fromImage(img)
+
+        def umd(n: int = 400) -> QPixmap:  # a pale rounded shell with a dark round disc in it
+            img = QImage(n, n, QImage.Format.Format_ARGB32)
+            img.fill(Qt.GlobalColor.transparent)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor("#e6e6e6"))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(4, 4, n - 8, n - 8, 30, 30)
+            p.setBrush(QColor("#223355"))
+            p.drawEllipse(int(n * 0.05), int(n * 0.05), int(n * 0.9), int(n * 0.9))
+            p.end()
+            return QPixmap.fromImage(img)
+
+        def stage_for(kind: str, system: str, art: QPixmap, cw: int = 220, ch: int = 314):
+            cover = QLabel()
+            cover.setFixedSize(cw, ch)
+            stage = CoverStage(cover)
+            stage.set_media(kind, art, system)
+            return stage
+
+        # a disc's size follows its case: PS1 > PS2 > GameCube
+        d = {s: stage_for("disc", s, plain(300, 300), 220, 220).width() - 220 for s in ("PlayStation", "PlayStation 2", "GameCube")}
+        self.assertGreater(d["PlayStation"], d["PlayStation 2"])
+        self.assertGreater(d["PlayStation 2"], d["GameCube"])
+        # a Switch card is much narrower than an NES cart, but never vanishingly small
+        sw, nes = (stage_for("cart", s, plain(200, 220), 220, 314) for s in ("Switch", "NES"))
+        self.assertLess(sw.height(), nes.height())
+        self.assertGreaterEqual(sw._size[0], 56)
+
+        # a PSP: the shell sticks out to the right and stays put; the disc cut out of it is what turns
+        Motion.reduce = False
+        psp = stage_for("disc", "PSP", umd(), 220, 314)
+        self.assertEqual(psp._shape, "umd")
+        self.assertIsNotNone(psp._disc_pix)
+        self.assertEqual(psp.width(), 220 + psp._size[0] // 2)
+        cx, cy, r = psp._umd_disc
+        self.assertAlmostEqual(cx, 200, delta=12)
+        self.assertAlmostEqual(r, 180, delta=14)
+        psp.show()
+        self.assertTrue(psp._timer.isActive())
+        before = psp._angle
+        psp._advance(1.0)
+        self.assertNotEqual(psp._angle, before)
+        self.assertTrue(psp._on_disc(psp._centre()))  # the disc can be grabbed and thrown like any other
+        psp.close()
+        # a UMD picture with no round disc to find is hidden
+        none = stage_for("disc", "PSP", plain(300, 300))
+        self.assertEqual((none.media_kind(), none.width()), ("", 220))
+        none.close()
+
     def test_games_page_shows_background_screenshots_and_achievements(self):
         import tempfile
         from pathlib import Path

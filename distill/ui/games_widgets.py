@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QPlainT
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .. import games as gm
+from .. import mediashape as shape
 from . import fillmath, icons, motion, shimmermath
 from .shimmer import paint_band
 from .emu_cards import SourceChip, clear_layout
@@ -653,6 +654,12 @@ class CoverStage(QWidget):
         cover.setParent(self)
         cover.move(0, 0)
         self._kind = ""
+        self._shape = ""  # what is drawn: "disc", "cart" or "umd" (a PSP disc in its shell: the disc turns, the shell stays)
+        self._spec_scale = 0.0  # its size, from mediashape (0 = the class defaults)
+        self._umd_disc: tuple[float, float, float] | None = None  # the disc inside a UMD picture: centre x, y and radius, in the picture's pixels
+        self._disc_pix: QPixmap | None = None  # the turning disc cut out of a UMD picture
+        self._disc_c = QPointF(0, 0)  # its centre inside the shell, and its radius, in logical pixels
+        self._disc_r = 0.0
         self._source: QPixmap | None = None
         self._pix: QPixmap | None = None  # the picture at the size it is drawn
         self._size = (0, 0)  # what it is drawn at, in logical pixels
@@ -677,12 +684,21 @@ class CoverStage(QWidget):
         self._timer.timeout.connect(self._tick)
         self.sync()
 
-    def set_media(self, kind: str, pix: QPixmap | None) -> None:
+    def set_media(self, kind: str, pix: QPixmap | None, system: str = "") -> None:
         """Show `kind` ('disc' or 'cart') with this picture, or nothing (kind '' or no picture). A cartridge must have see-through corners to
-        look right, so one without them is not shown; a disc without them is cut round."""
+        look right, so one without them is not shown; a disc without them is cut round. `system` sets the media's size against the cover
+        (a GameCube disc is smaller than a PS1 one, a PS2 disc looks smaller in its taller case) and makes a PSP's picture a UMD."""
         if not kind or pix is None or pix.isNull() or (kind == "cart" and not pix.hasAlphaChannel()):
             kind, pix = "", None
         self._kind, self._source = kind, pix
+        spec = shape.known_spec(system) if kind else None
+        if spec is not None and (spec.shape == "cart") != (kind == "cart"):
+            spec = None  # (a system whose table entry does not match the picture's kind: use the defaults)
+        self._shape = spec.shape if spec else kind
+        self._spec_scale = spec.scale if spec else 0.0
+        self._umd_disc = self._find_umd_disc(pix) if self._shape == "umd" and pix is not None else None
+        if self._shape == "umd" and self._umd_disc is None:  # no disc in the picture: the UMD stays hidden
+            self._kind, self._source, self._shape, self._spec_scale = "", None, "", 0.0
         self._angle, self._speed, self._held = 0.0, self.DEGREES_PER_SECOND, False
         self._cart_reset()
         self.unsetCursor()
@@ -696,12 +712,17 @@ class CoverStage(QWidget):
         cw, ch = self._cover.width(), self._cover.height()
         dpr = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
         self._pix, self._size, right, self._top = None, (0, 0), 0, 0
+        self._disc_pix = None
         if self._source is not None and cw > 0 and ch > 0:
-            if self._kind == "disc":
-                d = max(8, round(ch * self.DISC_SCALE))
+            if self._shape == "umd":
+                right = self._sync_umd(cw, ch, dpr)
+            elif self._kind == "disc":
+                d = max(8, round(ch * (self._spec_scale or self.DISC_SCALE)))
                 self._pix, self._size, right = self._round(self._source, d, dpr), (d, d), d // 2
             else:
-                w = max(8, round(cw * self.CART_SCALE))
+                w = max(8, round(cw * (self._spec_scale or self.CART_SCALE)))
+                if self._spec_scale:
+                    w = max(shape.MIN_CART_PX, w)
                 h = max(8, round(w * self._source.height() / max(1, self._source.width())))
                 self._pix = self._source.scaled(round(w * dpr), round(h * dpr), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 self._pix.setDevicePixelRatio(dpr)
@@ -712,6 +733,60 @@ class CoverStage(QWidget):
             self.on_top_pad(self._top)
         self._run(self.isVisible())
         self.update()
+
+    @staticmethod
+    def _find_umd_disc(pix: QPixmap) -> tuple[float, float, float] | None:
+        """Where the round disc is inside a picture of a whole UMD (its shell and the disc), in the picture's own pixels; None when it cannot
+        be told (then the UMD is shown still)."""
+        img = pix.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        k = max(1, max(img.width(), img.height()) // 400)  # (a smaller copy is plenty to find a circle)
+        if k > 1:
+            img = img.scaled(img.width() // k, img.height() // k, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+        data, bpl = bytes(img.constBits()), img.bytesPerLine()
+
+        def dark(x: int, y: int) -> bool:  # the disc is dark or coloured; the shell is pale grey and the background white or see-through
+            i = y * bpl + x * 4
+            b, g, r, a = data[i], data[i + 1], data[i + 2], data[i + 3]
+            return a > 128 and (0.3 * r + 0.59 * g + 0.11 * b < 165 or max(r, g, b) - min(r, g, b) > 40)
+
+        found = shape.find_disc(img.width(), img.height(), dark)
+        return None if found is None else (found[0] * k, found[1] * k, found[2] * k)
+
+    def _sync_umd(self, cw: int, ch: int, dpr: float) -> int:
+        """Size a UMD: the shell as a share of the cover's height; the disc in it is cut out to turn on its own. Returns how far it sticks out."""
+        src = self._source
+        side = min(round(ch * 0.9), max(shape.MIN_UMD_PX, round(ch * self._spec_scale)))
+        w = max(8, side)
+        h = max(8, round(w * src.height() / max(1, src.width())))
+        k = w / max(1, src.width())  # logical pixels per pixel of the picture
+        shell = src.scaled(round(w * dpr), round(h * dpr), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        shell.setDevicePixelRatio(dpr)
+        self._pix, self._size = shell, (w, h)
+        if self._umd_disc is not None:
+            cx, cy, r = (v * k for v in self._umd_disc)
+            r = max(4.0, r - 1.5)  # (a hair inside the disc's rim, so the shell's own rim stays drawn and no pale edge shows)
+            d = max(8, round(2 * r * dpr))
+            cut = QPixmap(d, d)
+            cut.fill(Qt.GlobalColor.transparent)
+            q = QPainter(cut)
+            q.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+            clip = QPainterPath()
+            clip.addEllipse(QRectF(0, 0, d, d))
+            q.setClipPath(clip)
+            q.drawPixmap(QPointF(0, 0), shell, QRectF(cx * dpr - d / 2, cy * dpr - d / 2, d, d))
+            q.end()
+            cut.setDevicePixelRatio(dpr)
+            self._disc_pix, self._disc_c, self._disc_r = cut, QPointF(cx, cy), d / dpr / 2
+        return w // 2
+
+    def _umd_origin(self) -> QPointF:
+        """Where the UMD's top left corner is: its middle on the cover's right edge, half behind the cover."""
+        w, h = self._size
+        return QPointF(self._cover.width() - w / 2, self._top + self._cover.height() / 2 - h / 2)
+
+    def _spins(self) -> bool:
+        """Whether something is turning: a disc, or the disc inside a UMD (a UMD that could not be read is shown still)."""
+        return self._kind == "disc" and self._pix is not None and (self._shape != "umd" or self._disc_pix is not None)
 
     @staticmethod
     def _round(source: QPixmap, d: int, dpr: float) -> QPixmap:
@@ -740,6 +815,9 @@ class CoverStage(QWidget):
         """Where the disc changes from one frame to the next: the half that sticks out to the right. The other half is under the cover, and
         asking for it to be repainted would repaint the cover too, on every frame."""
         d = self._size[0]
+        if self._shape == "umd":
+            o = self._umd_origin()
+            return QRect(self._cover.width(), int(o.y()) - 1, d // 2 + 2, self._size[1] + 3)
         return QRect(self._cover.width(), self._top + self._cover.height() // 2 - d // 2 - 1, d // 2 + 2, d + 2)
 
     def _frame_ms(self) -> int:
@@ -749,7 +827,7 @@ class CoverStage(QWidget):
     def _run(self, on: bool) -> None:
         """Run only while something is moving: a disc is on screen, or a cartridge is springing back. Not at all when motion is reduced
         (it is then shown still)."""
-        spin = on and self._pix is not None and motion.on() and (self._kind == "disc" or (self._kind == "cart" and self._cart_anim))
+        spin = on and self._pix is not None and motion.on() and (self._spins() or (self._kind == "cart" and self._cart_anim))
         if spin and not self._timer.isActive():
             self._last = time.monotonic()
             self._timer.start(self._frame_ms())
@@ -779,12 +857,14 @@ class CoverStage(QWidget):
 
     # ---- the easter egg: grab the disc and throw it ------------------------------------------------------------
     def _centre(self) -> QPointF:
+        if self._shape == "umd":
+            return self._umd_origin() + self._disc_c
         return QPointF(self._cover.width(), self._top + self._cover.height() / 2)
 
     def _on_disc(self, pos: QPointF) -> bool:
-        if self._kind != "disc" or self._pix is None or not motion.on():
+        if not self._spins() or not motion.on():
             return False
-        c, r = self._centre(), self._size[0] / 2
+        c, r = self._centre(), (self._disc_r if self._shape == "umd" else self._size[0] / 2)
         return (pos.x() - c.x()) ** 2 + (pos.y() - c.y()) ** 2 <= r * r
 
     def _pointer_angle(self, pos: QPointF) -> float:
@@ -933,7 +1013,14 @@ class CoverStage(QWidget):
         p = QPainter(self)
         p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         w, h = self._size
-        if self._kind == "disc":
+        if self._shape == "umd":
+            o = self._umd_origin()
+            p.drawPixmap(o, self._pix)  # the shell stays where it is
+            if self._disc_pix is not None:
+                p.translate(o + self._disc_c)
+                p.rotate(self._angle)  # only the disc inside it turns
+                p.drawPixmap(QPointF(-self._disc_r, -self._disc_r), self._disc_pix)
+        elif self._kind == "disc":
             p.translate(self._cover.width(), self._top + self._cover.height() / 2)  # the disc's centre is on the cover's right edge: half behind it
             p.rotate(self._angle)
             p.drawPixmap(QPointF(-w / 2, -h / 2), self._pix)

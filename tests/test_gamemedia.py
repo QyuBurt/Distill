@@ -197,7 +197,8 @@ class DiscAndCartTests(MediaCase):
     def test_which_systems_get_which(self):
         self.assertEqual([mm.media_kind(s) for s in ("PlayStation", "GameCube", "Sega Saturn", "Dreamcast")], ["disc"] * 4)
         self.assertEqual([mm.media_kind(s) for s in ("NES", "SNES", "Nintendo 64", "Game Boy", "Mega Drive", "Switch")], ["cart"] * 6)
-        self.assertEqual([mm.media_kind(s) for s in ("PSP", "Famicom Disk System", "PC", "", "Unknown")], [""] * 5)
+        self.assertEqual(mm.media_kind("PSP"), "disc")  # a UMD: its shell stays still, the disc in it turns
+        self.assertEqual([mm.media_kind(s) for s in ("Famicom Disk System", "PC", "", "Unknown")], [""] * 4)
 
     def _fake_get(self, calls):
         def fake_get(url, token="", accept="", timeout=20):

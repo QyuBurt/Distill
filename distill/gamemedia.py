@@ -329,15 +329,15 @@ def fetch_recomp_banner(r: rc.Recomp, sgdb_key: str = "", retry: bool = False) -
 
 # ---- the game's own disc or cartridge, for the page's cover ---------------------------------------------------------
 DISC_SYSTEMS = frozenset({"3DO", "Dreamcast", "GameCube", "PC Engine CD", "PlayStation", "PlayStation 2", "PlayStation 3", "PlayStation 4",
-                          "PlayStation 5", "Sega CD", "Sega Saturn", "Wii", "Wii U", "Xbox", "Xbox 360", "Xbox One"})
+                          "PlayStation 5", "PSP", "Sega CD", "Sega Saturn", "Wii", "Wii U", "Xbox", "Xbox 360", "Xbox One"})  # (PSP: a UMD, drawn as a still shell with a turning disc)
 CART_SYSTEMS = frozenset({"Atari 2600", "Atari 7800", "Atari Lynx", "Game Boy", "Game Boy Advance", "Game Boy Color", "Game Gear", "Master System",
                           "Mega Drive", "NES", "Neo Geo Pocket", "Nintendo 3DS", "Nintendo 64", "Nintendo DS", "PC Engine", "SNES", "Switch",
                           "Virtual Boy", "WonderSwan"})
 
 
 def media_kind(system: str) -> str:
-    """'disc' for a system whose games come on discs, 'cart' for cartridges and cards, '' for anything else (PC, handhelds with their own
-    media such as the PSP's UMD, floppy-based systems, or an unknown system), which get no extra picture."""
+    """'disc' for a system whose games come on discs (the PSP's UMD too), 'cart' for cartridges and cards, '' for anything else (PC,
+    floppy-based systems, or an unknown system), which get no extra picture. How big each is next to its case: see mediashape.py."""
     return "disc" if system in DISC_SYSTEMS else "cart" if system in CART_SYSTEMS else ""
 
 
