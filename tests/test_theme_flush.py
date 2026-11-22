@@ -3,16 +3,16 @@ import unittest
 from distill.ui.theme import T
 
 
-class _Gone:
-    """Stands in for a widget whose Qt object was deleted while its Python wrapper is still alive."""
+class _Root:
+    """Stands in for a page whose isAncestorOf is asked about a widget whose Qt object was deleted while its Python wrapper is still alive."""
 
-    def isAncestorOf(self, _w):
+    def isAncestorOf(self, _widget):
         raise RuntimeError("Internal C++ object (QFrame) already deleted.")
 
 
 class FlushTests(unittest.TestCase):
     def test_flush_skips_a_widget_whose_qt_object_is_gone(self):
-        gone, root = _Gone(), object()
+        gone, root = object(), _Root()
         T._bound[id(gone)] = (lambda: gone, lambda: None)
         T._stale.add(id(gone))
         self.addCleanup(T._bound.pop, id(gone), None)
